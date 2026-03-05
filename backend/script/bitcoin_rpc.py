@@ -22,6 +22,13 @@ def _build_base_args(section):
 
     args = [cli_bin]
 
+    # Datadir — resolve relative paths from this file's directory
+    datadir = section.get("datadir", "").strip()
+    if datadir:
+        if not os.path.isabs(datadir):
+            datadir = os.path.join(os.path.dirname(os.path.abspath(__file__)), datadir)
+        args.append(f"-datadir={datadir}")
+
     network_flags = {
         "regtest": "-regtest",
         "testnet": "-testnet",
