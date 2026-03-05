@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react'
 import styles from './LoadingScreen.module.css'
 
 const MESSAGES = [
-  'Parsing descriptor',
-  'Fetching transactions',
-  'Scanning UTXO set',
-  'Running heuristics',
+  'Resolving descriptors',
+  'Deriving addresses',
+  'Importing & scanning blockchain',
+  'Loading transaction history',
+  'Running vulnerability detectors',
 ]
 
 export default function LoadingScreen({ descriptor }) {
