@@ -1,0 +1,18 @@
+[package]
+name = "stealth-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+stealth-bitcoincore = { path = "../stealth-bitcoincore" }
+stealth-core = { path = "../stealth-core" }
+tokio.workspace = true
+tower-http = { version = "0.6", features = ["cors"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
