@@ -1,140 +1,183 @@
 # Stealth
 
-A privacy audit tool for Bitcoin wallets. Stealth analyzes the transaction history of a wallet descriptor and surfaces privacy findings from real on-chain heuristics.
+A privacy auditing tool for Bitcoin wallets.
+
+Stealth analyzes wallet behavior using real-world blockchain heuristics and surfaces privacy risks that are often invisible to users.
+
+## Why this matters
+
+Bitcoin users often unknowingly leak sensitive information through common transaction patterns such as address reuse, input clustering, and change detection.
+
+These leaks can:
+
+- Expose wallet balances
+- Link identities across transactions
+- Reveal behavioral patterns over time
+- Compromise the privacy of activists, journalists, and everyday users
+
+While these heuristics are widely used in blockchain analysis, they are rarely accessible to the users themselves.
+
+**Stealth makes these risks visible.**
+
+Stealth aims to become a foundational privacy auditing layer for Bitcoin wallets and tools. By making privacy risks understandable and actionable, it helps users take control of their on-chain footprint before those leaks become irreversible.
+
+## Status
+
+Stealth is currently transitioning from a controlled regtest environment to real-world mainnet support.
+
+The immediate focus is enabling analysis of real wallet data using a local Bitcoin node.
+
+## Project Direction
+
+Stealth is evolving into a modular privacy heuristics engine for Bitcoin.
+
+The long-term goal is to:
+
+- Provide a reusable analysis engine for wallet developers
+- Integrate with tools like Bitcoin wallets and node-based clients
+- Enable privacy-preserving analysis using a local Bitcoin node
+
+The project is also moving towards a Rust-based core for performance and portability.
 
 ## What it does
 
-Paste a Bitcoin wallet descriptor into the input screen and click **Analyze**. Stealth derives addresses from the descriptor, scans wallet-related chain history, and returns a report with structured `findings` and `warnings`.
+Stealth takes a Bitcoin wallet descriptor as input and analyzes its transaction history (initially in controlled environments, moving towards full mainnet support).
 
-## Detection taxonomy (ground truth)
+The report includes:
 
-Stealth's source-of-truth detector is [`backend/script/detect.py`](backend/script/detect.py). The frontend renders the `type` values emitted by that script.
+- `findings`: confirmed privacy leaks
+- `warnings`: potential risks or patterns
+- Severity levels (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`)
+- Structured evidence for each issue
+
+Stealth is designed to work with real wallet data and highlight privacy risks based on observed on-chain behavior.
+
+## Example risks detected
+
+Stealth identifies real-world privacy issues such as:
+
+- **Address reuse** → links transactions and balances
+- **Common Input Ownership (CIOH)** → links multiple addresses to the same entity
+- **Change detection** → reveals wallet structure
+- **Dust attacks and spending patterns** → cluster linking
+- **Script type mixing** → strong wallet fingerprinting
+- **UTXO consolidation** → merges previously separate histories
+- **Behavioral fingerprinting** → consistent transaction patterns over time
+
+## Detection taxonomy
+
+Stealth's source-of-truth detector is:
+
+```
+backend/script/detect.py
+```
 
 ### Finding types
 
-| Type | Meaning |
-|---|---|
-| `ADDRESS_REUSE` | Address received funds in multiple transactions, linking history and balances. |
-| `CIOH` | Multi-input linkage (Common Input Ownership Heuristic) across co-spent inputs. |
-| `DUST` | Dust output detection (current or historical). |
-| `DUST_SPENDING` | Dust input spent with normal inputs, actively linking clusters. |
-| `CHANGE_DETECTION` | Change output appears trivially identifiable through heuristics. |
-| `CONSOLIDATION` | UTXO created from many-input consolidation transaction. |
-| `SCRIPT_TYPE_MIXING` | Mixed input script families in one spend (strong fingerprint). |
-| `CLUSTER_MERGE` | Inputs from previously separate funding chains merged in one tx. |
-| `UTXO_AGE_SPREAD` | Large age spread across UTXOs reveals dormancy/lookback patterns. |
-| `EXCHANGE_ORIGIN` | Probable exchange batch-withdrawal origin. |
-| `TAINTED_UTXO_MERGE` | Tainted and clean inputs merged, propagating taint. |
-| `BEHAVIORAL_FINGERPRINT` | Consistent transaction behavior reveals wallet/user fingerprint. |
+| Type                     | Meaning                                         |
+| ------------------------ | ----------------------------------------------- |
+| `ADDRESS_REUSE`          | Address received funds in multiple transactions |
+| `CIOH`                   | Multi-input linkage across co-spent inputs      |
+| `DUST`                   | Dust output detection                           |
+| `DUST_SPENDING`          | Dust inputs linking clusters                    |
+| `CHANGE_DETECTION`       | Identifiable change output                      |
+| `CONSOLIDATION`          | Many-input transaction merging UTXOs            |
+| `SCRIPT_TYPE_MIXING`     | Mixed script types in one spend                 |
+| `CLUSTER_MERGE`          | Previously separate funding chains merged       |
+| `UTXO_AGE_SPREAD`        | Reveals dormancy and timing patterns            |
+| `EXCHANGE_ORIGIN`        | Likely exchange withdrawal origin               |
+| `TAINTED_UTXO_MERGE`     | Tainted inputs propagating risk                 |
+| `BEHAVIORAL_FINGERPRINT` | Consistent identifiable patterns                |
 
-### Warning-only types
+### Warning types
 
-| Type | Meaning |
-|---|---|
-| `DORMANT_UTXOS` | Dormant/aged UTXO pattern warning. |
-| `DIRECT_TAINT` | Direct receipt from a known risky source. |
-
-`severity` values are emitted as uppercase strings (for example `LOW`, `MEDIUM`, `HIGH`, and `CRITICAL`).
+| Type            | Meaning                          |
+| --------------- | -------------------------------- |
+| `DORMANT_UTXOS` | Dormant funds pattern            |
+| `DIRECT_TAINT`  | Direct exposure to risky sources |
 
 ## How to use
 
-1. Open the application.
-2. On the first screen, paste your wallet descriptor into the input field.
-   - Supported formats: `wpkh(...)`, `pkh(...)`, `sh(wpkh(...))`, `tr(...)`, and multisig variants.
-3. Click **Analyze**.
-4. Review the results:
-   - Summary counters for findings, warnings, and transactions analyzed.
-   - Collapsible finding/warning cards with type, severity, description, and structured evidence.
+1. Open the application
+2. Paste a wallet descriptor (`wpkh(...)`, `tr(...)`, etc.)
+3. Click **Analyze**
+4. Review:
+   - Findings and warnings
+   - Severity levels
+   - Structured explanations
+
+## Roadmap
+
+### Short term
+
+- [ ] Rewrite the analysis engine in Rust, replacing the current multi-language implementation
+- [ ] Add support for analyzing real wallet data using a local Bitcoin node (mainnet)
+
+### Medium term
+
+- [ ] Enable integration with wallet ecosystems (e.g. BDK-based wallets)
+- [ ] Expose the analysis engine as a reusable library
+
+### Long term
+
+- [ ] Enable external clients (e.g. wallets, tools like am-i-exposed)
+- [ ] Integrate with Floresta
 
 ## Installation
 
 ### Prerequisites
 
-| Dependency | Version | Purpose |
-|---|---|---|
-| [Bitcoin Core](https://bitcoincore.org/en/download/) | ≥ 26 | Local regtest node |
-| Python | ≥ 3.10 | Analysis engine (`detect.py`) |
-| Java | 21 | Quarkus backend |
-| Node.js + yarn | ≥ 18 | React frontend |
+| Dependency     | Version | Purpose         |
+| -------------- | ------- | --------------- |
+| Bitcoin Core   | ≥ 26    | Local node      |
+| Python         | ≥ 3.10  | Analysis engine |
+| Java           | 21      | Backend         |
+| Node.js + yarn | ≥ 18    | Frontend        |
 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/LORDBABUINO/stealth.git
+git clone https://github.com/stealth-bitcoin/stealth.git
 cd stealth
 ```
 
-### 2. Configure the blockchain connection
+### 2. Configure blockchain connection
 
-Edit `backend/script/config.ini` to match your node:
+Edit:
 
-```ini
-[bitcoin]
-network = regtest
-cli = bitcoin-cli
-
-# Data directory — matches setup.sh (relative to config.ini location)
-datadir = bitcoin-data
-
-# Optional RPC overrides (leave blank to use cookie auth from the datadir)
-rpchost =
-rpcport =
-rpcuser =
-rpcpassword =
+```
+backend/script/config.ini
 ```
 
-### 3. Bootstrap Bitcoin Core (regtest)
+### 3. Development setup (regtest)
+
+A regtest environment is provided for development and reproducible testing of heuristics.
 
 ```bash
 cd backend/script
-./setup.sh          # starts bitcoind, creates wallets, mines 110 blocks
+./setup.sh
 ```
 
-Pass `--fresh` to wipe the chain and start from genesis.
-
-### 4. Generate vulnerable transactions (required before using the app)
+### 4. Generate sample transactions
 
 ```bash
 python3 reproduce.py
 ```
 
-This script sends transactions between the test wallets to reproduce all 12 detector finding types. **The application will return no findings without this step**, since a freshly mined chain has no transaction history to analyze.
-
-After it runs, get a descriptor to paste into the app:
-
-```bash
-bitcoin-cli -datadir=bitcoin-data -regtest -rpcwallet=alice listdescriptors | python3 -c \
-  "import sys,json; d=json.load(sys.stdin)['descriptors']; print(d[0]['desc'])"
-```
-
-Copy the output and use it as the descriptor in the application.
-
-### 5. Start the backend
+### 5. Start backend
 
 ```bash
 cd backend/src/StealthBackend
 ./mvnw quarkus:dev
 ```
 
-The API will be available at `http://localhost:8080`.
-
-### 6. Start the frontend
+### 6. Start frontend
 
 ```bash
 cd frontend
 yarn install
 yarn dev
 ```
-
-Open `http://localhost:5173` in your browser.
-
-## Running
-
-1. Paste a wallet descriptor into the input field (e.g. `wpkh([fp/84h/0h/0h]xpub.../0/*)`).
-2. Click **Analyze** — the frontend calls `GET /api/wallet/scan?descriptor=…` on the backend, which runs `detect.py` against your local regtest node.
-3. Review the report:
-   - `findings[]` and `warnings[]` entries each include `type`, `severity`, `description`, and optional `details`.
-   - The summary panel shows `findings`, `warnings`, and whether the scan is `clean`.
 
 ## Project structure
 
@@ -159,4 +202,8 @@ stealth/
 
 ## Privacy notice
 
-Stealth does **not** store, log, or transmit your wallet descriptor or any derived keys. All analysis is read-only and uses publicly available on-chain data. However, querying a third-party node or API for your transaction history may itself reveal your addresses to that service. For maximum privacy, point the backend at your own Bitcoin node.
+Stealth follows a local-first approach.
+
+It is designed to run on top of a user's own Bitcoin node, avoiding the need to share sensitive wallet data with third-party services or external APIs.
+
+This ensures that wallet analysis can be performed without leaking addresses, descriptors, or behavioral patterns.
