@@ -1,0 +1,28 @@
+[package]
+name = "stealth-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "HTTP transport for Stealth wallet privacy analysis"
+categories = ["cryptography::cryptocurrencies", "web-programming::http-server"]
+keywords = ["bitcoin", "privacy", "api", "wallet"]
+readme = "README.md"
+
+[dependencies]
+axum = { workspace = true }
+corepc-client = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+stealth-core = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+http-body-util = "0.1.3"
+reqwest = { version = "0.12.9", default-features = false, features = ["json", "rustls-tls"] }
+tower = { version = "0.5.2", features = ["util"] }
