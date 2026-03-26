@@ -1,0 +1,17 @@
+[package]
+name = "stealth-model"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Domain model types for Stealth wallet privacy analysis"
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["bitcoin", "privacy", "utxo"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+bitcoin = { workspace = true }
