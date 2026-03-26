@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "model",
+    "engine",
 ]
 resolver = "2"
 

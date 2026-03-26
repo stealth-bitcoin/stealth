@@ -1,0 +1,30 @@
+[package]
+name = "stealth-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Detects and reproduces Bitcoin UTXO privacy vulnerabilities"
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["bitcoin", "privacy", "utxo", "chain-analysis"]
+readme = "README.md"
+
+[features]
+default = ["std"]
+std = ["bitcoin/std"]
+
+[dependencies]
+bitcoin = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+stealth-model = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+corepc-node = { workspace = true }
+stealth-bitcoincore = { path = "../bitcoincore" }
+
+[lints.rust]
+missing_debug_implementations = "deny"
