@@ -2,6 +2,7 @@
 members = [
     "model",
     "bitcoincore",
+    "engine",
 ]
 resolver = "2"
 
