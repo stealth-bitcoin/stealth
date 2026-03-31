@@ -140,9 +140,7 @@ impl TxGraph {
             })
             .collect();
 
-        // Add ALL derived addresses to `our_addrs` and `addr_map`, matching
-        // the Python reference (`our_addrs = set(addr_map.keys())` where
-        // `addr_map` contains every address derived from the descriptors).
+        // Add ALL derived addresses to `our_addrs` and `addr_map`
         for addr in &history.derived_addresses {
             our_addrs.insert(addr.clone());
             addr_map.entry(addr.clone()).or_insert_with(|| AddressInfo {
