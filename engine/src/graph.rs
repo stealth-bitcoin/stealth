@@ -140,6 +140,18 @@ impl TxGraph {
             })
             .collect();
 
+        // Add ALL derived addresses to `our_addrs` and `addr_map`, matching
+        // the Python reference (`our_addrs = set(addr_map.keys())` where
+        // `addr_map` contains every address derived from the descriptors).
+        for addr in &history.derived_addresses {
+            our_addrs.insert(addr.clone());
+            addr_map.entry(addr.clone()).or_insert_with(|| AddressInfo {
+                script_type: script_type_from_address(addr),
+                internal: history.internal_addresses.contains(addr),
+                index: 0,
+            });
+        }
+
         // Pre-populate caches from decoded transactions.
         let mut tx_cache = HashMap::new();
         let mut input_cache: HashMap<Txid, Vec<InputInfo>> = HashMap::new();

@@ -171,6 +171,7 @@ impl<'a, G: BlockchainGateway> AnalysisEngine<'a, G> {
             utxos: utxo_entries,
             transactions,
             internal_addresses: HashSet::new(),
+            derived_addresses: HashSet::new(),
         })
     }
 }
