@@ -203,8 +203,7 @@ pub struct WalletHistory {
     #[serde(default, with = "serde_addr_set")]
     pub internal_addresses: HashSet<Address<NetworkUnchecked>>,
     /// Every address derived from ALL wallet descriptors (external + internal).
-    /// Used by `TxGraph` to seed `our_addrs`, matching the Python reference
-    /// which uses `set(addr_map.keys())` over all derived addresses.
+    /// Used by `TxGraph` to seed `our_addrs`
     #[serde(default, with = "serde_addr_set")]
     pub derived_addresses: HashSet<Address<NetworkUnchecked>>,
 }
