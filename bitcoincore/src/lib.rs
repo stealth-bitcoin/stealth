@@ -253,6 +253,7 @@ impl BitcoinCoreRpc {
             utxos,
             transactions,
             internal_addresses: HashSet::new(),
+            derived_addresses: HashSet::new(),
         })
     }
 
@@ -479,17 +480,19 @@ impl BlockchainGateway for BitcoinCoreRpc {
 
         let mut history = self.load_history_for_wallet(&wallet_name)?;
 
-        // Derive internal (change) addresses so TxGraph can correctly
-        // mark them as internal in AddressInfo.
+        // Derive all addresses from every descriptor
         let mut internal_addresses = HashSet::new();
+        let mut derived_addresses = HashSet::new();
         for desc in descriptors {
-            if desc.internal {
-                if let Ok(addrs) = self.derive_addresses(desc) {
-                    internal_addresses.extend(addrs);
+            if let Ok(addrs) = self.derive_addresses(desc) {
+                if desc.internal {
+                    internal_addresses.extend(addrs.iter().cloned());
                 }
+                derived_addresses.extend(addrs);
             }
         }
         history.internal_addresses = internal_addresses;
+        history.derived_addresses = derived_addresses;
 
         Ok(history)
     }
@@ -521,18 +524,24 @@ impl BlockchainGateway for BitcoinCoreRpc {
     fn scan_wallet(&self, wallet_name: &str) -> Result<WalletHistory, AnalysisError> {
         let mut history = self.load_history_for_wallet(wallet_name)?;
 
-        // Derive internal (change) addresses so TxGraph can correctly
-        // mark them in AddressInfo, mirroring the scan_descriptors path.
+        // Derive ALL addresses from every descriptor (both external and
+        // internal chains) so that `is_ours()` in TxGraph recognises
+        // every derived address — matching the Python reference which
+        // calls `derive_all_addresses(descriptors)` before building the
+        // TxGraph.
         if let Ok(descriptors) = self.list_wallet_descriptors(wallet_name) {
             let mut internal_addresses = HashSet::new();
+            let mut derived_addresses = HashSet::new();
             for desc in &descriptors {
-                if desc.internal {
-                    if let Ok(addrs) = self.derive_addresses(desc) {
-                        internal_addresses.extend(addrs);
+                if let Ok(addrs) = self.derive_addresses(desc) {
+                    if desc.internal {
+                        internal_addresses.extend(addrs.iter().cloned());
                     }
+                    derived_addresses.extend(addrs);
                 }
             }
             history.internal_addresses = internal_addresses;
+            history.derived_addresses = derived_addresses;
         }
 
         Ok(history)
