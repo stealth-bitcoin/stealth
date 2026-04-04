@@ -1,4 +1,3 @@
-backend/script/bitcoin-data/
 node_modules/
 dist/
 .env
@@ -13,3 +12,4 @@ dist/
 .qwen
 **/__pycache__/
 target/
+Cargo.lock

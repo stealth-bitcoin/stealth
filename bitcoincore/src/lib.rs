@@ -3,17 +3,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::{Address, Txid};
 use ini::Ini;
 use reqwest::blocking::Client;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
-use stealth_core::error::AnalysisError;
-use stealth_core::gateway::BlockchainGateway;
-use stealth_core::model::{
-    DecodedTransaction, DescriptorType, ResolvedDescriptor, TxInputRef, TxOutput, Utxo,
-    WalletHistory, WalletTxCategory, WalletTxEntry,
+use serde::Deserialize;
+use serde_json::{json, Value};
+use stealth_model::error::AnalysisError;
+use stealth_model::gateway::{
+    BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, TxInputRef,
+    TxOutput, Utxo, WalletHistory, WalletTxCategory, WalletTxEntry,
 };
+use stealth_model::types::btc_to_amount;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitcoinCoreConfig {
@@ -93,13 +95,8 @@ impl BitcoinCoreConfig {
             if !candidate.exists() {
                 continue;
             }
-            let contents = fs::read_to_string(&candidate)
-                .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
-            let mut parts = contents.trim().splitn(2, ':');
-            let user = parts.next().unwrap_or_default().to_string();
-            let password = parts.next().unwrap_or_default().to_string();
-            if !user.is_empty() && !password.is_empty() {
-                return Ok((user, password));
+            if let Ok(creds) = read_cookie_file(&candidate) {
+                return Ok(creds);
             }
         }
 
@@ -107,6 +104,34 @@ impl BitcoinCoreConfig {
             "could not locate a readable Bitcoin Core cookie file".into(),
         ))
     }
+}
+
+/// Read a Bitcoin Core `.cookie` file, returning `(user, password)`.
+///
+/// The cookie format is a single line of `__cookie__:hex_password`.
+pub fn read_cookie_file(path: &Path) -> Result<(String, String), AnalysisError> {
+    let contents = fs::read_to_string(path).map_err(|e| {
+        AnalysisError::EnvironmentUnavailable(format!(
+            "cannot read cookie file {}: {e}",
+            path.display()
+        ))
+    })?;
+    let mut parts = contents.trim().splitn(2, ':');
+    let user = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AnalysisError::EnvironmentUnavailable(format!("invalid cookie file {}", path.display()))
+        })?
+        .to_string();
+    let pass = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AnalysisError::EnvironmentUnavailable(format!("invalid cookie file {}", path.display()))
+        })?
+        .to_string();
+    Ok((user, pass))
 }
 
 pub struct BitcoinCoreRpc {
@@ -120,6 +145,27 @@ impl BitcoinCoreRpc {
             .build()
             .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
         Ok(Self { config, client })
+    }
+
+    /// Construct a gateway from a URL and optional credentials.
+    ///
+    /// This mirrors the env-var based configuration used by the HTTP
+    /// API (`STEALTH_RPC_URL`, `STEALTH_RPC_USER`, `STEALTH_RPC_PASS`).
+    pub fn from_url(
+        url: &str,
+        user: Option<String>,
+        password: Option<String>,
+    ) -> Result<Self, AnalysisError> {
+        let (host, port) = parse_host_port_from_url(url);
+        let config = BitcoinCoreConfig {
+            network: infer_network_from_port(port),
+            datadir: None,
+            rpchost: host,
+            rpcport: port,
+            rpcuser: user,
+            rpcpassword: password,
+        };
+        Self::new(config)
     }
 
     fn rpc_url(&self, wallet: Option<&str>) -> String {
@@ -183,9 +229,9 @@ impl BitcoinCoreRpc {
         let utxos = self.list_unspent(wallet_name)?;
         let mut txids = wallet_txs
             .iter()
-            .map(|entry| entry.txid.clone())
+            .map(|entry| entry.txid)
             .collect::<HashSet<_>>();
-        txids.extend(utxos.iter().map(|utxo| utxo.txid.clone()));
+        txids.extend(utxos.iter().map(|utxo| utxo.txid));
 
         let mut transactions = HashMap::new();
         let mut queue = txids.into_iter().collect::<Vec<_>>();
@@ -193,19 +239,21 @@ impl BitcoinCoreRpc {
             if transactions.contains_key(&txid) {
                 continue;
             }
-            let tx = self.get_transaction(&txid)?;
+            let tx = self.decode_transaction(txid)?;
             for input in &tx.vin {
                 if !input.coinbase && !transactions.contains_key(&input.previous_txid) {
-                    queue.push(input.previous_txid.clone());
+                    queue.push(input.previous_txid);
                 }
             }
-            transactions.insert(txid.clone(), tx);
+            transactions.insert(txid, tx);
         }
 
         Ok(WalletHistory {
             wallet_txs,
             utxos,
             transactions,
+            internal_addresses: HashSet::new(),
+            derived_addresses: HashSet::new(),
         })
     }
 
@@ -215,21 +263,25 @@ impl BitcoinCoreRpc {
             "listtransactions",
             vec![json!("*"), json!(10000), json!(0), json!(true)],
         )?;
-        Ok(entries
+        entries
             .into_iter()
-            .map(|entry| WalletTxEntry {
-                txid: entry.txid,
-                address: entry.address.unwrap_or_default(),
-                category: match entry.category.as_deref() {
-                    Some("send") => WalletTxCategory::Send,
-                    Some("receive") => WalletTxCategory::Receive,
-                    _ => WalletTxCategory::Unknown,
-                },
-                amount_btc: entry.amount,
-                confirmations: entry.confirmations.unwrap_or_default(),
-                blockheight: entry.blockheight.unwrap_or_default(),
+            .map(|entry| {
+                let address: Option<Address<NetworkUnchecked>> =
+                    entry.address.as_deref().and_then(|s| s.parse().ok());
+                Ok(WalletTxEntry {
+                    txid: parse_txid(&entry.txid)?,
+                    address,
+                    category: match entry.category.as_deref() {
+                        Some("send") => WalletTxCategory::Send,
+                        Some("receive") => WalletTxCategory::Receive,
+                        _ => WalletTxCategory::Unknown,
+                    },
+                    amount: btc_to_amount(entry.amount.abs()),
+                    confirmations: entry.confirmations.unwrap_or_default(),
+                    blockheight: entry.blockheight.unwrap_or_default(),
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn list_unspent(&self, wallet_name: &str) -> Result<Vec<Utxo>, AnalysisError> {
@@ -238,43 +290,59 @@ impl BitcoinCoreRpc {
             "listunspent",
             vec![json!(0), json!(9_999_999)],
         )?;
-        Ok(utxos
+        utxos
             .into_iter()
             .map(|utxo| {
-                let address = utxo.address.unwrap_or_default();
-                Utxo {
-                    txid: utxo.txid,
+                let address: Option<Address<NetworkUnchecked>> =
+                    utxo.address.as_deref().and_then(|s| s.parse().ok());
+                Ok(Utxo {
+                    txid: parse_txid(&utxo.txid)?,
                     vout: utxo.vout,
-                    address: address.clone(),
-                    amount_btc: utxo.amount,
+                    script_type: address
+                        .as_ref()
+                        .map(DescriptorType::infer_from_address)
+                        .unwrap_or(DescriptorType::Unknown),
+                    address,
+                    amount: btc_to_amount(utxo.amount),
                     confirmations: utxo.confirmations.unwrap_or_default(),
-                    script_type: DescriptorType::infer_from_address(&address),
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 
-    fn get_transaction(&self, txid: &str) -> Result<DecodedTransaction, AnalysisError> {
-        let tx =
-            self.call::<RawTransaction>(None, "getrawtransaction", vec![json!(txid), json!(true)])?;
+    fn decode_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
+        let tx = self.call::<RawTransaction>(
+            None,
+            "getrawtransaction",
+            vec![json!(txid.to_string()), json!(true)],
+        )?;
 
         Ok(DecodedTransaction {
-            txid: tx.txid,
+            txid: parse_txid(&tx.txid)?,
             vin: tx
                 .vin
                 .into_iter()
-                .map(|input| TxInputRef {
-                    previous_txid: input.txid.unwrap_or_default(),
-                    previous_vout: input.vout.unwrap_or_default(),
-                    sequence: input.sequence.unwrap_or(0xffff_ffff),
-                    coinbase: input.coinbase.is_some(),
+                .map(|input| {
+                    Ok(TxInputRef {
+                        previous_txid: match &input.txid {
+                            Some(s) => parse_txid(s)?,
+                            // Bitcoin protocol: coinbase inputs reference all-zeros.
+                            None => parse_txid(
+                                "0000000000000000000000000000000000000000000000000000000000000000",
+                            )
+                            .expect("zero txid is always valid"),
+                        },
+                        previous_vout: input.vout.unwrap_or_default(),
+                        sequence: input.sequence.unwrap_or(0xffff_ffff),
+                        coinbase: input.coinbase.is_some(),
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, AnalysisError>>()?,
             vout: tx
                 .vout
                 .into_iter()
                 .map(|output| {
-                    let address = output
+                    let address: Option<Address<NetworkUnchecked>> = output
                         .script_pub_key
                         .address
                         .or_else(|| {
@@ -283,17 +351,22 @@ impl BitcoinCoreRpc {
                                 .addresses
                                 .and_then(|mut items| items.pop())
                         })
-                        .unwrap_or_default();
+                        .and_then(|s| s.parse().ok());
                     TxOutput {
                         n: output.n,
-                        address: address.clone(),
-                        value_btc: output.value,
-                        script_type: output
-                            .script_pub_key
-                            .script_type
-                            .as_deref()
-                            .map(descriptor_type_from_script_pub_key)
-                            .unwrap_or_else(|| DescriptorType::infer_from_address(&address)),
+                        script_type: address
+                            .as_ref()
+                            .map(DescriptorType::infer_from_address)
+                            .or_else(|| {
+                                output
+                                    .script_pub_key
+                                    .script_type
+                                    .as_deref()
+                                    .map(descriptor_type_from_script_pub_key)
+                            })
+                            .unwrap_or(DescriptorType::Unknown),
+                        address,
+                        value: btc_to_amount(output.value),
                     }
                 })
                 .collect(),
@@ -335,12 +408,20 @@ impl BlockchainGateway for BitcoinCoreRpc {
     fn derive_addresses(
         &self,
         descriptor: &ResolvedDescriptor,
-    ) -> Result<Vec<String>, AnalysisError> {
-        self.call(
+    ) -> Result<Vec<Address<NetworkUnchecked>>, AnalysisError> {
+        let strings: Vec<String> = self.call(
             None,
             "deriveaddresses",
             vec![json!(descriptor.desc), json!([0, descriptor.range_end])],
-        )
+        )?;
+        strings
+            .into_iter()
+            .map(|s| {
+                s.parse::<Address<NetworkUnchecked>>().map_err(|e| {
+                    AnalysisError::EnvironmentUnavailable(format!("invalid address '{s}': {e}"))
+                })
+            })
+            .collect()
     }
 
     fn scan_descriptors(
@@ -356,16 +437,27 @@ impl BlockchainGateway for BitcoinCoreRpc {
         );
         self.create_watch_only_wallet(&wallet_name)?;
 
+        // RAII guard: ensure the temporary wallet is always unloaded,
+        // even if the body below returns an early error via `?`.
+        let _guard = WalletGuard {
+            rpc: self,
+            name: &wallet_name,
+        };
+
         let imports = descriptors
             .iter()
             .map(|descriptor| {
-                json!({
+                let is_ranged = descriptor.desc.contains('*');
+                let mut entry = json!({
                     "desc": descriptor.desc,
                     "timestamp": 0,
                     "internal": descriptor.internal,
-                    "active": descriptor.active,
-                    "range": [0, descriptor.range_end],
-                })
+                    "active": is_ranged && descriptor.active,
+                });
+                if is_ranged {
+                    entry["range"] = json!([0, descriptor.range_end]);
+                }
+                entry
             })
             .collect::<Vec<_>>();
 
@@ -375,15 +467,34 @@ impl BlockchainGateway for BitcoinCoreRpc {
             vec![json!(imports)],
         )?;
         if import_results.iter().any(|result| !result.success) {
-            self.unload_wallet(&wallet_name);
-            return Err(AnalysisError::EnvironmentUnavailable(
-                "descriptor import failed".into(),
-            ));
+            let errors: Vec<_> = import_results
+                .iter()
+                .filter(|r| !r.success)
+                .filter_map(|r| r.error.as_ref().map(|e| e.message.as_str()))
+                .collect();
+            return Err(AnalysisError::EnvironmentUnavailable(format!(
+                "descriptor import failed: {}",
+                errors.join("; ")
+            )));
         }
 
-        let history = self.load_history_for_wallet(&wallet_name);
-        self.unload_wallet(&wallet_name);
-        history
+        let mut history = self.load_history_for_wallet(&wallet_name)?;
+
+        // Derive all addresses from every descriptor
+        let mut internal_addresses = HashSet::new();
+        let mut derived_addresses = HashSet::new();
+        for desc in descriptors {
+            if let Ok(addrs) = self.derive_addresses(desc) {
+                if desc.internal {
+                    internal_addresses.extend(addrs.iter().cloned());
+                }
+                derived_addresses.extend(addrs);
+            }
+        }
+        history.internal_addresses = internal_addresses;
+        history.derived_addresses = derived_addresses;
+
+        Ok(history)
     }
 
     fn list_wallet_descriptors(
@@ -411,13 +522,30 @@ impl BlockchainGateway for BitcoinCoreRpc {
     }
 
     fn scan_wallet(&self, wallet_name: &str) -> Result<WalletHistory, AnalysisError> {
-        self.load_history_for_wallet(wallet_name)
+        let mut history = self.load_history_for_wallet(wallet_name)?;
+
+        // Derive ALL addresses from every descriptor (both external and
+        // internal chains) so that `is_ours()` in TxGraph recognises
+        // every derived address.
+        if let Ok(descriptors) = self.list_wallet_descriptors(wallet_name) {
+            let mut internal_addresses = HashSet::new();
+            let mut derived_addresses = HashSet::new();
+            for desc in &descriptors {
+                if let Ok(addrs) = self.derive_addresses(desc) {
+                    if desc.internal {
+                        internal_addresses.extend(addrs.iter().cloned());
+                    }
+                    derived_addresses.extend(addrs);
+                }
+            }
+            history.internal_addresses = internal_addresses;
+            history.derived_addresses = derived_addresses;
+        }
+
+        Ok(history)
     }
 
-    fn known_wallet_txids(
-        &self,
-        wallet_names: &[String],
-    ) -> Result<HashSet<String>, AnalysisError> {
+    fn known_wallet_txids(&self, wallet_names: &[String]) -> Result<HashSet<Txid>, AnalysisError> {
         let mut txids = HashSet::new();
         for wallet_name in wallet_names {
             txids.extend(
@@ -428,6 +556,28 @@ impl BlockchainGateway for BitcoinCoreRpc {
         }
         Ok(txids)
     }
+
+    fn get_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
+        self.decode_transaction(txid)
+    }
+}
+
+/// RAII guard that calls `unloadwallet` when dropped, ensuring cleanup
+/// even when an early `?` return skips the normal unload path.
+struct WalletGuard<'a> {
+    rpc: &'a BitcoinCoreRpc,
+    name: &'a str,
+}
+
+impl Drop for WalletGuard<'_> {
+    fn drop(&mut self) {
+        self.rpc.unload_wallet(self.name);
+    }
+}
+
+fn parse_txid(s: &str) -> Result<Txid, AnalysisError> {
+    s.parse::<Txid>()
+        .map_err(|e| AnalysisError::EnvironmentUnavailable(format!("invalid txid '{s}': {e}")))
 }
 
 fn default_rpc_port(network: &str) -> u16 {
@@ -443,10 +593,36 @@ fn descriptor_type_from_script_pub_key(script_type: &str) -> DescriptorType {
     match script_type {
         "witness_v0_keyhash" => DescriptorType::P2wpkh,
         "witness_v1_taproot" => DescriptorType::P2tr,
-        "scripthash" => DescriptorType::P2shP2wpkh,
+        "scripthash" => DescriptorType::P2sh,
         "pubkeyhash" => DescriptorType::P2pkh,
         _ => DescriptorType::Unknown,
     }
+}
+
+fn parse_host_port_from_url(url: &str) -> (String, u16) {
+    let without_scheme = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    match authority.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port = port_str.parse::<u16>().unwrap_or(8332);
+            (host.to_owned(), port)
+        }
+        None => (authority.to_owned(), 8332),
+    }
+}
+
+fn infer_network_from_port(port: u16) -> String {
+    match port {
+        8332 => "mainnet",
+        18332 => "testnet",
+        38332 => "signet",
+        18443 => "regtest",
+        _ => "regtest",
+    }
+    .to_owned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,6 +644,14 @@ struct DescriptorInfo {
 #[derive(Debug, Deserialize)]
 struct ImportResult {
     success: bool,
+    #[serde(default)]
+    error: Option<ImportError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportError {
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
