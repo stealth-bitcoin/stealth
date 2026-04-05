@@ -13,3 +13,4 @@ dist/
 **/__pycache__/
 target/
 Cargo.lock
+.bitcoin-regtest
