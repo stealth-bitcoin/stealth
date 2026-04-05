@@ -1,0 +1,21 @@
+[package]
+name = "stealth-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Detects UTXO privacy vulnerabilities in wallets"
+categories = ["cryptography::cryptocurrencies"]
+keywords = ["bitcoin", "privacy", "cli"]
+exclude = ["tests"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+stealth-bitcoincore = { path = "../bitcoincore" }
+stealth-engine = { workspace = true }
+
+[lints.rust]
+missing_debug_implementations = "deny"
