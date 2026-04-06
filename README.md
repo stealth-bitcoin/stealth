@@ -111,6 +111,11 @@ Stealth currently runs **12 detectors** in `stealth-engine`.
 | 10  | `EXCHANGE_ORIGIN`        | MEDIUM           | Signals typical of exchange batch withdrawals          |
 | 11  | `TAINTED_UTXO_MERGE`     | HIGH             | Tainted and clean inputs merged                        |
 | 12  | `BEHAVIORAL_FINGERPRINT` | MEDIUM           | Repeating transaction patterns                         |
+| 13  | `DUST_ATTACK`            | CRITICAL         | Coordinated dust-pattern behavior                      |
+| 14  | `PEEL_CHAIN`             | HIGH - CRITICAL  | Repeated peeling flow across hops                      |
+| 15  | `DETERMINISTIC_LINK`     | HIGH             | Deterministic input-output mapping                     |
+| 16  | `UNNECESSARY_INPUT`      | MEDIUM           | Extra inputs increasing CIOH exposure                  |
+| 17  | `TOXIC_CHANGE`           | HIGH             | Toxic change consolidation patterns                    |
 
 ### Warning types
 
@@ -118,6 +123,7 @@ Stealth currently runs **12 detectors** in `stealth-engine`.
 | --------------- | ---------------- | ----------------------------------------------- |
 | `DORMANT_UTXOS` | LOW              | Dormant/hoarded UTXO behavior                   |
 | `DIRECT_TAINT`  | HIGH             | Funds directly received from known risky source |
+| `DETERMINISTIC_LINK` | LOW              | Appears as a low-risk ambiguity signal in some transactions |
 
 ## How to use the frontend
 

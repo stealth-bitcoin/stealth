@@ -26,6 +26,11 @@ Primary public scanning API: `TxGraph::detect_all(...)`.
 | 10  | Exchange-origin batch withdrawal        | MEDIUM           |
 | 11  | Tainted UTXO merge                      | HIGH             |
 | 12  | Behavioural fingerprinting              | MEDIUM           |
+| 13  | Dust attack                             | CRITICAL         |
+| 14  | Peel chain                              | HIGH – CRITICAL  |
+| 15  | Deterministic input-output link         | HIGH             |
+| 16  | Unnecessary input                       | MEDIUM           |
+| 17  | Toxic change                            | HIGH             |
 
 ## Prerequisites
 
