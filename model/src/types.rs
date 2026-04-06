@@ -125,6 +125,11 @@ pub enum VulnerabilityType {
     TaintedUtxoMerge,
     DirectTaint,
     BehavioralFingerprint,
+    DustAttack,
+    PeelChain,
+    DeterministicLink,
+    UnnecessaryInput,
+    ToxicChange,
 }
 
 impl core::fmt::Display for VulnerabilityType {
@@ -144,6 +149,11 @@ impl core::fmt::Display for VulnerabilityType {
             Self::TaintedUtxoMerge => write!(f, "TAINTED_UTXO_MERGE"),
             Self::DirectTaint => write!(f, "DIRECT_TAINT"),
             Self::BehavioralFingerprint => write!(f, "BEHAVIORAL_FINGERPRINT"),
+            Self::DustAttack => write!(f, "DUST_ATTACK"),
+            Self::PeelChain => write!(f, "PEEL_CHAIN"),
+            Self::DeterministicLink => write!(f, "DETERMINISTIC_LINK"),
+            Self::UnnecessaryInput => write!(f, "UNNECESSARY_INPUT"),
+            Self::ToxicChange => write!(f, "TOXIC_CHANGE"),
         }
     }
 }
