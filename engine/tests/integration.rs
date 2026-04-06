@@ -713,3 +713,357 @@ fn full_report_generates() {
     );
     assert_eq!(report.stats.utxos_current, 1);
 }
+
+// ─── 13. Dust Attack Detection ─────────────────────────────────────────────
+
+#[test]
+fn detect_dust_attack() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let attacker = node.create_wallet("attacker").unwrap();
+
+    // Fund attacker
+    let aa = attacker.new_address().unwrap();
+    node.client
+        .send_to_address(&aa, Amount::from_btc(1.0).unwrap())
+        .unwrap();
+    mine(&node, 1, &da);
+
+    // Attacker creates a dust attack: 1 input, 12 outputs (all tiny) to
+    // various addresses including some of alice's
+    let attacker_utxos = attacker.list_unspent().unwrap();
+    let big = attacker_utxos
+        .0
+        .iter()
+        .max_by(|a, b| a.amount.partial_cmp(&b.amount).unwrap())
+        .unwrap();
+    let big_sats = (big.amount * 1e8).round() as u64;
+    let dust_sats: u64 = 546;
+    let n_dust: u64 = 12;
+    let fee_sats: u64 = 10_000;
+
+    // Create 12 tiny outputs — 5 to alice, 7 to random other wallets
+    let mut outputs_vec = Vec::new();
+    for _ in 0..5 {
+        let a = alice.new_address().unwrap();
+        outputs_vec.push(Output::new(a, Amount::from_sat(dust_sats)));
+    }
+    // Create "other" wallets for diversity
+    for i in 0..7 {
+        let other_name = format!("other_{}", i);
+        let other = node.create_wallet(&other_name).unwrap();
+        let oa = other.new_address().unwrap();
+        outputs_vec.push(Output::new(oa, Amount::from_sat(dust_sats)));
+    }
+
+    let change_sats = big_sats - (dust_sats * n_dust) - fee_sats;
+    let change_addr = attacker.new_address().unwrap();
+    outputs_vec.push(Output::new(change_addr, Amount::from_sat(change_sats)));
+
+    let raw = attacker
+        .create_raw_transaction(
+            &[Input {
+                txid: big.txid.parse().unwrap(),
+                vout: big.vout as u64,
+                sequence: None,
+            }],
+            &outputs_vec,
+        )
+        .unwrap();
+    let tx = raw.transaction().unwrap();
+    let signed = attacker.sign_raw_transaction_with_wallet(&tx).unwrap();
+    let stx = signed.into_model().unwrap().tx;
+    attacker.send_raw_transaction(&stx).unwrap();
+    mine(&node, 1, &da);
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    assert!(has_finding(&report, VulnerabilityType::DustAttack));
+}
+
+// ─── 14. Peel Chain Detection ──────────────────────────────────────────────
+
+#[test]
+fn detect_peel_chain() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+
+    // Fund alice
+    let aa = alice.new_address().unwrap();
+    node.client
+        .send_to_address(&aa, Amount::from_btc(1.0).unwrap())
+        .unwrap();
+    mine(&node, 1, &da);
+
+    // Alice creates a peel chain: 3 consecutive 2-output transactions
+    // where the large output feeds the next transaction
+    for i in 0..3 {
+        let utxos = alice.list_unspent().unwrap();
+        let big = utxos
+            .0
+            .iter()
+            .max_by(|a, b| a.amount.partial_cmp(&b.amount).unwrap())
+            .unwrap();
+        let big_sats = (big.amount * 1e8).round() as u64;
+        let peel_amount: u64 = 50_000 + i * 10_000; // Small "peeled" payment
+        let fee_sats: u64 = 10_000;
+        let change_sats = big_sats - peel_amount - fee_sats;
+
+        let peel_addr = bob.new_address().unwrap();
+        let change_addr = alice.new_address().unwrap();
+        let raw = alice
+            .create_raw_transaction(
+                &[Input {
+                    txid: big.txid.parse().unwrap(),
+                    vout: big.vout as u64,
+                    sequence: None,
+                }],
+                &[
+                    Output::new(peel_addr, Amount::from_sat(peel_amount)),
+                    Output::new(change_addr, Amount::from_sat(change_sats)),
+                ],
+            )
+            .unwrap();
+        let tx = raw.transaction().unwrap();
+        let signed = alice.sign_raw_transaction_with_wallet(&tx).unwrap();
+        let stx = signed.into_model().unwrap().tx;
+        alice.send_raw_transaction(&stx).unwrap();
+        mine(&node, 1, &da);
+    }
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    assert!(has_finding(&report, VulnerabilityType::PeelChain));
+}
+
+// ─── 15. Deterministic Link Detection ──────────────────────────────────────
+
+#[test]
+fn detect_deterministic_links() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let ba = bob.new_address().unwrap();
+    node.client
+        .send_to_address(&ba, Amount::from_btc(2.0).unwrap())
+        .unwrap();
+    mine(&node, 1, &da);
+
+    // Give alice two UTXOs: 700k and 400k sats
+    let a1 = alice.new_address().unwrap();
+    let a2 = alice.new_address().unwrap();
+    bob.send_to_address(&a1, Amount::from_sat(700_000)).unwrap();
+    bob.send_to_address(&a2, Amount::from_sat(400_000)).unwrap();
+    mine(&node, 1, &da);
+
+    // Alice spends both into two outputs: 600k and 400k.
+    // Only one valid interpretation: 700k→600k, 400k→400k
+    // (400k < 600k so it can't fund the 600k output = deterministic link)
+    let utxos = alice.list_unspent().unwrap();
+    let inputs: Vec<Input> = utxos
+        .0
+        .iter()
+        .map(|u| Input {
+            txid: u.txid.parse().unwrap(),
+            vout: u.vout as u64,
+            sequence: None,
+        })
+        .collect();
+
+    let dest1 = bob.new_address().unwrap();
+    let dest2 = bob.new_address().unwrap();
+    let raw = alice
+        .create_raw_transaction(
+            &inputs,
+            &[
+                Output::new(dest1, Amount::from_sat(600_000)),
+                Output::new(dest2, Amount::from_sat(400_000)),
+            ],
+        )
+        .unwrap();
+    let tx = raw.transaction().unwrap();
+    let signed = alice.sign_raw_transaction_with_wallet(&tx).unwrap();
+    let stx = signed.into_model().unwrap().tx;
+    alice.send_raw_transaction(&stx).unwrap();
+    mine(&node, 1, &da);
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    assert!(has_finding(&report, VulnerabilityType::DeterministicLink));
+}
+
+// ─── 16. Unnecessary Input Detection ───────────────────────────────────────
+
+#[test]
+fn detect_unnecessary_input() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let ba = bob.new_address().unwrap();
+    node.client
+        .send_to_address(&ba, Amount::from_btc(3.0).unwrap())
+        .unwrap();
+    mine(&node, 1, &da);
+
+    // Give alice a big UTXO (1 BTC) and a small UTXO (0.01 BTC)
+    let a1 = alice.new_address().unwrap();
+    let a2 = alice.new_address().unwrap();
+    bob.send_to_address(&a1, Amount::from_btc(1.0).unwrap())
+        .unwrap();
+    bob.send_to_address(&a2, Amount::from_sat(1_000_000))
+        .unwrap();
+    mine(&node, 1, &da);
+
+    // Alice sends 0.005 BTC (500k sats) using BOTH inputs — unnecessary
+    // because the 1 BTC input alone is enough
+    let utxos = alice.list_unspent().unwrap();
+    let inputs: Vec<Input> = utxos
+        .0
+        .iter()
+        .map(|u| Input {
+            txid: u.txid.parse().unwrap(),
+            vout: u.vout as u64,
+            sequence: None,
+        })
+        .collect();
+    assert!(inputs.len() >= 2);
+
+    let total_sats: u64 = utxos
+        .0
+        .iter()
+        .map(|u| (u.amount * 1e8).round() as u64)
+        .sum();
+    let payment_sats: u64 = 500_000;
+    let fee_sats: u64 = 10_000;
+    let change_sats = total_sats - payment_sats - fee_sats;
+
+    let dest = bob.new_address().unwrap();
+    let change_addr = alice.new_address().unwrap();
+    let raw = alice
+        .create_raw_transaction(
+            &inputs,
+            &[
+                Output::new(dest, Amount::from_sat(payment_sats)),
+                Output::new(change_addr, Amount::from_sat(change_sats)),
+            ],
+        )
+        .unwrap();
+    let tx = raw.transaction().unwrap();
+    let signed = alice.sign_raw_transaction_with_wallet(&tx).unwrap();
+    let stx = signed.into_model().unwrap().tx;
+    alice.send_raw_transaction(&stx).unwrap();
+    mine(&node, 1, &da);
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    assert!(has_finding(&report, VulnerabilityType::UnnecessaryInput));
+}
+
+// ─── 17. Toxic Change Detection ────────────────────────────────────────────
+
+#[test]
+fn detect_toxic_change() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let ba = bob.new_address().unwrap();
+    node.client
+        .send_to_address(&ba, Amount::from_btc(3.0).unwrap())
+        .unwrap();
+    mine(&node, 1, &da);
+
+    // Give alice a UTXO that will produce toxic change
+    let aa = alice.new_address().unwrap();
+    bob.send_to_address(&aa, Amount::from_sat(100_000)).unwrap();
+    mine(&node, 1, &da);
+
+    // Alice sends, leaving tiny change (5000 sats — in toxic range)
+    let utxos = alice.list_unspent().unwrap();
+    let big = utxos
+        .0
+        .iter()
+        .max_by(|a, b| a.amount.partial_cmp(&b.amount).unwrap())
+        .unwrap();
+    let big_sats = (big.amount * 1e8).round() as u64;
+    let fee_sats: u64 = 10_000;
+    let toxic_change: u64 = 5_000;
+    let payment_sats = big_sats - fee_sats - toxic_change;
+
+    let dest = bob.new_address().unwrap();
+    let change_addr = alice.new_address().unwrap();
+    let raw = alice
+        .create_raw_transaction(
+            &[Input {
+                txid: big.txid.parse().unwrap(),
+                vout: big.vout as u64,
+                sequence: None,
+            }],
+            &[
+                Output::new(dest, Amount::from_sat(payment_sats)),
+                Output::new(change_addr.clone(), Amount::from_sat(toxic_change)),
+            ],
+        )
+        .unwrap();
+    let tx = raw.transaction().unwrap();
+    let signed = alice.sign_raw_transaction_with_wallet(&tx).unwrap();
+    let stx = signed.into_model().unwrap().tx;
+    alice.send_raw_transaction(&stx).unwrap();
+    mine(&node, 1, &da);
+
+    // Now give alice another big UTXO
+    let aa2 = alice.new_address().unwrap();
+    bob.send_to_address(&aa2, Amount::from_btc(1.0).unwrap())
+        .unwrap();
+    mine(&node, 1, &da);
+
+    // Alice spends toxic change + big UTXO together (the vulnerability)
+    let utxos2 = alice.list_unspent().unwrap();
+    let inputs2: Vec<Input> = utxos2
+        .0
+        .iter()
+        .map(|u| Input {
+            txid: u.txid.parse().unwrap(),
+            vout: u.vout as u64,
+            sequence: None,
+        })
+        .collect();
+    assert!(inputs2.len() >= 2);
+
+    let total2: u64 = utxos2
+        .0
+        .iter()
+        .map(|u| (u.amount * 1e8).round() as u64)
+        .sum();
+    let dest2 = bob.new_address().unwrap();
+    let raw2 = alice
+        .create_raw_transaction(
+            &inputs2,
+            &[Output::new(dest2, Amount::from_sat(total2 - 10_000))],
+        )
+        .unwrap();
+    let tx2 = raw2.transaction().unwrap();
+    let signed2 = alice.sign_raw_transaction_with_wallet(&tx2).unwrap();
+    let stx2 = signed2.into_model().unwrap().tx;
+    alice.send_raw_transaction(&stx2).unwrap();
+    mine(&node, 1, &da);
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    assert!(has_finding(&report, VulnerabilityType::ToxicChange));
+}

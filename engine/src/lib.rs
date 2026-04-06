@@ -31,6 +31,11 @@
 //! | 10 | Exchange-origin batch withdrawal | MEDIUM |
 //! | 11 | Tainted UTXO merge | HIGH |
 //! | 12 | Behavioural fingerprinting | MEDIUM |
+//! | 13 | Dust attack detection | CRITICAL |
+//! | 14 | Peel chain detection | HIGH – CRITICAL |
+//! | 15 | Deterministic input→output links | HIGH |
+//! | 16 | Unnecessary input (excess CIOH exposure) | MEDIUM |
+//! | 17 | Toxic change consolidation | HIGH |
 
 pub use stealth_model::config;
 pub use stealth_model::descriptor;

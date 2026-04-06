@@ -35,6 +35,11 @@ impl TxGraph {
         self.detect_exchange_origin(thresholds, &mut findings, known_exchange_txids);
         self.detect_tainted_utxos(&mut findings, &mut warnings, known_risky_txids);
         self.detect_behavioral_fingerprint(&mut findings);
+        self.detect_dust_attack(&mut findings);
+        self.detect_peel_chain(&mut findings);
+        self.detect_deterministic_links(&mut findings, &mut warnings);
+        self.detect_unnecessary_input(&mut findings);
+        self.detect_toxic_change(&mut findings);
 
         let stats = Stats {
             transactions_analyzed: self.our_txids.len(),
@@ -1005,5 +1010,524 @@ impl TxGraph {
                     .into(),
             ),
         });
+    }
+
+    // ── 13. Dust Attack Detection ──────────────────────────────────────────
+    //
+    // Port of: am-i-exposed/src/lib/analysis/chain/backward.ts
+    //
+    // Detects when our wallet received a tiny UTXO from a probable dust
+    // attack transaction. A dust attack parent typically has ≥10 outputs,
+    // ≥5 of which are ≤ 546 sats, distributed to many distinct addresses.
+
+    fn detect_dust_attack(&self, findings: &mut Vec<Finding>) {
+        const MIN_OUTPUTS: usize = 10;
+        const DUST_THRESHOLD: u64 = 546;
+        const MIN_DUST_OUTPUTS: usize = 5;
+
+        // Check receiving transactions only (we didn't create them).
+        let txids: Vec<Txid> = self.our_txids.iter().copied().collect();
+        for txid in txids {
+            let input_addrs = self.get_input_addresses(&txid);
+            let has_our_inputs = input_addrs.iter().any(|ia| self.is_ours(&ia.address));
+            if has_our_inputs {
+                continue; // Skip our own sends
+            }
+
+            let outputs = self.get_output_addresses(&txid);
+            if outputs.len() < MIN_OUTPUTS {
+                continue;
+            }
+
+            let dust_outputs: Vec<_> = outputs
+                .iter()
+                .filter(|o| o.value.to_sat() <= DUST_THRESHOLD)
+                .collect();
+            if dust_outputs.len() < MIN_DUST_OUTPUTS {
+                continue;
+            }
+
+            let unique_addrs: HashSet<String> = outputs
+                .iter()
+                .map(|o| o.address.assume_checked_ref().to_string())
+                .collect();
+            let diversity = unique_addrs.len() as f64 / outputs.len() as f64;
+            if diversity < 0.8 {
+                continue;
+            }
+
+            // Our wallet received from this dust attack tx
+            let our_outs: Vec<_> = outputs
+                .iter()
+                .filter(|o| self.is_ours(&o.address))
+                .collect();
+            if our_outs.is_empty() {
+                continue;
+            }
+
+            findings.push(Finding {
+                vulnerability_type: VulnerabilityType::DustAttack,
+                severity: Severity::Critical,
+                description: format!(
+                    "TX {} is a likely dust attack: {} outputs, {} of which are ≤{} sats, \
+                     targeting {} unique addresses",
+                    txid,
+                    outputs.len(),
+                    dust_outputs.len(),
+                    DUST_THRESHOLD,
+                    unique_addrs.len()
+                ),
+                details: Some(json!({
+                    "txid": txid.to_string(),
+                    "total_outputs": outputs.len(),
+                    "dust_outputs": dust_outputs.len(),
+                    "unique_addresses": unique_addrs.len(),
+                    "diversity_ratio": (diversity * 100.0).round() as u32,
+                    "our_received": our_outs.iter().map(|o| {
+                        json!({
+                            "address": o.address.assume_checked_ref().to_string(),
+                            "sats": o.value.to_sat()
+                        })
+                    }).collect::<Vec<_>>(),
+                })),
+                correction: Some(
+                    "Do NOT spend this dust UTXO — spending it reveals your other UTXOs \
+                     via common-input-ownership. Freeze it in your wallet immediately."
+                        .into(),
+                ),
+            });
+        }
+    }
+
+    // ── 14. Peel Chain Detection ───────────────────────────────────────────
+    //
+    // Port of: am-i-exposed/src/lib/analysis/chain/forward.ts and
+    //          peel-chain-trace.ts
+    //
+    // Detects peel-chain patterns: a sequence of transactions where one
+    // output is "peeled off" as payment and the remaining change feeds
+    // the next hop. Signature: 1-2 inputs, 2 outputs with highly
+    // asymmetric values (ratio < 0.3).
+
+    fn detect_peel_chain(&self, findings: &mut Vec<Finding>) {
+        let txids: Vec<Txid> = self.our_txids.iter().copied().collect();
+        for txid in txids {
+            let input_addrs = self.get_input_addresses(&txid);
+            let our_in: Vec<_> = input_addrs
+                .iter()
+                .filter(|ia| self.is_ours(&ia.address))
+                .collect();
+            if our_in.is_empty() {
+                continue;
+            }
+            if input_addrs.len() > 2 {
+                continue; // Peel chains have 1-2 inputs
+            }
+
+            let outputs = self.get_output_addresses(&txid);
+            if outputs.len() != 2 {
+                continue;
+            }
+
+            let mut values: Vec<u64> = outputs.iter().map(|o| o.value.to_sat()).collect();
+            values.sort_unstable();
+            let small = values[0];
+            let large = values[1];
+            if large == 0 {
+                continue;
+            }
+            let ratio = small as f64 / large as f64;
+            if ratio >= 0.3 {
+                continue; // Outputs are too similar for a peel
+            }
+
+            // Trace forward: does the "large" output feed into another
+            // 2-output transaction? If so, count the chain length.
+            let mut hops = 1u32;
+            let large_idx = if outputs[0].value.to_sat() >= outputs[1].value.to_sat() {
+                0
+            } else {
+                1
+            };
+            let mut trace_txid = txid;
+            let mut trace_vout = outputs[large_idx].index;
+            let max_hops = 6;
+
+            while hops < max_hops {
+                // Find the child transaction that spends trace_txid:trace_vout
+                let child_txid = self.find_spending_tx(&trace_txid, trace_vout);
+                let child_txid = match child_txid {
+                    Some(t) => t,
+                    None => break,
+                };
+                let child_outs = self.get_output_addresses(&child_txid);
+                if child_outs.len() != 2 {
+                    break;
+                }
+                let mut cv: Vec<u64> = child_outs.iter().map(|o| o.value.to_sat()).collect();
+                cv.sort_unstable();
+                if cv[1] == 0 || cv[0] as f64 / cv[1] as f64 >= 0.3 {
+                    break;
+                }
+                hops += 1;
+                let large_child = if child_outs[0].value.to_sat() >= child_outs[1].value.to_sat() {
+                    0
+                } else {
+                    1
+                };
+                trace_txid = child_txid;
+                trace_vout = child_outs[large_child].index;
+            }
+
+            if hops < 2 {
+                continue; // At least 2 hops to qualify
+            }
+
+            let severity = if hops >= 4 {
+                Severity::Critical
+            } else {
+                Severity::High
+            };
+
+            findings.push(Finding {
+                vulnerability_type: VulnerabilityType::PeelChain,
+                severity,
+                description: format!(
+                    "Peel chain detected from TX {}: {} hops of asymmetric 2-output transactions",
+                    txid, hops
+                ),
+                details: Some(json!({
+                    "start_txid": txid.to_string(),
+                    "hops": hops,
+                    "initial_ratio": (ratio * 100.0).round() as u32,
+                })),
+                correction: Some(
+                    "Avoid sending sequential transactions from the change output. \
+                     Use PayJoin or CoinJoin between sends. Send the exact UTXO \
+                     amount when possible to avoid leaving trackable change."
+                        .into(),
+                ),
+            });
+        }
+    }
+
+    // ── 15. Deterministic Link Detection ───────────────────────────────────
+    //
+    // Port of: am-i-exposed/src/lib/analysis/chain/linkability.ts
+    //
+    // For small transactions (≤4 inputs, ≤4 outputs) we enumerate all
+    // valid input→output assignments to find deterministic links — cases
+    // where a specific input can only map to one specific output (or
+    // vice versa). This indicates zero ambiguity for that link.
+
+    fn detect_deterministic_links(&self, findings: &mut Vec<Finding>, warnings: &mut Vec<Finding>) {
+        let txids: Vec<Txid> = self.our_txids.iter().copied().collect();
+        for txid in txids {
+            let inputs = self.get_input_addresses(&txid);
+            let outputs = self.get_output_addresses(&txid);
+
+            if inputs.is_empty() || outputs.is_empty() || inputs.len() < 2 || outputs.len() < 2 {
+                continue;
+            }
+
+            // Only our sends
+            if !inputs.iter().any(|ia| self.is_ours(&ia.address)) {
+                continue;
+            }
+
+            let n_in = inputs.len();
+            let n_out = outputs.len();
+
+            // Skip large transactions (too expensive to enumerate)
+            if n_in > 4 || n_out > 4 {
+                continue;
+            }
+
+            let in_sats: Vec<u64> = inputs.iter().map(|i| i.value.to_sat()).collect();
+            let out_sats: Vec<u64> = outputs.iter().map(|o| o.value.to_sat()).collect();
+
+            // Count how many times each input→output pair appears in valid
+            // assignments (a valid assignment maps each input to one output
+            // such that the assigned inputs can fund each output).
+            let mut pair_count = vec![vec![0u64; n_out]; n_in];
+            let mut total_valid: u64 = 0;
+
+            // Enumerate all n_out^n_in assignments (≤ 4^4 = 256)
+            let total_combos = (n_out as u64).pow(n_in as u32);
+            for combo in 0..total_combos {
+                let mut assignment = vec![0usize; n_in];
+                let mut c = combo;
+                for slot in assignment.iter_mut().take(n_in) {
+                    *slot = (c % n_out as u64) as usize;
+                    c /= n_out as u64;
+                }
+
+                // Check validity: each output must receive at least its value
+                let mut output_funding = vec![0u64; n_out];
+                for (i, &out_idx) in assignment.iter().enumerate() {
+                    output_funding[out_idx] += in_sats[i];
+                }
+                let valid = output_funding
+                    .iter()
+                    .zip(out_sats.iter())
+                    .all(|(&funded, &needed)| funded >= needed);
+                if valid {
+                    total_valid += 1;
+                    for (i, &out_idx) in assignment.iter().enumerate() {
+                        pair_count[i][out_idx] += 1;
+                    }
+                }
+            }
+
+            if total_valid == 0 {
+                continue;
+            }
+
+            // A deterministic link exists when an input maps to the same
+            // output in 100% of valid assignments (probability = 1.0).
+            let mut det_links = Vec::new();
+            for (i, row) in pair_count.iter().enumerate() {
+                for (j, count) in row.iter().enumerate() {
+                    if *count == total_valid {
+                        det_links.push(json!({
+                            "input_index": i,
+                            "output_index": j,
+                            "input_address": inputs[i].address.assume_checked_ref().to_string(),
+                            "output_address": outputs[j].address.assume_checked_ref().to_string(),
+                            "input_sats": in_sats[i],
+                            "output_sats": out_sats[j],
+                        }));
+                    }
+                }
+            }
+
+            // Compute average ambiguity
+            let mut max_probs = Vec::new();
+            for row in pair_count.iter().take(n_in) {
+                let max_p = (0..n_out)
+                    .map(|j| row[j] as f64 / total_valid as f64)
+                    .fold(0.0f64, f64::max);
+                max_probs.push(max_p);
+            }
+            let avg_max_prob: f64 = max_probs.iter().sum::<f64>() / max_probs.len() as f64;
+            let ambiguity = 1.0 - avg_max_prob;
+
+            if !det_links.is_empty() {
+                findings.push(Finding {
+                    vulnerability_type: VulnerabilityType::DeterministicLink,
+                    severity: Severity::High,
+                    description: format!(
+                        "TX {} has {} deterministic input→output link(s) out of {} valid interpretations",
+                        txid,
+                        det_links.len(),
+                        total_valid
+                    ),
+                    details: Some(json!({
+                        "txid": txid.to_string(),
+                        "deterministic_links": det_links,
+                        "total_valid_interpretations": total_valid,
+                        "ambiguity_pct": (ambiguity * 100.0).round() as u32,
+                    })),
+                    correction: Some(
+                        "Create transactions where multiple valid input→output mappings exist. \
+                         Use CoinJoin or PayJoin to increase ambiguity."
+                            .into(),
+                    ),
+                });
+            } else if ambiguity >= 0.6 {
+                warnings.push(Finding {
+                    vulnerability_type: VulnerabilityType::DeterministicLink,
+                    severity: Severity::Low,
+                    description: format!(
+                        "TX {} has good ambiguity ({:.0}%, {} valid interpretations)",
+                        txid,
+                        ambiguity * 100.0,
+                        total_valid
+                    ),
+                    details: Some(json!({
+                        "txid": txid.to_string(),
+                        "total_valid_interpretations": total_valid,
+                        "ambiguity_pct": (ambiguity * 100.0).round() as u32,
+                    })),
+                    correction: None,
+                });
+            }
+        }
+    }
+
+    // ── 16. Unnecessary Input Detection ────────────────────────────────────
+    //
+    // Port of: am-i-exposed/src/lib/analysis/chain/spending-patterns.ts
+    //
+    // A transaction has an unnecessary input when any single input is
+    // larger than the total output value (excluding change). This means
+    // a smaller UTXO selection was possible — including extra inputs
+    // needlessly links more addresses via CIOH.
+
+    fn detect_unnecessary_input(&self, findings: &mut Vec<Finding>) {
+        let txids: Vec<Txid> = self.our_txids.iter().copied().collect();
+        for txid in txids {
+            let input_addrs = self.get_input_addresses(&txid);
+            if input_addrs.len() < 2 {
+                continue;
+            }
+            let our_in: Vec<_> = input_addrs
+                .iter()
+                .filter(|ia| self.is_ours(&ia.address))
+                .collect();
+            if our_in.len() < 2 {
+                continue;
+            }
+
+            let outputs = self.get_output_addresses(&txid);
+            let ext_total_sats: u64 = outputs
+                .iter()
+                .filter(|o| !self.is_ours(&o.address))
+                .map(|o| o.value.to_sat())
+                .sum();
+            if ext_total_sats == 0 {
+                continue;
+            }
+
+            let in_total_sats: u64 = input_addrs.iter().map(|i| i.value.to_sat()).sum();
+            let out_total_sats: u64 = outputs.iter().map(|o| o.value.to_sat()).sum();
+            let fee_sats = in_total_sats.saturating_sub(out_total_sats);
+            let needed_sats = ext_total_sats + fee_sats;
+
+            // Check if any single input could have funded the payment + fee
+            let mut oversized_inputs = Vec::new();
+            for ia in &our_in {
+                if ia.value.to_sat() >= needed_sats {
+                    oversized_inputs.push(ia);
+                }
+            }
+
+            if !oversized_inputs.is_empty() && our_in.len() > 1 {
+                let extra_count = our_in.len() - 1;
+                findings.push(Finding {
+                    vulnerability_type: VulnerabilityType::UnnecessaryInput,
+                    severity: Severity::Medium,
+                    description: format!(
+                        "TX {} has {} unnecessary input(s): a single UTXO of {:.8} BTC \
+                         could cover the {:.8} BTC payment + fee",
+                        txid,
+                        extra_count,
+                        oversized_inputs[0].value.to_sat() as f64 / 1e8,
+                        ext_total_sats as f64 / 1e8,
+                    ),
+                    details: Some(json!({
+                        "txid": txid.to_string(),
+                        "sufficient_input": {
+                            "address": oversized_inputs[0].address.assume_checked_ref().to_string(),
+                            "sats": oversized_inputs[0].value.to_sat(),
+                        },
+                        "total_inputs_used": input_addrs.len(),
+                        "unnecessary_count": extra_count,
+                        "payment_sats": ext_total_sats,
+                        "fee_sats": fee_sats,
+                    })),
+                    correction: Some(
+                        "Use coin control to select only the single sufficient UTXO. \
+                         Adding extra inputs needlessly links more of your addresses \
+                         via common-input-ownership."
+                            .into(),
+                    ),
+                });
+            }
+        }
+    }
+
+    // ── 17. Toxic Change Detection ─────────────────────────────────────────
+    //
+    // Port of: am-i-exposed/src/lib/analysis/chain/forward.ts
+    //
+    // Detects when a small change output (< 10 000 sats) is later spent
+    // alongside a larger UTXO, linking the two. "Toxic" change is the
+    // non-round leftover from a payment that, when later consolidated,
+    // reveals the connection between the payment transaction and the
+    // user's larger holdings.
+
+    fn detect_toxic_change(&self, findings: &mut Vec<Finding>) {
+        const TOXIC_UPPER: u64 = 10_000;
+        const DUST_LOWER: u64 = 546;
+
+        let txids: Vec<Txid> = self.our_txids.iter().copied().collect();
+        for txid in txids {
+            let input_addrs = self.get_input_addresses(&txid);
+            let our_in: Vec<_> = input_addrs
+                .iter()
+                .filter(|ia| self.is_ours(&ia.address))
+                .collect();
+            if our_in.is_empty() {
+                continue;
+            }
+
+            let outputs = self.get_output_addresses(&txid);
+            // Look for our outputs that are small "toxic change"
+            for out in &outputs {
+                if !self.is_ours(&out.address) {
+                    continue;
+                }
+                let sats = out.value.to_sat();
+                if !(DUST_LOWER..=TOXIC_UPPER).contains(&sats) {
+                    continue;
+                }
+
+                // Check if this toxic change was later spent alongside
+                // a larger UTXO (the dangerous consolidation).
+                let child_txid = self.find_spending_tx(&txid, out.index);
+                let child_txid = match child_txid {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let child_inputs = self.get_input_addresses(&child_txid);
+                if child_inputs.len() < 2 {
+                    continue;
+                }
+                let has_larger = child_inputs
+                    .iter()
+                    .any(|ci| ci.value.to_sat() > TOXIC_UPPER && self.is_ours(&ci.address));
+                if !has_larger {
+                    continue;
+                }
+
+                findings.push(Finding {
+                    vulnerability_type: VulnerabilityType::ToxicChange,
+                    severity: Severity::High,
+                    description: format!(
+                        "Toxic change ({} sats) from TX {} was later merged with a larger \
+                         UTXO in TX {}, linking both transactions",
+                        sats, txid, child_txid
+                    ),
+                    details: Some(json!({
+                        "source_txid": txid.to_string(),
+                        "change_address": out.address.assume_checked_ref().to_string(),
+                        "change_sats": sats,
+                        "spending_txid": child_txid.to_string(),
+                        "total_inputs_in_child": child_inputs.len(),
+                    })),
+                    correction: Some(
+                        "Absorb tiny change into the miner fee (bump fee to consume it) \
+                         or freeze small change outputs. Never consolidate small change \
+                         with unrelated UTXOs."
+                            .into(),
+                    ),
+                });
+            }
+        }
+    }
+
+    fn find_spending_tx(&self, source_txid: &Txid, source_vout: u32) -> Option<Txid> {
+        for txid in &self.our_txids {
+            if let Some(tx) = self.fetch_tx(txid) {
+                let spends_outpoint = tx.vin.iter().any(|vin| {
+                    vin.previous_txid == *source_txid && vin.previous_vout == source_vout
+                });
+                if spends_outpoint {
+                    return Some(*txid);
+                }
+            }
+        }
+        None
     }
 }
