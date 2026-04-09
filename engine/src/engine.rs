@@ -26,12 +26,12 @@ pub use stealth_model::scan::{EngineSettings, ScanTarget, UtxoInput};
 ///
 /// Construct one per request (or per CLI invocation) and call
 /// [`analyze`](Self::analyze).
-pub struct AnalysisEngine<'a, G: BlockchainGateway> {
+pub struct AnalysisEngine<'a, G: BlockchainGateway + ?Sized> {
     gateway: &'a G,
     settings: EngineSettings,
 }
 
-impl<G: BlockchainGateway> std::fmt::Debug for AnalysisEngine<'_, G> {
+impl<G: BlockchainGateway + ?Sized> std::fmt::Debug for AnalysisEngine<'_, G> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnalysisEngine")
             .field("settings", &self.settings)
@@ -39,7 +39,7 @@ impl<G: BlockchainGateway> std::fmt::Debug for AnalysisEngine<'_, G> {
     }
 }
 
-impl<'a, G: BlockchainGateway> AnalysisEngine<'a, G> {
+impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
     pub fn new(gateway: &'a G, settings: EngineSettings) -> Self {
         Self { gateway, settings }
     }

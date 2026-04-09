@@ -1,23 +1,4 @@
-use std::collections::HashSet;
-
 use bitcoin::Amount;
-
-/// Identifies a specific detector for enable/disable configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DetectorId {
-    AddressReuse,
-    Cioh,
-    Dust,
-    DustSpending,
-    ChangeDetection,
-    Consolidation,
-    ScriptTypeMixing,
-    ClusterMerge,
-    UtxoAgeSpread,
-    ExchangeOrigin,
-    TaintedUtxoMerge,
-    BehavioralFingerprint,
-}
 
 /// Numeric thresholds used by the detectors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +39,6 @@ impl Default for DetectorThresholds {
 pub struct AnalysisConfig {
     pub derivation_range_end: u32,
     pub thresholds: DetectorThresholds,
-    pub enabled_detectors: HashSet<DetectorId>,
     /// Maximum ancestor-fetch depth when resolving UTXO history.
     /// `0` means only UTXO's own tx; `2` (the default)
     pub max_ancestor_depth: u32,
@@ -69,20 +49,6 @@ impl Default for AnalysisConfig {
         Self {
             derivation_range_end: 999,
             thresholds: DetectorThresholds::default(),
-            enabled_detectors: HashSet::from([
-                DetectorId::AddressReuse,
-                DetectorId::Cioh,
-                DetectorId::Dust,
-                DetectorId::DustSpending,
-                DetectorId::ChangeDetection,
-                DetectorId::Consolidation,
-                DetectorId::ScriptTypeMixing,
-                DetectorId::ClusterMerge,
-                DetectorId::UtxoAgeSpread,
-                DetectorId::ExchangeOrigin,
-                DetectorId::TaintedUtxoMerge,
-                DetectorId::BehavioralFingerprint,
-            ]),
             max_ancestor_depth: 2,
         }
     }

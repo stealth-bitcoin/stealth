@@ -12,10 +12,10 @@ pub trait DescriptorNormalizer {
 /// When a `normalizer` is provided (typically a [`BlockchainGateway`]),
 /// each candidate is passed through `getdescriptorinfo` for canonical
 /// checksumming.
-pub fn normalize_descriptors(
+pub fn normalize_descriptors<N: DescriptorNormalizer + ?Sized>(
     raw_descriptors: &[String],
     derivation_range_end: u32,
-    normalizer: &dyn DescriptorNormalizer,
+    normalizer: &N,
 ) -> Result<Vec<ResolvedDescriptor>, AnalysisError> {
     let mut resolved = Vec::new();
 

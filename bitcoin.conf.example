@@ -1,0 +1,8 @@
+server=1
+rpcuser=localuser
+rpcpassword=localpass
+
+[regtest]
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=18443
