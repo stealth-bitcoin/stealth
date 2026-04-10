@@ -31,6 +31,7 @@ Stealth ships a Rust workspace with:
 
 - `stealth-engine` (analysis engine)
 - `stealth-model` (domain model types and interfaces)
+- `stealth-cli`
 - `stealth-bitcoincore` (Bitcoin Core RPC gateway adapter)
 
 ## Project Direction
@@ -150,51 +151,50 @@ Stealth currently runs **12 detectors** in `stealth-engine`.
 
 ### Prerequisites
 
-| Dependency     | Version | Purpose         |
-| -------------- | ------- | --------------- |
-| Bitcoin Core   | ≥ 26    | Local node      |
-| Python         | ≥ 3.10  | Analysis engine |
-| Java           | 21      | Backend         |
-| Node.js + yarn | ≥ 18    | Frontend        |
+| Dependency     | Version | Purpose           |
+| -------------- | ------- | ----------------- |
+| Bitcoin Core   | ≥ 26    | Local node        |
+| Rust toolchain | ≥ 1.56  | CLI + engine      |
+| Node.js + yarn | ≥ 18    | Frontend          |
 
 ### 1. Clone the repository
 
 ```bash
 git clone https://github.com/stealth-bitcoin/stealth.git
 cd stealth
+cargo build
 ```
 
-### 2. Configure blockchain connection
+### 2. Configure Bitcoin Core RPC (regtest)
 
-Edit:
-
-```
-backend/script/config.ini
-```
-
-### 3. Development setup (regtest)
-
-A regtest environment is provided for development and reproducible testing of heuristics.
+Copy the example config:
 
 ```bash
-cd backend/script
-./setup.sh
+cp bitcoin.conf.example bitcoin.conf
 ```
 
-### 4. Generate sample transactions
+### 3. Start regtest and fund a wallet
 
 ```bash
-python3 reproduce.py
+./scripts/setup.sh
 ```
 
-### 5. Start backend
+This starts `bitcoind` in regtest mode, creates a wallet, mines initial blocks,
+and prints the descriptor and a ready-to-use `stealth-cli` command.
+
+Use `./scripts/setup.sh --fresh` to wipe the chain and start from genesis.
+
+### 4. Run a CLI scan
 
 ```bash
-cd backend/src/StealthBackend
-./mvnw quarkus:dev
+cargo run --bin stealth-cli -- scan \
+  --descriptor '<descriptor from setup.sh output>' \
+  --rpc-url http://127.0.0.1:18443 \
+  --rpc-cookie .bitcoin-regtest/regtest/.cookie \
+  --format text
 ```
 
-### 6. Start frontend
+### 5. Start frontend
 
 ```bash
 cd frontend
@@ -231,7 +231,9 @@ stealth/
 │   │   ├── config.ini     # Connection config (datadir, network)
 │   │   └── bitcoin-data/  # Regtest chain data (gitignored)
 │   └── src/StealthBackend/ # Quarkus Java REST API (single /api/wallet/scan endpoint)
-└── slides/                # Slidev pitch presentation
+├── cli/                   # stealth-cli
+├── scripts/               # Development helper scripts (setup.sh)
+└── target/                # Cargo build outputs
 ```
 
 ### Test Coverage
