@@ -147,6 +147,18 @@ Stealth currently runs **12 detectors** in `stealth-engine`.
 - [ ] Enable external clients (e.g. wallets, tools like am-i-exposed)
 - [ ] Integrate with Floresta
 
+## Ecosystem
+
+_Last updated: 2026-04-25_
+
+Stealth is in active discussion with several Bitcoin projects on integration:
+
+- **Liana** — [wizardsardine/liana#2107](https://github.com/wizardsardine/liana/issues/2107): proposed privacy-analysis integration via `lianad`'s existing JSONRPC, building on closed [#1047](https://github.com/wizardsardine/liana/issues/1047) and active [#534](https://github.com/wizardsardine/liana/issues/534).
+- **BDK (Bitcoin Dev Kit)** — [bitcoindevkit/bdk_wallet#429](https://github.com/bitcoindevkit/bdk_wallet/issues/429): privacy-vulnerability-detection discussion; the BDK team confirmed the preferred direction is an external crate depending on `bdk_wallet`.
+- **am-i-exposed** ([Copexit](https://github.com/Copexit)) — [issue #7](https://github.com/stealth-bitcoin/stealth/issues/7) on this repo proposing Stealth as their backend analysis engine.
+- **Self-hosted node runners** — [issue #4](https://github.com/stealth-bitcoin/stealth/issues/4) requesting Umbrel and Start9 packaging.
+- **Freedom Tech Friday** — [podcast feature](https://x.com/i/broadcasts/1mxPaLdXZMZKN) on Stealth's approach to privacy analysis.
+
 ## Installation
 
 ### Prerequisites
