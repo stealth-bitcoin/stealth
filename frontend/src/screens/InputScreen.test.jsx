@@ -8,7 +8,6 @@ afterEach(cleanup)
 const XPUB = 'xpub6CatWdiZynkCminahu8Gmr7FAVnQXBTSMaBxn6qmBNkdm9tDkFzWmjmDrLBCQSTa7BHgpEjCXzMTCyDsQLSmcGYJHBB7cTwpqLNRKGP47uw'
 const DESC = `wpkh(${XPUB}/0/*)`
 const TXID = 'f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16'
-const WARNING = /Without a birth date/i
 
 function setup(onAnalyze = vi.fn()) {
   render(<InputScreen onAnalyze={onAnalyze} />)
@@ -29,44 +28,23 @@ describe('InputScreen', () => {
     )).toBeTruthy()
   })
 
-  it('shows a Descriptor badge, the birth date field and the rescan warning', () => {
+  it('shows a Descriptor badge without any birth date field or rescan warning', () => {
     setup()
     type(DESC)
     expect(screen.getByText('Descriptor')).toBeTruthy()
-    expect(screen.getByLabelText(/wallet birth date/i)).toBeTruthy()
-    expect(screen.getByText(WARNING)).toBeTruthy()
+    expect(screen.queryByLabelText(/birth date/i)).toBeNull()
+    expect(screen.queryByText(/without a birth date/i)).toBeNull()
   })
 
-  it('shows the rescan warning for an xpub', () => {
+  it('never renders a birth date input for xpub or address kinds', () => {
     setup()
     type(XPUB)
     expect(screen.getByText('Extended public key')).toBeTruthy()
-    expect(screen.getByText(WARNING)).toBeTruthy()
-  })
-
-  it('shows the rescan warning for an address without birth date', () => {
-    setup()
+    expect(screen.queryByLabelText(/birth date/i)).toBeNull()
     type('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
     expect(screen.getByText('Address')).toBeTruthy()
-    expect(screen.getByLabelText(/wallet birth date/i)).toBeTruthy()
-    expect(screen.getByText(WARNING)).toBeTruthy()
-  })
-
-  it('hides the birth date field and warning for UTXO lists', () => {
-    setup()
-    type(`${TXID}:0\n${TXID}:1`)
-    expect(screen.getByText('UTXO list (2)')).toBeTruthy()
-    expect(screen.queryByLabelText(/wallet birth date/i)).toBeNull()
-    expect(screen.queryByText(WARNING)).toBeNull()
-  })
-
-  it('hides the warning once a birth date is picked', () => {
-    setup()
-    type(DESC)
-    fireEvent.change(screen.getByLabelText(/wallet birth date/i), {
-      target: { value: '2021-03-15' },
-    })
-    expect(screen.queryByText(WARNING)).toBeNull()
+    expect(screen.queryByLabelText(/birth date/i)).toBeNull()
+    expect(screen.queryByText(/without a birth date/i)).toBeNull()
   })
 
   it('blocks private keys with a red badge and an explicit warning', () => {
@@ -74,7 +52,6 @@ describe('InputScreen', () => {
     type('xprv' + XPUB.slice(4))
     expect(screen.getByText('Private key')).toBeTruthy()
     expect(screen.getByText(/never paste private keys.*public xpub/i)).toBeTruthy()
-    expect(screen.queryByText(WARNING)).toBeNull()
     const button = screen.getByRole('button', { name: /analyze/i })
     expect(button.disabled).toBe(true)
     fireEvent.click(button)
@@ -95,15 +72,12 @@ describe('InputScreen', () => {
     expect(screen.getByRole('button', { name: /analyze/i }).disabled).toBe(true)
   })
 
-  it('submits the built request body for a descriptor with birth date', () => {
+  it('submits a descriptor body without rescan_since', () => {
     const onAnalyze = setup()
     type(DESC)
-    fireEvent.change(screen.getByLabelText(/wallet birth date/i), {
-      target: { value: '2021-03-15' },
-    })
     fireEvent.click(screen.getByRole('button', { name: /analyze/i }))
     expect(onAnalyze).toHaveBeenCalledWith({
-      body: { descriptor: DESC, rescan_since: 1615680000 },
+      body: { descriptor: DESC },
       kind: 'descriptor',
       text: DESC,
     })

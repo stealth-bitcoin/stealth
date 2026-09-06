@@ -13,24 +13,19 @@ const BADGES = {
   unknown: 'Not recognized',
 }
 
-const RESCAN_KINDS = ['descriptor', 'xpub', 'address']
-
 export default function InputScreen({ onAnalyze }) {
   const [text, setText] = useState('')
-  const [birthDate, setBirthDate] = useState('')
 
   const classified = classifyInput(text)
   const { kind } = classified
   const showBadge = text.trim().length > 0
-  const showBirthDate = kind !== 'utxos' && kind !== 'private'
-  const showWarning = RESCAN_KINDS.includes(kind) && !birthDate
   const blocked = !text.trim() || kind === 'unknown' || kind === 'private'
 
   function handleSubmit(e) {
     e.preventDefault()
     if (blocked) return
     onAnalyze({
-      body: buildScanRequest(classified, birthDate),
+      body: buildScanRequest(classified),
       kind,
       text: classified.value,
     })
@@ -67,27 +62,6 @@ export default function InputScreen({ onAnalyze }) {
             autoCorrect="off"
             autoCapitalize="off"
           />
-
-          {showBirthDate && (
-            <div className={styles.dateField}>
-              <label className={styles.label} htmlFor="birth-date">
-                Wallet birth date <span className={styles.labelNote}>(speeds up mainnet scans)</span>
-              </label>
-              <input
-                id="birth-date"
-                type="date"
-                className={styles.dateInput}
-                value={birthDate}
-                onChange={(e) => setBirthDate(e.target.value)}
-              />
-            </div>
-          )}
-
-          {showWarning && (
-            <p className={styles.warning}>
-              Without a birth date, mainnet scans rescan the whole chain and can take an hour.
-            </p>
-          )}
 
           {kind === 'private' && (
             <p className={`${styles.warning} ${styles.warningDanger}`}>

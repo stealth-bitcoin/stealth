@@ -62,13 +62,6 @@
   gap: 12px;
 }
 
-.labelNote {
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: normal;
-  color: var(--text-dim);
-}
-
 .badge {
   font-family: var(--font-data);
   font-size: 11px;
@@ -92,29 +85,6 @@
   color: var(--danger);
   background: var(--danger-dim);
   border-color: var(--danger);
-}
-
-.dateField {
-  margin-top: 16px;
-}
-
-.dateInput {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-family: var(--font-data);
-  font-size: 14px;
-  padding: 10px 16px;
-  transition: border-color var(--transition);
-  color-scheme: dark;
-}
-
-.dateInput:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
 .warning {

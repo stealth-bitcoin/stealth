@@ -28,31 +28,15 @@ describe('buildScanRequest', () => {
       .toEqual({ descriptor: XPUB })
   })
 
-  it('adds rescan_since one day before UTC midnight of the birth date', () => {
+  it('never includes rescan_since, even when a legacy birth date argument is passed', () => {
     expect(buildScanRequest({ kind: 'descriptor', value: DESC }, '2021-03-15'))
-      .toEqual({ descriptor: DESC, rescan_since: 1615766400 - 86400 })
-  })
-
-  it('adds rescan_since for xpub and address kinds', () => {
-    expect(buildScanRequest({ kind: 'xpub', value: XPUB }, '2017-01-01').rescan_since)
-      .toBe(1483228800 - 86400)
-    expect(buildScanRequest({ kind: 'address', value: ADDR }, '2017-01-01').rescan_since)
-      .toBe(1483228800 - 86400)
-  })
-
-  it('ignores birthDate for utxos', () => {
+      .toEqual({ descriptor: DESC })
+    expect(buildScanRequest({ kind: 'xpub', value: XPUB }, '2017-01-01'))
+      .toEqual({ descriptor: XPUB })
+    expect(buildScanRequest({ kind: 'address', value: ADDR }, '2017-01-01'))
+      .toEqual({ descriptor: `addr(${ADDR})` })
     expect(buildScanRequest({ kind: 'utxos', value: `${TXID}:0`, utxos: UTXOS }, '2021-03-15'))
       .toEqual({ utxos: UTXOS })
-  })
-
-  it('omits rescan_since when birthDate is empty or missing', () => {
-    expect(buildScanRequest({ kind: 'descriptor', value: DESC }, '')).toEqual({ descriptor: DESC })
-    expect(buildScanRequest({ kind: 'descriptor', value: DESC })).toEqual({ descriptor: DESC })
-  })
-
-  it('omits rescan_since when birthDate does not parse', () => {
-    expect(buildScanRequest({ kind: 'descriptor', value: DESC }, 'not-a-date'))
-      .toEqual({ descriptor: DESC })
   })
 
   it('throws for unknown input', () => {
