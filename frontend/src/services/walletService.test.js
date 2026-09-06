@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { analyzeWallet, startScan, getScan, cancelScan } from './walletService'
+import { startScan, getScan, cancelScan } from './walletService'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -8,36 +8,6 @@ function stubFetch(response) {
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
-
-describe('analyzeWallet', () => {
-  it('POSTs the prepared body verbatim', async () => {
-    const fetchMock = stubFetch({ ok: true, json: () => Promise.resolve({ findings: [] }) })
-
-    const body = { descriptor: 'wpkh(abc)' }
-    const result = await analyzeWallet(body)
-
-    expect(fetchMock).toHaveBeenCalledWith('/api/wallet/scan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    expect(result).toEqual({ findings: [] })
-  })
-
-  it('POSTs a utxos body untouched', async () => {
-    const fetchMock = stubFetch({ ok: true, json: () => Promise.resolve({}) })
-
-    const body = { utxos: [{ txid: 'a'.repeat(64), vout: 0 }] }
-    await analyzeWallet(body)
-
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual(body)
-  })
-
-  it('throws when the response is not ok', async () => {
-    stubFetch({ ok: false })
-    await expect(analyzeWallet({ descriptor: 'x' })).rejects.toThrow('Analysis failed')
-  })
-})
 
 describe('startScan', () => {
   it('POSTs the body to /api/wallet/scans and returns the scan_id', async () => {

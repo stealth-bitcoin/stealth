@@ -83,6 +83,16 @@ describe('InputScreen', () => {
     })
   })
 
+  it('shows an error banner when the error prop is set', () => {
+    render(<InputScreen onAnalyze={vi.fn()} error="Scan failed: boom" />)
+    expect(screen.getByRole('alert').textContent).toBe('Scan failed: boom')
+  })
+
+  it('shows no error banner by default', () => {
+    setup()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('submits a utxos body without rescan_since', () => {
     const onAnalyze = setup()
     type(`${TXID}:0`)

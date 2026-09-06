@@ -13,7 +13,7 @@ const BADGES = {
   unknown: 'Not recognized',
 }
 
-export default function InputScreen({ onAnalyze }) {
+export default function InputScreen({ onAnalyze, error }) {
   const [text, setText] = useState('')
 
   const classified = classifyInput(text)
@@ -42,6 +42,11 @@ export default function InputScreen({ onAnalyze }) {
         </div>
 
         <form className={styles.card} onSubmit={handleSubmit}>
+          {error && (
+            <p role="alert" className={`${styles.warning} ${styles.warningDanger} ${styles.errorBanner}`}>
+              {error}
+            </p>
+          )}
           <div className={styles.labelRow}>
             <label className={styles.label} htmlFor="wallet-input">
               Wallet Input
