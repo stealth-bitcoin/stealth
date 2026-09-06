@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle, ThreadId};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Txid};
@@ -17,6 +19,7 @@ use stealth_model::gateway::{
     BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, TxFetchResults,
     TxInputRef, TxOutput, Utxo, WalletHistory, WalletTxCategory, WalletTxEntry,
 };
+use stealth_model::progress::{ScanPhase, ScanProgress};
 use stealth_model::types::btc_to_amount;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +144,10 @@ pub struct BitcoinCoreRpc {
     client: Client,
     max_ancestor_depth: u32,
     tx_page_size: usize,
+    // Progress sinks keyed by installing thread: a scan runs synchronously
+    // on the thread that installed its sink, so concurrent scans through a
+    // shared gateway never observe each other's sink.
+    progress_sinks: Mutex<HashMap<ThreadId, ScanProgress>>,
 }
 
 impl BitcoinCoreRpc {
@@ -155,6 +162,7 @@ impl BitcoinCoreRpc {
             client,
             max_ancestor_depth: AnalysisConfig::default().max_ancestor_depth,
             tx_page_size: DEFAULT_TX_PAGE_SIZE,
+            progress_sinks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -539,6 +547,102 @@ impl BitcoinCoreRpc {
     fn abort_rescan(&self, wallet_name: &str) {
         let _ = self.call::<Value>(Some(wallet_name), "abortrescan", Vec::new());
     }
+
+    // Take-on-use keeps the per-thread map self-cleaning.
+    fn take_progress_sink(&self) -> Option<ScanProgress> {
+        self.progress_sinks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&thread::current().id())
+    }
+}
+
+/// Background thread that polls `getwalletinfo` on the temporary scan
+/// wallet while `importdescriptors` blocks on Core's synchronous rescan,
+/// forwarding `scanning.progress` into the sink. It also honours a
+/// cancellation request on the sink by issuing `abortrescan` once.
+/// Dropping the poller stops the thread.
+struct RescanPoller {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl RescanPoller {
+    const POLL_INTERVAL: Duration = Duration::from_millis(250);
+    const POLLS_PER_FETCH: u32 = 4;
+
+    fn start(rpc: &BitcoinCoreRpc, wallet_name: &str, sink: ScanProgress) -> Option<Self> {
+        let (user, password) = rpc.credentials().ok()?;
+        let client = rpc.client.clone();
+        let url = rpc.rpc_url(Some(wallet_name));
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_signal = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            let mut abort_sent = false;
+            let mut ticks = 0u32;
+            while !stop_signal.load(Ordering::Relaxed) {
+                if sink.cancel_requested() && !abort_sent {
+                    abort_sent = true;
+                    let _ = rpc_call_raw(&client, &url, &user, &password, "abortrescan");
+                }
+                // ~1s between getwalletinfo fetches, in short sleeps so a
+                // finished import releases this thread quickly.
+                if ticks.is_multiple_of(Self::POLLS_PER_FETCH) {
+                    if let Some(progress) = fetch_scanning_progress(&client, &url, &user, &password)
+                    {
+                        sink.set_rescan_progress(progress);
+                    }
+                }
+                ticks = ticks.wrapping_add(1);
+                thread::sleep(Self::POLL_INTERVAL);
+            }
+        });
+
+        Some(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+}
+
+impl Drop for RescanPoller {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn rpc_call_raw(
+    client: &Client,
+    url: &str,
+    user: &str,
+    password: &str,
+    method: &str,
+) -> Option<Value> {
+    let response = client
+        .post(url)
+        .basic_auth(user, Some(password))
+        .json(&json!({
+            "jsonrpc": "1.0",
+            "id": "stealth-progress",
+            "method": method,
+            "params": [],
+        }))
+        .send()
+        .ok()?;
+    response.json::<Value>().ok()
+}
+
+// `getwalletinfo.scanning` is `false` when idle or
+// `{ "duration": .., "progress": .. }` during a rescan.
+fn fetch_scanning_progress(client: &Client, url: &str, user: &str, password: &str) -> Option<f32> {
+    let envelope = rpc_call_raw(client, url, user, password, "getwalletinfo")?;
+    envelope["result"]["scanning"]["progress"]
+        .as_f64()
+        .map(|progress| progress as f32)
 }
 
 impl BlockchainGateway for BitcoinCoreRpc {
@@ -572,6 +676,7 @@ impl BlockchainGateway for BitcoinCoreRpc {
         &self,
         descriptors: &[ResolvedDescriptor],
     ) -> Result<WalletHistory, AnalysisError> {
+        let sink = self.take_progress_sink();
         let wallet_name = scan_wallet_name(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -586,6 +691,10 @@ impl BlockchainGateway for BitcoinCoreRpc {
             rpc: self,
             name: &wallet_name,
         };
+
+        if let Some(sink) = &sink {
+            sink.set_wallet_name(&wallet_name);
+        }
 
         let imports = descriptors
             .iter()
@@ -604,11 +713,20 @@ impl BlockchainGateway for BitcoinCoreRpc {
             })
             .collect::<Vec<_>>();
 
-        let import_results = self.call::<Vec<ImportResult>>(
-            Some(&wallet_name),
-            "importdescriptors",
-            vec![json!(imports)],
-        )?;
+        let import_results = {
+            let _poller = sink.as_ref().and_then(|sink| {
+                sink.set_phase(ScanPhase::Rescanning);
+                RescanPoller::start(self, &wallet_name, sink.clone())
+            });
+            self.call::<Vec<ImportResult>>(
+                Some(&wallet_name),
+                "importdescriptors",
+                vec![json!(imports)],
+            )?
+        };
+        if let Some(sink) = &sink {
+            sink.set_phase(ScanPhase::LoadingHistory);
+        }
         if import_results.iter().any(|result| !result.success) {
             let errors: Vec<_> = import_results
                 .iter()
@@ -704,6 +822,17 @@ impl BlockchainGateway for BitcoinCoreRpc {
 
     fn get_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
         self.decode_transactions(txids)
+    }
+
+    fn set_progress_sink(&self, sink: ScanProgress) {
+        self.progress_sinks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(thread::current().id(), sink);
+    }
+
+    fn cancel_rescan(&self, wallet_name: &str) {
+        self.abort_rescan(wallet_name);
     }
 }
 

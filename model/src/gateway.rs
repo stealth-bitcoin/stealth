@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::descriptor::DescriptorNormalizer;
 use crate::error::AnalysisError;
+use crate::progress::ScanProgress;
 use crate::types::{serde_addr, serde_addr_opt, serde_addr_set};
 
 /// Abstraction over a blockchain data source (e.g. Bitcoin Core RPC).
@@ -41,6 +42,14 @@ pub trait BlockchainGateway {
             .map(|&txid| (txid, self.get_transaction(txid)))
             .collect())
     }
+
+    /// Install a progress sink for scans started on the current thread.
+    /// Default: no-op for gateways without progress reporting.
+    fn set_progress_sink(&self, _sink: ScanProgress) {}
+
+    /// Abort a rescan running on the given wallet, if any.
+    /// Default: no-op for gateways without rescans.
+    fn cancel_rescan(&self, _wallet_name: &str) {}
 }
 
 /// Blanket implementation: any `BlockchainGateway` is also a

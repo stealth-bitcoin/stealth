@@ -5,6 +5,7 @@ use bitcoin::{Address, Amount, Txid};
 use serde::{Deserialize, Serialize};
 
 use crate::config::AnalysisConfig;
+use crate::progress::ScanProgress;
 
 /// What to scan.
 #[derive(Debug, Clone)]
@@ -38,4 +39,6 @@ pub struct EngineSettings {
     pub known_exchange_txids: Option<HashSet<Txid>>,
     pub rescan_since: Option<u64>,
     pub ownership_descriptors: Vec<String>,
+    /// Optional sink that receives phase transitions and rescan progress.
+    pub progress: Option<ScanProgress>,
 }

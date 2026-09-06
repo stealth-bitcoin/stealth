@@ -46,6 +46,7 @@ mod detect;
 pub mod engine;
 pub use stealth_model::error;
 pub use stealth_model::gateway;
+pub use stealth_model::progress;
 mod graph;
 pub use stealth_model::types;
 
