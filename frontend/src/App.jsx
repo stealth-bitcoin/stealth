@@ -73,6 +73,10 @@ export default function App() {
     }
   }
 
+  function handleCancel() {
+    if (scanId) return cancelScan(scanId)
+  }
+
   function handleReset() {
     setScreen('input')
     setScan(null)
@@ -84,7 +88,15 @@ export default function App() {
 
   function renderScreen() {
     if (screen === 'loading') {
-      return <LoadingScreen text={scan?.text} kind={scan?.kind} state={job?.state} progress={job?.progress} />
+      return (
+        <LoadingScreen
+          text={scan?.text}
+          kind={scan?.kind}
+          state={job?.state}
+          progress={job?.progress}
+          onCancel={handleCancel}
+        />
+      )
     }
     if (screen === 'report') return <ReportScreen report={report} descriptor={scan?.text} onReset={handleReset} />
     return <InputScreen onAnalyze={handleAnalyze} error={error} />

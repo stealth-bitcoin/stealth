@@ -155,6 +155,23 @@ describe('App scan flow', () => {
     expect(getScan.mock.calls.length).toBe(calls)
   })
 
+  it('cancels the running scan from the loading screen', async () => {
+    queueJobs(job('rescanning'))
+    cancelScan.mockResolvedValue()
+    render(<App />)
+    await submitScan()
+    await tick()
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await act(async () => {})
+    expect(cancelScan).toHaveBeenCalledWith('scan-1')
+
+    queueJobs(job('cancelled'))
+    await tick()
+    expect(screen.getByPlaceholderText(/paste a descriptor/i)).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('stops polling when unmounted', async () => {
     queueJobs(job('rescanning'))
     const { unmount } = render(<App />)
