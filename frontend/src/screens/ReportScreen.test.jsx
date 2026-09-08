@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import ReportScreen from './ReportScreen'
 
 afterEach(cleanup)
@@ -52,4 +52,67 @@ describe('ReportScreen — single-address scope note', () => {
     render(<ReportScreen report={makeReport({ txs: 3 })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
     expect(screen.queryByText(/only this single address/i)).toBeNull()
   })
+})
+
+describe('ReportScreen — grouped findings', () => {
+  const exchangeFindings = [
+    finding('EXCHANGE_ORIGIN', 'TX aaa looks like an exchange batch withdrawal'),
+    finding('EXCHANGE_ORIGIN', 'TX bbb looks like an exchange batch withdrawal'),
+    finding('EXCHANGE_ORIGIN', 'TX ccc looks like an exchange batch withdrawal'),
+  ]
+
+  it('collapses repeated findings of one type into a single counted card', () => {
+    render(
+      <ReportScreen
+        report={makeReport({ txs: 9, findings: exchangeFindings })}
+        descriptor="wpkh(x/0/*)"
+        kind="xpub"
+        onReset={() => {}}
+      />,
+    )
+    expect(screen.getByText(/3 transactions look like exchange batch withdrawals/i)).toBeTruthy()
+    // The individual finding descriptions stay hidden until the group is expanded.
+    expect(screen.queryByText('TX aaa looks like an exchange batch withdrawal')).toBeNull()
+  })
+
+  it('reveals the individual findings when the group is expanded', () => {
+    render(
+      <ReportScreen
+        report={makeReport({ txs: 9, findings: exchangeFindings })}
+        descriptor="wpkh(x/0/*)"
+        kind="xpub"
+        onReset={() => {}}
+      />,
+    )
+    fireEvent.click(screen.getByText(/3 transactions look like exchange batch withdrawals/i))
+    expect(screen.getByText('TX aaa looks like an exchange batch withdrawal')).toBeTruthy()
+    expect(screen.getByText('TX ccc looks like an exchange batch withdrawal')).toBeTruthy()
+  })
+
+  it('renders a lone finding as a normal card, not a group', () => {
+    render(
+      <ReportScreen
+        report={makeReport({ txs: 4, findings: [finding('ADDRESS_REUSE', 'Address bc1q reused across 2 transactions')] })}
+        descriptor="wpkh(x/0/*)"
+        kind="xpub"
+        onReset={() => {}}
+      />,
+    )
+    expect(screen.getByText('Address bc1q reused across 2 transactions')).toBeTruthy()
+  })
+})
+
+describe('ReportScreen — header label follows the input kind', () => {
+  const cases = [
+    ['address', 'Analyzed address'],
+    ['xpub', 'Analyzed xpub'],
+    ['utxos', 'Analyzed UTXO set'],
+    ['descriptor', 'Analyzed descriptor'],
+  ]
+  for (const [kind, label] of cases) {
+    it(`labels a ${kind} scan as "${label}"`, () => {
+      render(<ReportScreen report={makeReport({ txs: 3 })} descriptor="x" kind={kind} onReset={() => {}} />)
+      expect(screen.getByText(label)).toBeTruthy()
+    })
+  }
 })

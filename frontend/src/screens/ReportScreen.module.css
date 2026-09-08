@@ -199,3 +199,48 @@
   flex-direction: column;
   gap: 8px;
 }
+
+/* Grouped findings */
+.group {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 12px;
+  background: transparent;
+  border: none;
+  padding: 14px 16px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+.groupSummary {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.chevron {
+  color: var(--text-muted);
+  font-size: 18px;
+  transition: transform var(--transition);
+}
+
+.chevron.open {
+  transform: rotate(90deg);
+}
+
+.groupItems {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
