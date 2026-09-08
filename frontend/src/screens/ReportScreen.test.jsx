@@ -40,3 +40,16 @@ describe('ReportScreen — nothing analyzed vs clean', () => {
     expect(screen.queryByText(/no transactions found for this input/i)).toBeNull()
   })
 })
+
+describe('ReportScreen — single-address scope note', () => {
+  it('warns that only one address was audited for an address scan', () => {
+    render(<ReportScreen report={makeReport({ txs: 3 })} descriptor="addr(bc1qexample)" kind="address" onReset={() => {}} />)
+    expect(screen.getByText(/only this single address/i)).toBeTruthy()
+    expect(screen.getByText(/xpub/i)).toBeTruthy()
+  })
+
+  it('does not show the scope note for an xpub scan', () => {
+    render(<ReportScreen report={makeReport({ txs: 3 })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.queryByText(/only this single address/i)).toBeNull()
+  })
+})

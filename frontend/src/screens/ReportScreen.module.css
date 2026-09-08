@@ -148,6 +148,18 @@
   margin-bottom: 28px;
 }
 
+/* Single-address scope note */
+.scopeNote {
+  background: var(--warning-dim, rgba(244, 162, 97, 0.1));
+  border: 1px solid rgba(244, 162, 97, 0.3);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--warning);
+  margin-bottom: 28px;
+}
+
 /* Nothing-analyzed banner */
 .emptyBanner {
   background: var(--surface);

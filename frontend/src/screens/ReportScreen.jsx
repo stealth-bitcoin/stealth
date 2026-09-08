@@ -6,7 +6,7 @@ function truncateDescriptor(desc) {
   return `${desc.slice(0, 80)}…`
 }
 
-export default function ReportScreen({ report, descriptor, onReset }) {
+export default function ReportScreen({ report, descriptor, kind, onReset }) {
   const { stats, findings, warnings, summary } = report
 
   return (
@@ -46,6 +46,15 @@ export default function ReportScreen({ report, descriptor, onReset }) {
             <div className={styles.summaryLabel}>Txs Analyzed</div>
           </div>
         </div>
+
+        {/* Single-address scope note */}
+        {kind === 'address' && (
+          <div className={styles.scopeNote}>
+            This audit covers only this single address. To review your whole wallet,
+            scan its xpub or output descriptor instead — an address alone reveals
+            nothing about your other addresses or change outputs.
+          </div>
+        )}
 
         {/* Nothing-analyzed banner */}
         {summary.analyzed_nothing && (
