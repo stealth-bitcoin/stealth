@@ -47,6 +47,18 @@ export default function ReportScreen({ report, descriptor, onReset }) {
           </div>
         </div>
 
+        {/* Nothing-analyzed banner */}
+        {summary.analyzed_nothing && (
+          <div className={styles.emptyBanner}>
+            <strong>No transactions found for this input.</strong>
+            <p className={styles.emptyHint}>
+              Nothing was analyzed. This can mean an unused address, a wallet whose
+              activity predates the scan window, purely off-chain history (e.g.
+              Lightning), or a node still catching up to the chain tip.
+            </p>
+          </div>
+        )}
+
         {/* Clean banner */}
         {summary.clean && (
           <div className={styles.cleanBanner}>

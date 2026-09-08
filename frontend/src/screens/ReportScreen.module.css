@@ -148,6 +148,24 @@
   margin-bottom: 28px;
 }
 
+/* Nothing-analyzed banner */
+.emptyBanner {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 28px;
+}
+
+.emptyHint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
 /* Finding list */
 .listHeader {
   display: flex;

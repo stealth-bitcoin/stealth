@@ -59,7 +59,7 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
         Some(other) => return Err(format!("unsupported format '{other}' (use json or text)")),
     }
 
-    Ok(report.summary.clean)
+    Ok(report.summary.clean || report.summary.analyzed_nothing)
 }
 
 #[derive(Debug, Default)]
@@ -201,6 +201,16 @@ fn print_text_report(report: &stealth_engine::Report) {
         "Scanned {} transactions, {} addresses, {} current UTXOs\n",
         report.stats.transactions_analyzed, report.stats.addresses_seen, report.stats.utxos_current,
     );
+
+    if report.summary.analyzed_nothing {
+        println!("No transactions found for this input.");
+        println!(
+            "Nothing was analyzed — this can mean an unused address, a wallet whose \
+             activity predates the rescan window, purely off-chain (e.g. Lightning) \
+             history, or a node still catching up to the chain tip."
+        );
+        return;
+    }
 
     if report.summary.clean {
         println!("No privacy issues found.");
