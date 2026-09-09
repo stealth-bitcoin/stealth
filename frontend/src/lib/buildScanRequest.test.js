@@ -28,17 +28,6 @@ describe('buildScanRequest', () => {
       .toEqual({ descriptor: XPUB })
   })
 
-  it('never includes rescan_since, even when a legacy birth date argument is passed', () => {
-    expect(buildScanRequest({ kind: 'descriptor', value: DESC }, '2021-03-15'))
-      .toEqual({ descriptor: DESC })
-    expect(buildScanRequest({ kind: 'xpub', value: XPUB }, '2017-01-01'))
-      .toEqual({ descriptor: XPUB })
-    expect(buildScanRequest({ kind: 'address', value: ADDR }, '2017-01-01'))
-      .toEqual({ descriptor: `addr(${ADDR})` })
-    expect(buildScanRequest({ kind: 'utxos', value: `${TXID}:0`, utxos: UTXOS }, '2021-03-15'))
-      .toEqual({ utxos: UTXOS })
-  })
-
   it('throws for unknown input', () => {
     expect(() => buildScanRequest({ kind: 'unknown', value: 'mystery' }))
       .toThrow(/unknown/)

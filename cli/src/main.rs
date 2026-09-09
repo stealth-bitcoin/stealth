@@ -86,7 +86,6 @@ struct ScanOpts {
     descriptor: Option<String>,
     descriptors_file: Option<PathBuf>,
     utxos_file: Option<PathBuf>,
-    rescan_since: Option<u64>,
     rpc_url: Option<String>,
     rpc_user: Option<String>,
     rpc_cookie: Option<PathBuf>,
@@ -148,7 +147,6 @@ impl ScanOpts {
 
     fn engine_settings(&self) -> Result<EngineSettings, String> {
         Ok(EngineSettings {
-            rescan_since: self.rescan_since,
             ownership_descriptors: self.ownership_descriptors()?,
             persist_scan_wallet: self.cache_wallet,
             ..EngineSettings::default()
@@ -178,13 +176,6 @@ fn parse_scan_args(args: &[String]) -> Result<ScanOpts, String> {
             }
             "--utxos" => {
                 opts.utxos_file = Some(PathBuf::from(take_value(args, &mut i, "--utxos")?));
-            }
-            "--rescan-since" => {
-                let raw = take_value(args, &mut i, "--rescan-since")?;
-                let ts = raw.parse::<u64>().map_err(|_| {
-                    format!("--rescan-since expects a unix timestamp in seconds, got '{raw}'")
-                })?;
-                opts.rescan_since = Some(ts);
             }
             "--rpc-url" => {
                 opts.rpc_url = Some(take_value(args, &mut i, "--rpc-url")?);
@@ -251,9 +242,8 @@ fn text_report(report: &stealth_engine::Report) -> String {
     if is_empty_report(&report.summary) {
         lines.push("No transactions found for this input.".to_owned());
         lines.push(
-            "Nothing was analyzed — this can mean an unused address, a wallet whose \
-             activity predates the rescan window, purely off-chain (e.g. Lightning) \
-             history, or a node still catching up to the chain tip."
+            "Nothing was analyzed — this can mean an unused address, purely off-chain \
+             (e.g. Lightning) history, or a node still catching up to the chain tip."
                 .to_owned(),
         );
         return lines.join("\n") + "\n";
@@ -296,9 +286,6 @@ fn print_usage() {
     eprintln!("                           May be combined with --descriptors, which then");
     eprintln!("                           act as ownership context for the analysis\n");
     eprintln!("DESCRIPTOR OPTIONS:");
-    eprintln!("  --rescan-since <UNIX_TS> Rescan from this time when importing");
-    eprintln!("                           descriptors (default: genesis; set this");
-    eprintln!("                           to the wallet's birth time on mainnet)");
     eprintln!("  --cache-wallet           Keep a persistent watch-only wallet keyed to");
     eprintln!("                           the descriptors so repeat scans skip the full");
     eprintln!("                           rescan (default: off, wallet is discarded).");

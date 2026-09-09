@@ -8,20 +8,13 @@ mod args {
     }
 
     #[test]
-    fn parses_rescan_since() {
-        let opts = parse_scan_args(&to_args(&[
-            "--utxos",
-            "u.json",
-            "--rescan-since",
-            "1700000000",
-        ]))
-        .unwrap();
-        assert_eq!(opts.rescan_since, Some(1_700_000_000));
-    }
+    fn cache_wallet_flag_is_opt_in() {
+        let default = parse_scan_args(&to_args(&["--descriptor", "wpkh(x/0/*)"])).unwrap();
+        assert!(!default.cache_wallet, "cache must be off by default");
 
-    #[test]
-    fn rejects_non_numeric_rescan_since() {
-        assert!(parse_scan_args(&to_args(&["--rescan-since", "yesterday"])).is_err());
+        let enabled =
+            parse_scan_args(&to_args(&["--descriptor", "wpkh(x/0/*)", "--cache-wallet"])).unwrap();
+        assert!(enabled.cache_wallet, "--cache-wallet must enable the cache");
     }
 }
 
@@ -242,9 +235,8 @@ mod ordering {
             text,
             "Scanned 0 transactions, 1 addresses, 0 current UTXOs\n\n\
              No transactions found for this input.\n\
-             Nothing was analyzed — this can mean an unused address, a wallet whose \
-             activity predates the rescan window, purely off-chain (e.g. Lightning) \
-             history, or a node still catching up to the chain tip.\n"
+             Nothing was analyzed — this can mean an unused address, purely off-chain \
+             (e.g. Lightning) history, or a node still catching up to the chain tip.\n"
         );
     }
 

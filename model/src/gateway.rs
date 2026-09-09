@@ -82,8 +82,6 @@ pub struct ResolvedDescriptor {
     pub internal: bool,
     pub active: bool,
     pub range_end: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rescan_since: Option<u64>,
 }
 
 /// Role of a descriptor chain (external receive vs internal change).

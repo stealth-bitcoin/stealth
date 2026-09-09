@@ -37,7 +37,6 @@ pub struct EngineSettings {
     pub config: AnalysisConfig,
     pub known_risky_txids: Option<HashSet<Txid>>,
     pub known_exchange_txids: Option<HashSet<Txid>>,
-    pub rescan_since: Option<u64>,
     pub ownership_descriptors: Vec<String>,
     /// Reuse a deterministic watch-only wallet across scans of the same
     /// descriptors. When set, the first descriptor scan imports and keeps

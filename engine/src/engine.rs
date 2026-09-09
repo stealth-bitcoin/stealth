@@ -75,7 +75,6 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let resolved = normalize_descriptors(
             &expanded,
             self.settings.config.derivation_range_end,
-            self.settings.rescan_since,
             self.gateway,
         )?;
         let history = self
@@ -126,7 +125,6 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let fetched = normalize_descriptors(
             &raw,
             self.settings.config.derivation_range_end,
-            self.settings.rescan_since,
             self.gateway,
         )
         .and_then(|resolved| self.gateway.scan_descriptors(&resolved, false));
@@ -258,7 +256,6 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let resolved = normalize_descriptors(
             &expanded,
             self.settings.config.derivation_range_end,
-            self.settings.rescan_since,
             self.gateway,
         )?;
         for descriptor in &resolved {

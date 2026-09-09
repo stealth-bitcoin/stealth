@@ -676,9 +676,11 @@ impl BitcoinCoreRpc {
             .iter()
             .map(|descriptor| {
                 let is_ranged = descriptor.desc.contains('*');
+                // Always rescan from genesis; blockfilterindex keeps a full
+                // scan to minutes.
                 let mut entry = json!({
                     "desc": descriptor.desc,
-                    "timestamp": descriptor.rescan_since.unwrap_or(0),
+                    "timestamp": 0,
                     "internal": descriptor.internal,
                     "active": is_ranged && descriptor.active,
                 });
@@ -953,7 +955,6 @@ impl BlockchainGateway for BitcoinCoreRpc {
             .descriptors
             .into_iter()
             .map(|descriptor| ResolvedDescriptor {
-                rescan_since: None,
                 desc: descriptor.desc,
                 internal: descriptor.internal.unwrap_or(false),
                 active: descriptor.active.unwrap_or(true),
@@ -1280,7 +1281,6 @@ mod tests {
             internal: false,
             active: true,
             range_end: 999,
-            rescan_since: None,
         }
     }
 
