@@ -7,6 +7,7 @@ use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::address::NetworkUnchecked;
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::{Address, Txid};
 use ini::Ini;
 use reqwest::blocking::Client;
@@ -148,6 +149,9 @@ pub struct BitcoinCoreRpc {
     // on the thread that installed its sink, so concurrent scans through a
     // shared gateway never observe each other's sink.
     progress_sinks: Mutex<HashMap<ThreadId, ScanProgress>>,
+    // One lock per cache-wallet name, serialising in-process scans that
+    // share a persistent cache so they never race on create/import/read.
+    cache_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl BitcoinCoreRpc {
@@ -163,6 +167,7 @@ impl BitcoinCoreRpc {
             max_ancestor_depth: AnalysisConfig::default().max_ancestor_depth,
             tx_page_size: DEFAULT_TX_PAGE_SIZE,
             progress_sinks: Mutex::new(HashMap::new()),
+            cache_locks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -238,16 +243,16 @@ impl BitcoinCoreRpc {
             return Err(rpc_failure(response));
         }
 
-        let envelope = response
-            .json::<JsonRpcEnvelope<T>>()
+        // A null result is a valid reply (setlabel, unloadwallet); what it
+        // deserializes into is up to the caller's type.
+        let reply = response
+            .json::<JsonRpcReply>()
             .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
-        match (envelope.result, envelope.error) {
-            (Some(result), None) => Ok(result),
-            (_, Some(error)) => Err(AnalysisError::EnvironmentUnavailable(error.message)),
-            _ => Err(AnalysisError::EnvironmentUnavailable(
-                "rpc returned neither result nor error".into(),
-            )),
+        if let Some(error) = reply.error {
+            return Err(AnalysisError::EnvironmentUnavailable(error.message));
         }
+        serde_json::from_value(reply.result)
+            .map_err(|error| AnalysisError::EnvironmentUnavailable(format!("rpc result: {error}")))
     }
 
     fn call_batch<T: DeserializeOwned>(
@@ -537,6 +542,205 @@ impl BitcoinCoreRpc {
         let _ = self.call::<Value>(None, "unloadwallet", vec![json!(wallet_name)]);
     }
 
+    fn list_wallets(&self) -> Result<Vec<String>, AnalysisError> {
+        self.call::<Vec<String>>(None, "listwallets", Vec::new())
+    }
+
+    fn list_wallet_dir(&self) -> Result<Vec<String>, AnalysisError> {
+        let response = self.call::<ListWalletDirResponse>(None, "listwalletdir", Vec::new())?;
+        Ok(response.wallets.into_iter().map(|w| w.name).collect())
+    }
+
+    // Loading a wallet whose best block is behind the tip makes Core
+    // rescan only the missing blocks (the cheap catch-up we want).
+    fn load_wallet(&self, wallet_name: &str) -> Result<(), AnalysisError> {
+        let _ = self.call::<Value>(None, "loadwallet", vec![json!(wallet_name)])?;
+        Ok(())
+    }
+
+    // A per-cache-name lock so in-process scans sharing a persistent cache
+    // wallet serialise their create/import/read instead of racing.
+    fn cache_lock(&self, wallet_name: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .cache_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(locks.entry(wallet_name.to_owned()).or_default())
+    }
+
+    // Reuse the cache wallet if it is already loaded or merely on disk,
+    // otherwise create it. `Created` means the caller still owes an import.
+    // Loading an on-disk wallet triggers Core's synchronous catch-up
+    // rescan, so we forward its progress and keep it cancellable.
+    fn ensure_cache_wallet(
+        &self,
+        wallet_name: &str,
+        sink: &Option<ScanProgress>,
+    ) -> Result<CacheState, AnalysisError> {
+        if self.list_wallets()?.iter().any(|name| name == wallet_name) {
+            return Ok(CacheState::Reused);
+        }
+        if self
+            .list_wallet_dir()?
+            .iter()
+            .any(|name| name == wallet_name)
+        {
+            let _poller = sink.as_ref().and_then(|sink| {
+                sink.set_phase(ScanPhase::Rescanning);
+                RescanPoller::start(self, wallet_name, sink.clone())
+            });
+            self.load_wallet(wallet_name)?;
+            return Ok(CacheState::Reused);
+        }
+        self.create_watch_only_wallet(wallet_name)?;
+        Ok(CacheState::Created)
+    }
+
+    // The build is the import plus a marker set last, so a cancelled or
+    // crashed import never leaves a wallet that passes for finished.
+    fn build_cache(
+        &self,
+        wallet_name: &str,
+        descriptors: &[ResolvedDescriptor],
+        sink: &Option<ScanProgress>,
+    ) -> Result<(), AnalysisError> {
+        self.import_descriptors(wallet_name, descriptors, sink)?;
+        if sink.as_ref().is_some_and(ScanProgress::cancel_requested) {
+            return Err(AnalysisError::EnvironmentUnavailable(
+                "scan cancelled before the cache wallet was complete".into(),
+            ));
+        }
+        let marker = self.marker_address(descriptors)?;
+        self.call::<Value>(
+            Some(wallet_name),
+            "setlabel",
+            vec![json!(marker), json!(CACHE_COMPLETE_LABEL)],
+        )?;
+        Ok(())
+    }
+
+    /// A reused cache wallet is trusted only when it holds every descriptor
+    /// and the marker the build sets last.
+    pub fn cache_is_complete(
+        &self,
+        wallet_name: &str,
+        descriptors: &[ResolvedDescriptor],
+    ) -> Result<bool, AnalysisError> {
+        let present: HashSet<String> = self
+            .list_wallet_descriptors(wallet_name)?
+            .into_iter()
+            .map(|d| without_checksum(&d.desc))
+            .collect();
+        if descriptors
+            .iter()
+            .any(|d| !present.contains(&without_checksum(&d.desc)))
+        {
+            return Ok(false);
+        }
+        let marker = self.marker_address(descriptors)?;
+        let info: Value = self.call(Some(wallet_name), "getaddressinfo", vec![json!(marker)])?;
+        Ok(info["labels"]
+            .as_array()
+            .is_some_and(|labels| labels.iter().any(|l| l == CACHE_COMPLETE_LABEL)))
+    }
+
+    // The first address of the lowest descriptor: stable for a given cache name.
+    fn marker_address(&self, descriptors: &[ResolvedDescriptor]) -> Result<String, AnalysisError> {
+        let first = descriptors
+            .iter()
+            .min_by(|a, b| a.desc.cmp(&b.desc))
+            .ok_or(AnalysisError::EmptyDescriptor)?;
+        let mut params = vec![json!(first.desc)];
+        if first.desc.contains('*') {
+            params.push(json!([0, 0]));
+        }
+        let addresses: Vec<String> = self.call(None, "deriveaddresses", params)?;
+        addresses.into_iter().next().ok_or_else(|| {
+            AnalysisError::EnvironmentUnavailable("descriptor derives no address".into())
+        })
+    }
+
+    // Import the descriptors into an already-created wallet, forwarding
+    // Core's synchronous rescan progress to the sink when present.
+    fn import_descriptors(
+        &self,
+        wallet_name: &str,
+        descriptors: &[ResolvedDescriptor],
+        sink: &Option<ScanProgress>,
+    ) -> Result<(), AnalysisError> {
+        if let Some(sink) = sink {
+            sink.set_wallet_name(wallet_name);
+        }
+
+        let imports = descriptors
+            .iter()
+            .map(|descriptor| {
+                let is_ranged = descriptor.desc.contains('*');
+                let mut entry = json!({
+                    "desc": descriptor.desc,
+                    "timestamp": descriptor.rescan_since.unwrap_or(0),
+                    "internal": descriptor.internal,
+                    "active": is_ranged && descriptor.active,
+                });
+                if is_ranged {
+                    entry["range"] = json!([0, descriptor.range_end]);
+                }
+                entry
+            })
+            .collect::<Vec<_>>();
+
+        let import_results = {
+            let _poller = sink.as_ref().and_then(|sink| {
+                sink.set_phase(ScanPhase::Rescanning);
+                RescanPoller::start(self, wallet_name, sink.clone())
+            });
+            self.call::<Vec<ImportResult>>(
+                Some(wallet_name),
+                "importdescriptors",
+                vec![json!(imports)],
+            )?
+        };
+        if let Some(sink) = sink {
+            sink.set_phase(ScanPhase::LoadingHistory);
+        }
+        if import_results.iter().any(|result| !result.success) {
+            let errors: Vec<_> = import_results
+                .iter()
+                .filter(|r| !r.success)
+                .filter_map(|r| r.error.as_ref().map(|e| e.message.as_str()))
+                .collect();
+            return Err(AnalysisError::EnvironmentUnavailable(format!(
+                "descriptor import failed: {}",
+                errors.join("; ")
+            )));
+        }
+        Ok(())
+    }
+
+    // Read wallet history and seed the ownership address sets from every
+    // descriptor so `is_ours()` recognises the wallet's own addresses.
+    fn finish_descriptor_scan(
+        &self,
+        wallet_name: &str,
+        descriptors: &[ResolvedDescriptor],
+    ) -> Result<WalletHistory, AnalysisError> {
+        let mut history = self.load_history_for_wallet(wallet_name)?;
+
+        let mut internal_addresses = HashSet::new();
+        let mut derived_addresses = HashSet::new();
+        for desc in descriptors {
+            let addrs = self.derive_addresses(desc)?;
+            if desc.internal {
+                internal_addresses.extend(addrs.iter().cloned());
+            }
+            derived_addresses.extend(addrs);
+        }
+        history.internal_addresses = internal_addresses;
+        history.derived_addresses = derived_addresses;
+
+        Ok(history)
+    }
+
     // unloadwallet fails while a rescan is running, so the guard aborts first.
     fn abort_rescan(&self, wallet_name: &str) {
         let _ = self.call::<Value>(Some(wallet_name), "abortrescan", Vec::new());
@@ -576,9 +780,11 @@ impl RescanPoller {
             let mut abort_sent = false;
             let mut ticks = 0u32;
             while !stop_signal.load(Ordering::Relaxed) {
+                // Core answers -18 until a loading wallet is registered, so a
+                // failed abort is tried again on the next tick.
                 if sink.cancel_requested() && !abort_sent {
-                    abort_sent = true;
-                    let _ = rpc_call_raw(&client, &url, &user, &password, "abortrescan");
+                    abort_sent = rpc_call_raw(&client, &url, &user, &password, "abortrescan")
+                        .is_some_and(|reply| reply["error"].is_null());
                 }
                 // ~1s between getwalletinfo fetches, in short sleeps so a
                 // finished import releases this thread quickly.
@@ -641,8 +847,11 @@ fn fetch_scanning_progress(client: &Client, url: &str, user: &str, password: &st
 
 impl BlockchainGateway for BitcoinCoreRpc {
     fn normalize_descriptor(&self, descriptor: &str) -> Result<String, AnalysisError> {
+        // Core keeps the hardened marker it was given; one spelling keeps
+        // the cache name and the stored descriptors comparable.
+        let canonical = descriptor.replace('\'', "h");
         let response =
-            self.call::<DescriptorInfo>(None, "getdescriptorinfo", vec![json!(descriptor)])?;
+            self.call::<DescriptorInfo>(None, "getdescriptorinfo", vec![json!(canonical)])?;
         Ok(response.descriptor)
     }
 
@@ -669,86 +878,69 @@ impl BlockchainGateway for BitcoinCoreRpc {
     fn scan_descriptors(
         &self,
         descriptors: &[ResolvedDescriptor],
+        persist: bool,
     ) -> Result<WalletHistory, AnalysisError> {
         let sink = self.take_progress_sink();
-        let wallet_name = scan_wallet_name(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?
-                .as_millis(),
-        );
-        self.create_watch_only_wallet(&wallet_name)?;
 
-        // RAII guard: ensure the temporary wallet is always unloaded,
-        // even if the body below returns an early error via `?`.
-        let _guard = WalletGuard {
-            rpc: self,
-            name: &wallet_name,
-        };
+        if persist {
+            let wallet_name = cache_wallet_name(descriptors);
 
-        if let Some(sink) = &sink {
-            sink.set_wallet_name(&wallet_name);
-        }
+            // Serialise scans that share this cache wallet: the guard is
+            // held across ensure + import + read so a second scan sees a
+            // fully imported, up-to-date wallet rather than a half-built one.
+            let cache_lock = self.cache_lock(&wallet_name);
+            let _cache_guard = cache_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let imports = descriptors
-            .iter()
-            .map(|descriptor| {
-                let is_ranged = descriptor.desc.contains('*');
-                let mut entry = json!({
-                    "desc": descriptor.desc,
-                    "timestamp": descriptor.rescan_since.unwrap_or(0),
-                    "internal": descriptor.internal,
-                    "active": is_ranged && descriptor.active,
-                });
-                if is_ranged {
-                    entry["range"] = json!([0, descriptor.range_end]);
-                }
-                entry
-            })
-            .collect::<Vec<_>>();
-
-        let import_results = {
-            let _poller = sink.as_ref().and_then(|sink| {
-                sink.set_phase(ScanPhase::Rescanning);
-                RescanPoller::start(self, &wallet_name, sink.clone())
-            });
-            self.call::<Vec<ImportResult>>(
-                Some(&wallet_name),
-                "importdescriptors",
-                vec![json!(imports)],
-            )?
-        };
-        if let Some(sink) = &sink {
-            sink.set_phase(ScanPhase::LoadingHistory);
-        }
-        if import_results.iter().any(|result| !result.success) {
-            let errors: Vec<_> = import_results
-                .iter()
-                .filter(|r| !r.success)
-                .filter_map(|r| r.error.as_ref().map(|e| e.message.as_str()))
-                .collect();
-            return Err(AnalysisError::EnvironmentUnavailable(format!(
-                "descriptor import failed: {}",
-                errors.join("; ")
-            )));
-        }
-
-        let mut history = self.load_history_for_wallet(&wallet_name)?;
-
-        // Derive all addresses from every descriptor
-        let mut internal_addresses = HashSet::new();
-        let mut derived_addresses = HashSet::new();
-        for desc in descriptors {
-            let addrs = self.derive_addresses(desc)?;
-            if desc.internal {
-                internal_addresses.extend(addrs.iter().cloned());
+            // Set the wallet name before any load so a concurrent cancel
+            // (DELETE) can find the wallet to abort its catch-up rescan.
+            if let Some(sink) = &sink {
+                sink.set_wallet_name(&wallet_name);
             }
-            derived_addresses.extend(addrs);
-        }
-        history.internal_addresses = internal_addresses;
-        history.derived_addresses = derived_addresses;
 
-        Ok(history)
+            // A reused wallet that finished its build was caught up to the
+            // tip on load. One left by a failed or cancelled build (Core has
+            // no RPC to delete it) is built again, from genesis.
+            let complete = match self.ensure_cache_wallet(&wallet_name, &sink)? {
+                CacheState::Reused => self.cache_is_complete(&wallet_name, descriptors)?,
+                CacheState::Created => false,
+            };
+            if !complete {
+                // The guard unloads a wallet whose build fails; a finished
+                // build disarms it so the cache survives.
+                let mut guard = WalletGuard {
+                    rpc: self,
+                    name: &wallet_name,
+                    disarmed: false,
+                };
+                self.build_cache(&wallet_name, descriptors, &sink)?;
+                guard.disarmed = true;
+            }
+            if let Some(sink) = &sink {
+                sink.set_phase(ScanPhase::LoadingHistory);
+            }
+            self.finish_descriptor_scan(&wallet_name, descriptors)
+        } else {
+            let wallet_name = scan_wallet_name(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?
+                    .as_millis(),
+            );
+            self.create_watch_only_wallet(&wallet_name)?;
+
+            // RAII guard: ensure the temporary wallet is always unloaded,
+            // even if the body below returns an early error via `?`.
+            let _guard = WalletGuard {
+                rpc: self,
+                name: &wallet_name,
+                disarmed: false,
+            };
+
+            self.import_descriptors(&wallet_name, descriptors, &sink)?;
+            self.finish_descriptor_scan(&wallet_name, descriptors)
+        }
     }
 
     fn list_wallet_descriptors(
@@ -830,18 +1022,55 @@ impl BlockchainGateway for BitcoinCoreRpc {
     }
 }
 
+/// Whether a cache wallet was reused or freshly created (and thus still
+/// needs its descriptors imported).
+enum CacheState {
+    Reused,
+    Created,
+}
+
 /// RAII guard that calls `unloadwallet` when dropped, ensuring cleanup
-/// even when an early `?` return skips the normal unload path.
+/// even when an early `?` return skips the normal unload path. Setting
+/// `disarmed` keeps a persistent cache wallet alive on success.
 struct WalletGuard<'a> {
     rpc: &'a BitcoinCoreRpc,
     name: &'a str,
+    disarmed: bool,
 }
 
 impl Drop for WalletGuard<'_> {
     fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
         self.rpc.abort_rescan(self.name);
         self.rpc.unload_wallet(self.name);
     }
+}
+
+/// Label the cache build sets on its marker address once the import finished.
+const CACHE_COMPLETE_LABEL: &str = "stealth-cache-complete";
+
+fn without_checksum(desc: &str) -> String {
+    desc.split('#')
+        .next()
+        .unwrap_or_default()
+        .replace('\'', "h")
+}
+
+// Deterministic name for the persistent cache wallet: a stable digest of
+// the normalized descriptors (sorted, deduped) so the same wallet always
+// maps to the same name. A changed descriptor yields a different name,
+// orphaning the old cache wallet on the node (accepted for now).
+pub fn cache_wallet_name(descriptors: &[ResolvedDescriptor]) -> String {
+    let mut canonical: Vec<String> = descriptors
+        .iter()
+        .map(|d| format!("{}|{}|{}", d.desc, d.internal, d.range_end))
+        .collect();
+    canonical.sort_unstable();
+    canonical.dedup();
+    let digest = sha256::Hash::hash(canonical.join("\n").as_bytes());
+    format!("_stealth_cache_{}", &digest.to_string()[..16])
 }
 
 // The pid disambiguates CLI and API scans hitting the same node.
@@ -911,8 +1140,8 @@ const DEFAULT_TX_PAGE_SIZE: usize = 1000;
 fn rpc_failure(response: reqwest::blocking::Response) -> AnalysisError {
     let status = response.status();
     let body = response.text().unwrap_or_default();
-    match serde_json::from_str::<JsonRpcEnvelope<Value>>(&body) {
-        Ok(JsonRpcEnvelope {
+    match serde_json::from_str::<JsonRpcReply>(&body) {
+        Ok(JsonRpcReply {
             error: Some(error), ..
         }) => AnalysisError::EnvironmentUnavailable(error.message),
         _ => AnalysisError::EnvironmentUnavailable(format!("rpc transport error: {status}")),
@@ -920,8 +1149,9 @@ fn rpc_failure(response: reqwest::blocking::Response) -> AnalysisError {
 }
 
 #[derive(Debug, Deserialize)]
-struct JsonRpcEnvelope<T> {
-    result: Option<T>,
+struct JsonRpcReply {
+    #[serde(default)]
+    result: Value,
     error: Option<JsonRpcError>,
 }
 
@@ -953,6 +1183,16 @@ struct ImportResult {
 struct ImportError {
     #[serde(default)]
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListWalletDirResponse {
+    wallets: Vec<WalletDirEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WalletDirEntry {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1031,7 +1271,35 @@ struct RawScriptPubKey {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_rpc_port, scan_wallet_name};
+    use super::{cache_wallet_name, default_rpc_port, scan_wallet_name};
+    use stealth_model::gateway::ResolvedDescriptor;
+
+    fn resolved(desc: &str) -> ResolvedDescriptor {
+        ResolvedDescriptor {
+            desc: desc.to_owned(),
+            internal: false,
+            active: true,
+            range_end: 999,
+            rescan_since: None,
+        }
+    }
+
+    #[test]
+    fn cache_wallet_name_is_deterministic_and_order_independent() {
+        let a = resolved("wpkh(a)#aa");
+        let b = resolved("wpkh(b)#bb");
+        let one = cache_wallet_name(&[a.clone(), b.clone()]);
+        let two = cache_wallet_name(&[b, a]);
+        assert_eq!(one, two, "name must not depend on descriptor order");
+        assert!(one.starts_with("_stealth_cache_"), "got: {one}");
+    }
+
+    #[test]
+    fn cache_wallet_name_changes_with_descriptors() {
+        let one = cache_wallet_name(&[resolved("wpkh(a)#aa")]);
+        let two = cache_wallet_name(&[resolved("wpkh(b)#bb")]);
+        assert_ne!(one, two, "distinct descriptors must map to distinct names");
+    }
 
     #[test]
     fn network_defaults_match_bitcoin_core_ports() {

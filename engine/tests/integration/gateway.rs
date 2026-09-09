@@ -30,7 +30,7 @@ fn scan_descriptors_derives_addresses_for_unranged_addr_descriptor() {
     };
 
     let history = gateway
-        .scan_descriptors(&[resolved])
+        .scan_descriptors(&[resolved], false)
         .expect("scan_descriptors");
 
     assert!(

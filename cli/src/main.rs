@@ -42,12 +42,7 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     let gateway = opts.build_gateway()?;
     let target = opts.scan_target()?;
 
-    let settings = EngineSettings {
-        rescan_since: opts.rescan_since,
-        ownership_descriptors: opts.ownership_descriptors()?,
-        ..EngineSettings::default()
-    };
-    let engine = AnalysisEngine::new(&gateway, settings);
+    let engine = AnalysisEngine::new(&gateway, opts.engine_settings()?);
     let report = engine.analyze(target).map_err(|e| e.to_string())?;
 
     match opts.format.as_deref() {
@@ -96,6 +91,7 @@ struct ScanOpts {
     rpc_user: Option<String>,
     rpc_cookie: Option<PathBuf>,
     format: Option<String>,
+    cache_wallet: bool,
 }
 
 impl ScanOpts {
@@ -150,6 +146,15 @@ impl ScanOpts {
         Err("one input is required: --descriptor, --descriptors, or --utxos".to_owned())
     }
 
+    fn engine_settings(&self) -> Result<EngineSettings, String> {
+        Ok(EngineSettings {
+            rescan_since: self.rescan_since,
+            ownership_descriptors: self.ownership_descriptors()?,
+            persist_scan_wallet: self.cache_wallet,
+            ..EngineSettings::default()
+        })
+    }
+
     fn ownership_descriptors(&self) -> Result<Vec<String>, String> {
         match (&self.utxos_file, &self.descriptors_file) {
             (Some(_), Some(path)) => read_json(path),
@@ -192,6 +197,9 @@ fn parse_scan_args(args: &[String]) -> Result<ScanOpts, String> {
             }
             "--format" => {
                 opts.format = Some(take_value(args, &mut i, "--format")?);
+            }
+            "--cache-wallet" => {
+                opts.cache_wallet = true;
             }
             other => return Err(format!("unknown flag '{other}'")),
         }
@@ -290,7 +298,15 @@ fn print_usage() {
     eprintln!("DESCRIPTOR OPTIONS:");
     eprintln!("  --rescan-since <UNIX_TS> Rescan from this time when importing");
     eprintln!("                           descriptors (default: genesis; set this");
-    eprintln!("                           to the wallet's birth time on mainnet)\n");
+    eprintln!("                           to the wallet's birth time on mainnet)");
+    eprintln!("  --cache-wallet           Keep a persistent watch-only wallet keyed to");
+    eprintln!("                           the descriptors so repeat scans skip the full");
+    eprintln!("                           rescan (default: off, wallet is discarded).");
+    eprintln!("                           Trade-off: this writes the viewing key (xpub)");
+    eprintln!("                           into Core's wallet DB in plaintext and leaves a");
+    eprintln!("                           durable _stealth_cache_<hash> wallet revealing");
+    eprintln!("                           the descriptors were scanned. Use only on a");
+    eprintln!("                           node you trust.\n");
     eprintln!("RPC CONNECTION:");
     eprintln!("  --rpc-url <URL>          bitcoind RPC endpoint");
     eprintln!("  --rpc-user <USER>        RPC username");

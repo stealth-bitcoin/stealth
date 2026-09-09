@@ -176,6 +176,45 @@ fn mine(node: &Node, blocks: usize, addr: &corepc_node::client::bitcoin::Address
     node.client.generate_to_address(blocks, addr).unwrap();
 }
 
+#[tokio::test]
+async fn cache_wallet_flag_keeps_the_scan_wallet_on_the_node() {
+    let node = start_node();
+    let mining_addr = node.client.new_address().unwrap();
+    mine(&node, 110, &mining_addr);
+    let alice = node.create_wallet("alice").unwrap();
+    let addr = alice.new_address().unwrap();
+    node.client
+        .send_to_address(&addr, Amount::from_sat(500_000))
+        .unwrap();
+    mine(&node, 1, &mining_addr);
+
+    let rpc_url = node.rpc_url();
+    let cookie_path = node.params.cookie_file.clone();
+    let gateway = tokio::task::spawn_blocking(move || {
+        let (user, pass) = read_cookie_file(&cookie_path).expect("failed to read cookie file");
+        BitcoinCoreRpc::from_url(&rpc_url, Some(user), Some(pass)).expect("failed to build gateway")
+    })
+    .await
+    .unwrap();
+    let server = ApiServer::spawn(gateway).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(server.url("/api/wallet/scan"))
+        .json(&json!({ "descriptor": format!("addr({addr})"), "cache_wallet": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let loaded: Vec<String> = node.client.call("listwallets", &[]).unwrap();
+    assert!(
+        loaded.iter().any(|w| w.starts_with("_stealth_cache_")),
+        "cache_wallet must reach the engine and keep the wallet, got: {loaded:?}"
+    );
+    server.stop().await;
+}
+
 async fn scan_descriptor(
     client: &reqwest::Client,
     server: &ApiServer,

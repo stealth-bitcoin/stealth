@@ -30,6 +30,14 @@ struct ScanRequestBody {
     utxos: Option<Vec<UtxoInput>>,
     #[serde(default)]
     rescan_since: Option<u64>,
+    /// Reuse a persistent watch-only wallet across scans of the same
+    /// descriptors so repeat scans skip the full rescan. Default: false.
+    /// Trade-off: this persists the viewing key (xpub) in Core's wallet DB
+    /// in plaintext and leaves a durable `_stealth_cache_<hash>` wallet on
+    /// the node that reveals the descriptors were scanned. Enable only
+    /// against a trusted node.
+    #[serde(default)]
+    cache_wallet: bool,
 }
 
 async fn scan_post(
@@ -37,6 +45,7 @@ async fn scan_post(
     Json(body): Json<ScanRequestBody>,
 ) -> Result<Json<Report>, ApiError> {
     let rescan_since = body.rescan_since;
+    let persist_scan_wallet = body.cache_wallet;
     let (target, ownership_descriptors) = body.into_scan_request()?;
 
     let gw = state.gateway.ok_or(ApiError::ScannerNotConfigured)?;
@@ -44,6 +53,7 @@ async fn scan_post(
         let settings = EngineSettings {
             rescan_since,
             ownership_descriptors,
+            persist_scan_wallet,
             ..EngineSettings::default()
         };
         let engine = AnalysisEngine::new(gw.as_ref(), settings);
@@ -81,6 +91,7 @@ async fn scans_create(
     Json(body): Json<ScanRequestBody>,
 ) -> Result<(StatusCode, Json<ScanJobCreated>), ApiError> {
     let rescan_since = body.rescan_since;
+    let persist_scan_wallet = body.cache_wallet;
     let (target, ownership_descriptors) = body.into_scan_request()?;
 
     let sink = ScanProgress::new();
@@ -103,6 +114,7 @@ async fn scans_create(
                 let settings = EngineSettings {
                     rescan_since,
                     ownership_descriptors,
+                    persist_scan_wallet,
                     progress: Some(sink.clone()),
                     ..EngineSettings::default()
                 };

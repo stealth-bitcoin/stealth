@@ -55,3 +55,25 @@ pub fn has_finding(report: &stealth_engine::Report, vtype: VulnerabilityType) ->
         .iter()
         .any(|f| f.vulnerability_type == vtype)
 }
+
+/// A client bound to one of the node's wallets, for RPCs the engine does not expose.
+pub fn node_wallet(node: &Node, name: &str) -> corepc_node::Client {
+    corepc_node::Client::new_with_auth(
+        &format!("{}/wallet/{}", node.rpc_url(), name),
+        corepc_node::client::client_sync::Auth::CookieFile(node.params.cookie_file.clone()),
+    )
+    .expect("wallet client")
+}
+
+/// Every descriptor string of a wallet, as Core prints them.
+pub fn wallet_descriptors(wallet: &corepc_node::Client) -> Vec<String> {
+    let resp: serde_json::Value = wallet
+        .call("listdescriptors", &[])
+        .expect("listdescriptors failed");
+    resp["descriptors"]
+        .as_array()
+        .expect("descriptors array missing")
+        .iter()
+        .filter_map(|d| d["desc"].as_str().map(str::to_owned))
+        .collect()
+}

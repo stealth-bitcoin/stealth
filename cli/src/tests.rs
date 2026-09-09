@@ -25,6 +25,29 @@ mod args {
     }
 }
 
+mod settings {
+    use crate::*;
+
+    #[test]
+    fn the_cache_flag_reaches_the_engine() {
+        let opts = ScanOpts {
+            cache_wallet: true,
+            ..ScanOpts::default()
+        };
+        assert!(
+            opts.engine_settings()
+                .expect("settings")
+                .persist_scan_wallet
+        );
+        assert!(
+            !ScanOpts::default()
+                .engine_settings()
+                .expect("settings")
+                .persist_scan_wallet
+        );
+    }
+}
+
 mod exit_codes {
     use crate::*;
 

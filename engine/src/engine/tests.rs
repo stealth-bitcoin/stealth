@@ -93,6 +93,7 @@ struct FakeGateway {
     transactions: HashMap<Txid, DecodedTransaction>,
     history: Result<WalletHistory, String>,
     scanned: RefCell<Vec<String>>,
+    persisted: RefCell<Vec<bool>>,
 }
 
 impl FakeGateway {
@@ -101,6 +102,7 @@ impl FakeGateway {
             transactions: HashMap::from([(txid(1), payment(1))]),
             history,
             scanned: RefCell::new(Vec::new()),
+            persisted: RefCell::new(Vec::new()),
         }
     }
 }
@@ -120,7 +122,9 @@ impl BlockchainGateway for FakeGateway {
     fn scan_descriptors(
         &self,
         descriptors: &[ResolvedDescriptor],
+        persist: bool,
     ) -> Result<WalletHistory, AnalysisError> {
+        self.persisted.borrow_mut().push(persist);
         self.scanned
             .borrow_mut()
             .extend(descriptors.iter().map(|d| d.desc.clone()));
@@ -222,4 +226,17 @@ fn an_output_missing_from_the_node_history_is_still_analyzed() {
     let report = scan(&gateway);
     assert_eq!(report.stats.transactions_analyzed, 1);
     assert!(!report.summary.analyzed_nothing);
+}
+
+#[test]
+fn utxo_mode_never_keeps_a_cache_wallet_for_its_addresses() {
+    let gateway = FakeGateway::new(Ok(chain_history(3, 1)));
+    let settings = EngineSettings {
+        persist_scan_wallet: true,
+        ..EngineSettings::default()
+    };
+    AnalysisEngine::new(&gateway, settings)
+        .analyze(ScanTarget::Utxos(vec![pasted()]))
+        .expect("utxo scan");
+    assert_eq!(gateway.persisted.borrow().as_slice(), [false]);
 }
