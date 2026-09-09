@@ -17,6 +17,7 @@ mod dust;
 mod gateway;
 mod linkage;
 mod origins;
+mod progress;
 mod scanning;
 mod utxo_mode;
 mod xpub;

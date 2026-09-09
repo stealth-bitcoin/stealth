@@ -121,6 +121,132 @@ async fn scan_post_with_bare_xpub_passes_input_validation() {
     server.stop().await;
 }
 
+// ─── Async scan jobs ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn scans_post_returns_202_with_scan_id() {
+    let server = TestServer::spawn().await;
+    let response = reqwest::Client::new()
+        .post(server.url("/api/wallet/scans"))
+        .json(&json!({ "descriptor": "wpkh(xpub.../0/*)" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let scan_id = body["scan_id"].as_str().expect("scan_id must be a string");
+    assert!(!scan_id.is_empty());
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn scans_post_without_input_source_is_400_and_creates_no_job() {
+    let server = TestServer::spawn().await;
+    let response = reqwest::Client::new()
+        .post(server.url("/api/wallet/scans"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "bad_request");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn scans_get_reports_failed_job_without_gateway() {
+    let server = TestServer::spawn().await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = client
+        .post(server.url("/api/wallet/scans"))
+        .json(&json!({ "descriptor": "wpkh(xpub.../0/*)" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let scan_id = created["scan_id"].as_str().expect("scan_id string");
+
+    let response = client
+        .get(server.url(&format!("/api/wallet/scans/{scan_id}")))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["state"], "failed");
+    assert!(body["progress"].is_null(), "progress: {body}");
+    assert!(body["report"].is_null(), "report: {body}");
+    assert!(body["error"].is_string(), "error: {body}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn scans_get_unknown_id_is_404() {
+    let server = TestServer::spawn().await;
+    let response = reqwest::Client::new()
+        .get(server.url("/api/wallet/scans/does-not-exist"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "not_found");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn scans_delete_unknown_id_is_404() {
+    let server = TestServer::spawn().await;
+    let response = reqwest::Client::new()
+        .delete(server.url("/api/wallet/scans/does-not-exist"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "not_found");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn scans_delete_finished_job_returns_final_state() {
+    let server = TestServer::spawn().await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = client
+        .post(server.url("/api/wallet/scans"))
+        .json(&json!({ "descriptor": "wpkh(xpub.../0/*)" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let scan_id = created["scan_id"].as_str().expect("scan_id string");
+
+    // Without a gateway the job fails immediately, so DELETE hits a
+    // finished job and must report its final state with 200.
+    let response = client
+        .delete(server.url(&format!("/api/wallet/scans/{scan_id}")))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["state"], "failed");
+    server.stop().await;
+}
+
 struct TestServer {
     address: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,

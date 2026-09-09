@@ -1,13 +1,23 @@
-use axum::{extract::State, routing::post, Json, Router};
-use serde::Deserialize;
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
 use stealth_engine::engine::{AnalysisEngine, EngineSettings, ScanTarget, UtxoInput};
+use stealth_engine::progress::{ScanPhase, ScanProgress};
 use stealth_engine::Report;
 
 use crate::error::ApiError;
-use crate::GatewayState;
+use crate::jobs::JobOutcome;
+use crate::AppState;
 
-pub fn router() -> Router<GatewayState> {
-    Router::new().route("/scan", post(scan_post))
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/scan", post(scan_post))
+        .route("/scans", post(scans_create))
+        .route("/scans/{id}", get(scans_get).delete(scans_delete))
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,13 +33,13 @@ struct ScanRequestBody {
 }
 
 async fn scan_post(
-    State(gateway): State<GatewayState>,
+    State(state): State<AppState>,
     Json(body): Json<ScanRequestBody>,
 ) -> Result<Json<Report>, ApiError> {
     let rescan_since = body.rescan_since;
     let (target, ownership_descriptors) = body.into_scan_request()?;
 
-    let gw = gateway.ok_or(ApiError::ScannerNotConfigured)?;
+    let gw = state.gateway.ok_or(ApiError::ScannerNotConfigured)?;
     let report = tokio::task::spawn_blocking(move || {
         let settings = EngineSettings {
             rescan_since,
@@ -43,6 +53,166 @@ async fn scan_post(
     .map_err(|e| ApiError::Internal(e.to_string()))??;
 
     Ok(Json(report))
+}
+
+// ── Asynchronous scan jobs ──────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct ScanJobCreated {
+    scan_id: String,
+}
+
+// All keys are always present; absent values serialize as null.
+#[derive(Debug, Serialize)]
+struct ScanJobStatus {
+    state: &'static str,
+    progress: Option<f32>,
+    report: Option<Report>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScanJobStateOnly {
+    state: &'static str,
+}
+
+async fn scans_create(
+    State(state): State<AppState>,
+    Json(body): Json<ScanRequestBody>,
+) -> Result<(StatusCode, Json<ScanJobCreated>), ApiError> {
+    let rescan_since = body.rescan_since;
+    let (target, ownership_descriptors) = body.into_scan_request()?;
+
+    let sink = ScanProgress::new();
+    let scan_id = state.jobs.create(sink.clone());
+
+    match state.gateway {
+        None => {
+            // No gateway will ever serve this job; fail it before the
+            // caller can even poll.
+            state.jobs.finish(
+                &scan_id,
+                JobOutcome::Failed(ApiError::ScannerNotConfigured.to_string()),
+            );
+        }
+        Some(gw) => {
+            let jobs = state.jobs.clone();
+            let job_id = scan_id.clone();
+            // Fire-and-forget: dropping the handle does not stop the task.
+            drop(tokio::task::spawn_blocking(move || {
+                let settings = EngineSettings {
+                    rescan_since,
+                    ownership_descriptors,
+                    progress: Some(sink.clone()),
+                    ..EngineSettings::default()
+                };
+                let result = AnalysisEngine::new(gw.as_ref(), settings).analyze(target);
+                let outcome = if sink.cancel_requested() {
+                    JobOutcome::Cancelled
+                } else {
+                    match result {
+                        Ok(report) => JobOutcome::Done(report),
+                        Err(error) => JobOutcome::Failed(ApiError::Analysis(error).to_string()),
+                    }
+                };
+                jobs.finish(&job_id, outcome);
+            }));
+        }
+    }
+
+    Ok((StatusCode::ACCEPTED, Json(ScanJobCreated { scan_id })))
+}
+
+async fn scans_get(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ScanJobStatus>, ApiError> {
+    let view = state
+        .jobs
+        .view(&id)
+        .ok_or_else(|| ApiError::not_found(format!("unknown scan job: {id}")))?;
+
+    let status = match view.outcome {
+        Some(JobOutcome::Done(report)) => ScanJobStatus {
+            state: "done",
+            progress: None,
+            report: Some(report),
+            error: None,
+        },
+        Some(JobOutcome::Failed(message)) => ScanJobStatus {
+            state: "failed",
+            progress: None,
+            report: None,
+            error: Some(message),
+        },
+        Some(JobOutcome::Cancelled) => ScanJobStatus {
+            state: "cancelled",
+            progress: None,
+            report: None,
+            error: None,
+        },
+        None => {
+            let snapshot = view.progress.snapshot();
+            let state_name = phase_state_name(snapshot.phase);
+            ScanJobStatus {
+                state: state_name,
+                // Only the rescan phase has a meaningful percentage.
+                progress: (snapshot.phase == ScanPhase::Rescanning)
+                    .then_some(snapshot.rescan_progress)
+                    .flatten(),
+                report: None,
+                error: None,
+            }
+        }
+    };
+    Ok(Json(status))
+}
+
+async fn scans_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<ScanJobStateOnly>), ApiError> {
+    let view = state
+        .jobs
+        .view(&id)
+        .ok_or_else(|| ApiError::not_found(format!("unknown scan job: {id}")))?;
+
+    if let Some(outcome) = view.outcome {
+        let state_name = match outcome {
+            JobOutcome::Done(_) => "done",
+            JobOutcome::Failed(_) => "failed",
+            JobOutcome::Cancelled => "cancelled",
+        };
+        return Ok((StatusCode::OK, Json(ScanJobStateOnly { state: state_name })));
+    }
+
+    // The worker observes the flag when the (aborted) scan returns and
+    // finishes the job as cancelled; the rescan poller also honours it
+    // in case the wallet was not created yet when this request arrived.
+    view.progress.request_cancel();
+    let wallet_name = view.progress.snapshot().wallet_name;
+    if let (Some(gw), Some(wallet_name)) = (state.gateway, wallet_name) {
+        // The gateway client is blocking; keep it off the async runtime.
+        drop(tokio::task::spawn_blocking(move || {
+            gw.cancel_rescan(&wallet_name);
+        }));
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ScanJobStateOnly {
+            state: "cancelling",
+        }),
+    ))
+}
+
+fn phase_state_name(phase: ScanPhase) -> &'static str {
+    match phase {
+        ScanPhase::Pending => "pending",
+        ScanPhase::Rescanning => "rescanning",
+        ScanPhase::LoadingHistory => "loading_history",
+        ScanPhase::Analyzing => "analyzing",
+    }
 }
 
 impl ScanRequestBody {

@@ -18,6 +18,7 @@ use crate::gateway::{
 use crate::graph::TxGraph;
 use crate::types::Report;
 
+pub use stealth_model::progress::{ScanPhase, ScanProgress};
 pub use stealth_model::scan::{EngineSettings, ScanTarget, UtxoInput};
 
 type AddressSet = HashSet<bitcoin::Address<bitcoin::address::NetworkUnchecked>>;
@@ -48,10 +49,19 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
 
     /// Run a full privacy scan for the given target.
     pub fn analyze(&self, target: ScanTarget) -> Result<Report, AnalysisError> {
+        if let Some(sink) = &self.settings.progress {
+            self.gateway.set_progress_sink(sink.clone());
+        }
         match target {
             ScanTarget::Descriptor(d) => self.analyze_descriptors(vec![d]),
             ScanTarget::Descriptors(ds) => self.analyze_descriptors(ds),
             ScanTarget::Utxos(utxos) => self.analyze_utxos(utxos),
+        }
+    }
+
+    fn mark_phase(&self, phase: ScanPhase) {
+        if let Some(sink) = &self.settings.progress {
+            sink.set_phase(phase);
         }
     }
 
@@ -69,6 +79,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             self.gateway,
         )?;
         let history = self.gateway.scan_descriptors(&resolved)?;
+        self.mark_phase(ScanPhase::Analyzing);
         let graph = TxGraph::from_wallet_history(history);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
@@ -80,7 +91,9 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
     // ── UTXO path ───────────────────────────────────────────────────────
 
     fn analyze_utxos(&self, utxos: Vec<UtxoInput>) -> Result<Report, AnalysisError> {
+        self.mark_phase(ScanPhase::LoadingHistory);
         let history = self.resolve_utxo_history(&utxos)?;
+        self.mark_phase(ScanPhase::Analyzing);
         let graph = TxGraph::from_wallet_history(history);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
