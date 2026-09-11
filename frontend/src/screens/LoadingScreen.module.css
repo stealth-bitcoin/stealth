@@ -89,7 +89,14 @@
   white-space: nowrap;
 }
 
-/* Progress bar */
+/* Progress area */
+.footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
 .progressBar {
   width: 320px;
   max-width: 100%;
@@ -104,7 +111,44 @@
   background: var(--accent);
   border-radius: 1px;
   box-shadow: 0 0 8px var(--accent-glow);
-  animation: progress 4s linear forwards;
+  transition: width 0.6s ease;
+}
+
+.progressIndeterminate {
+  height: 100%;
+  width: 40%;
+  background: var(--accent);
+  border-radius: 1px;
+  box-shadow: 0 0 8px var(--accent-glow);
+  animation: slide 1.4s ease-in-out infinite;
+}
+
+.progressPercent {
+  font-family: var(--font-data);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.cancelButton {
+  padding: 8px 28px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+
+.cancelButton:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.cancelButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Keyframes */
@@ -133,9 +177,9 @@
   }
 }
 
-@keyframes progress {
-  from { width: 0%; }
-  to { width: 95%; }
+@keyframes slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(350%); }
 }
 
 .note {
