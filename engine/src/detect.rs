@@ -110,7 +110,11 @@ impl TxGraph {
                     correction: Some(
                         "Generate a fresh address for every payment received. \
                          Enable HD wallet derivation (BIP-32/44/84) so your wallet \
-                         produces a new address automatically."
+                         produces a new address automatically. \
+                         For a recurring or published receiving address, use a Silent \
+                         Payments address (sp1...): the sp1 string never appears on-chain \
+                         and every payment to it lands on a fresh, unrelated address, so \
+                         publishing it does not link the payments you receive."
                             .into(),
                     ),
                 });
@@ -611,7 +615,8 @@ impl TxGraph {
                     })),
                     correction: Some(
                         "Migrate all funds to a single address type — preferably Taproot (P2TR). \
-                         Never mix P2PKH, P2SH, P2WPKH, P2WSH, and P2TR inputs in the same transaction."
+                         Never mix P2PKH, P2SH, P2WPKH, P2WSH, and P2TR inputs in the same transaction. \
+                         Taproot is also a prerequisite for receiving via Silent Payments."
                             .into(),
                     ),
                 });
