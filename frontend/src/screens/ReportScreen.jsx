@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import FindingCard from '../components/FindingCard'
+import VulnerabilityBadge from '../components/VulnerabilityBadge'
 import styles from './ReportScreen.module.css'
 
 function truncateDescriptor(desc) {
@@ -17,7 +18,8 @@ const KIND_LABELS = {
 const GROUP_SUMMARIES = {
   ADDRESS_REUSE: (n) => `${n} addresses were reused across transactions`,
   CIOH: (n) => `${n} transactions merge your inputs (common-input-ownership)`,
-  DUST: (n) => `${n} dust UTXOs detected`,
+  // Historical, already-spent dust is a DUST finding too.
+  DUST: (n) => `${n} dust outputs detected`,
   DUST_SPENDING: (n) => `${n} transactions spend dust alongside normal inputs`,
   CHANGE_DETECTION: (n) => `${n} transactions have identifiable change outputs`,
   CONSOLIDATION: (n) => `${n} UTXOs were born from input consolidations`,
@@ -26,17 +28,31 @@ const GROUP_SUMMARIES = {
   EXCHANGE_ORIGIN: (n) => `${n} transactions look like exchange batch withdrawals`,
   TAINTED_UTXO_MERGE: (n) => `${n} transactions merge tainted and clean inputs`,
   DIRECT_TAINT: (n) => `${n} transactions come directly from a risky source`,
-  PEEL_CHAIN: (n) => `${n} peel chains detected`,
+  // One chain emits a finding per qualifying hop, so this counts findings.
+  PEEL_CHAIN: (n) => `${n} peel-chain findings`,
   DETERMINISTIC_LINK: (n) => `${n} transactions have guessable input→output links`,
   UNNECESSARY_INPUT: (n) => `${n} transactions include unnecessary inputs`,
   TOXIC_CHANGE: (n) => `${n} toxic change outputs were later merged`,
 }
 
-function groupSummary(type, count) {
+function groupSummary(type, count, noun) {
   const fn = GROUP_SUMMARIES[type]
   if (fn) return fn(count)
-  const label = String(type ?? 'finding').toLowerCase().replace(/_/g, ' ')
-  return `${count} ${label} findings`
+  const label = String(type ?? '').toLowerCase().replace(/_/g, ' ').trim()
+  return `${count} ${label} ${noun}s`.replace(/\s+/g, ' ')
+}
+
+const SEVERITY_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 }
+
+// Severities vary inside one type, so a collapsed group must carry the worst.
+function worstSeverity(items) {
+  let worst = null
+  for (const f of items) {
+    if (!worst || (SEVERITY_RANK[f.severity] ?? 0) > (SEVERITY_RANK[worst] ?? 0)) {
+      worst = f.severity
+    }
+  }
+  return worst
 }
 
 function groupByType(list) {
@@ -52,12 +68,14 @@ function groupByType(list) {
   return order.map((type) => ({ type, items: byType.get(type) }))
 }
 
-function FindingGroup({ type, items }) {
-  const [open, setOpen] = useState(false)
+function FindingGroup({ type, items, noun }) {
+  const severity = worstSeverity(items)
+  const [open, setOpen] = useState(severity === 'CRITICAL')
   return (
     <div className={styles.group}>
       <button className={styles.groupHeader} onClick={() => setOpen((o) => !o)}>
-        <span className={styles.groupSummary}>{groupSummary(type, items.length)}</span>
+        <VulnerabilityBadge type={type} severity={severity} />
+        <span className={styles.groupSummary}>{groupSummary(type, items.length, noun)}</span>
         <span className={`${styles.chevron} ${open ? styles.open : ''}`}>›</span>
       </button>
       {open && (
@@ -71,12 +89,12 @@ function FindingGroup({ type, items }) {
   )
 }
 
-function FindingList({ list }) {
+function FindingList({ list, noun = 'finding' }) {
   return (
     <div className={styles.findingList}>
       {groupByType(list).map((group, i) =>
         group.items.length > 1 ? (
-          <FindingGroup key={i} type={group.type} items={group.items} />
+          <FindingGroup key={i} type={group.type} items={group.items} noun={noun} />
         ) : (
           <FindingCard key={i} finding={group.items[0]} />
         ),
@@ -85,8 +103,33 @@ function FindingList({ list }) {
   )
 }
 
-export default function ReportScreen({ report, descriptor, kind, onReset }) {
+// The web UI always imports from genesis, so a scan window is never the cause.
+function emptyHint(kind) {
+  if (kind === 'utxos') {
+    return 'Nothing was analyzed. None of the UTXO references you pasted could be ' +
+      'resolved to an output this node can read: check that each vout exists in ' +
+      'its transaction and belongs to a standard, addressable script.'
+  }
+  if (kind === 'address') {
+    return 'Nothing was analyzed. This address has never appeared on-chain, or the ' +
+      'node is still catching up to the chain tip.'
+  }
+  return 'Nothing was analyzed. This can mean a wallet that was never used, purely ' +
+    'off-chain history (e.g. Lightning), a descriptor that derives different ' +
+    'addresses than the ones you funded, or a node still catching up to the ' +
+    'chain tip.'
+}
+
+// The classifier calls anything with parentheses a descriptor, so a pasted
+// addr(...) arrives here as one despite being a single-address scan.
+function effectiveKind(kind, descriptor) {
+  if (kind === 'descriptor' && /^\s*addr\(/i.test(descriptor ?? '')) return 'address'
+  return kind
+}
+
+export default function ReportScreen({ report, descriptor, kind: rawKind, onReset }) {
   const { stats, findings, warnings, summary } = report
+  const kind = effectiveKind(rawKind, descriptor)
 
   return (
     <div className={styles.root}>
@@ -132,8 +175,8 @@ export default function ReportScreen({ report, descriptor, kind, onReset }) {
         {kind === 'address' && (
           <div className={styles.scopeNote}>
             This audit covers only this single address. To review your whole wallet,
-            scan its xpub or output descriptor instead — an address alone reveals
-            nothing about your other addresses or change outputs.
+            scan its xpub or output descriptor instead: one address gives this scan
+            no visibility into your other addresses or your change outputs.
           </div>
         )}
 
@@ -141,11 +184,7 @@ export default function ReportScreen({ report, descriptor, kind, onReset }) {
         {summary.analyzed_nothing && (
           <div className={styles.emptyBanner}>
             <strong>No transactions found for this input.</strong>
-            <p className={styles.emptyHint}>
-              Nothing was analyzed. This can mean an unused address, a wallet whose
-              activity predates the scan window, purely off-chain history (e.g.
-              Lightning), or a node still catching up to the chain tip.
-            </p>
+            <p className={styles.emptyHint}>{emptyHint(kind)}</p>
           </div>
         )}
 
@@ -172,7 +211,7 @@ export default function ReportScreen({ report, descriptor, kind, onReset }) {
             <div className={styles.listHeader} style={{ marginTop: 28 }}>
               <span className={styles.listTitle}>Warnings</span>
             </div>
-            <FindingList list={warnings} />
+            <FindingList list={warnings} noun="warning" />
           </>
         )}
       </div>

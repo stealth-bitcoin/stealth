@@ -4,6 +4,7 @@ use std::{env, fs};
 
 use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc};
 use stealth_engine::engine::{AnalysisEngine, EngineSettings, ScanTarget, UtxoInput};
+use stealth_engine::types::Summary;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -59,7 +60,16 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
         Some(other) => return Err(format!("unsupported format '{other}' (use json or text)")),
     }
 
-    Ok(report.summary.clean || report.summary.analyzed_nothing)
+    Ok(scan_succeeded(&report.summary))
+}
+
+/// Exit 0 only when there is nothing to report: a clean history, or a scan
+/// that analyzed nothing and found nothing.
+fn scan_succeeded(summary: &Summary) -> bool {
+    if summary.findings > 0 || summary.warnings > 0 {
+        return false;
+    }
+    summary.clean || summary.analyzed_nothing
 }
 
 #[derive(Debug, Default)]
@@ -209,7 +219,10 @@ fn print_text_report(report: &stealth_engine::Report) {
              activity predates the rescan window, purely off-chain (e.g. Lightning) \
              history, or a node still catching up to the chain tip."
         );
-        return;
+        // An unconditional return here would swallow findings.
+        if report.summary.findings == 0 && report.summary.warnings == 0 {
+            return;
+        }
     }
 
     if report.summary.clean {
@@ -294,6 +307,35 @@ mod tests {
     #[test]
     fn rejects_non_numeric_rescan_since() {
         assert!(parse_scan_args(&to_args(&["--rescan-since", "yesterday"])).is_err());
+    }
+
+    fn summary(clean: bool, analyzed_nothing: bool, findings: usize) -> Summary {
+        Summary {
+            findings,
+            warnings: 0,
+            clean,
+            analyzed_nothing,
+        }
+    }
+
+    #[test]
+    fn a_clean_scan_exits_successfully() {
+        assert!(scan_succeeded(&summary(true, false, 0)));
+    }
+
+    #[test]
+    fn an_empty_scan_exits_successfully() {
+        assert!(scan_succeeded(&summary(false, true, 0)));
+    }
+
+    #[test]
+    fn findings_fail_the_scan_even_when_nothing_was_analyzed() {
+        assert!(!scan_succeeded(&summary(false, true, 1)));
+    }
+
+    #[test]
+    fn findings_fail_the_scan() {
+        assert!(!scan_succeeded(&summary(false, false, 3)));
     }
 }
 
