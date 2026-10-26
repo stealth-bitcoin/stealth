@@ -63,6 +63,13 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     Ok(scan_succeeded(&report.summary))
 }
 
+/// Nothing was analyzed and nothing was reported. Findings alongside zero
+/// analyzed transactions would make the empty-scan notice a contradiction, so
+/// the findings take precedence.
+fn is_empty_report(summary: &Summary) -> bool {
+    summary.analyzed_nothing && summary.findings == 0 && summary.warnings == 0
+}
+
 /// Exit 0 only when there is nothing to report: a clean history, or a scan
 /// that analyzed nothing and found nothing.
 fn scan_succeeded(summary: &Summary) -> bool {
@@ -212,17 +219,14 @@ fn print_text_report(report: &stealth_engine::Report) {
         report.stats.transactions_analyzed, report.stats.addresses_seen, report.stats.utxos_current,
     );
 
-    if report.summary.analyzed_nothing {
+    if is_empty_report(&report.summary) {
         println!("No transactions found for this input.");
         println!(
             "Nothing was analyzed — this can mean an unused address, a wallet whose \
              activity predates the rescan window, purely off-chain (e.g. Lightning) \
              history, or a node still catching up to the chain tip."
         );
-        // An unconditional return here would swallow findings.
-        if report.summary.findings == 0 && report.summary.warnings == 0 {
-            return;
-        }
+        return;
     }
 
     if report.summary.clean {

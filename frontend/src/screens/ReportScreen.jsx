@@ -181,7 +181,7 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
         )}
 
         {/* Nothing-analyzed banner */}
-        {summary.analyzed_nothing && (
+        {summary.analyzed_nothing && findings.length === 0 && warnings.length === 0 && (
           <div className={styles.emptyBanner}>
             <strong>No transactions found for this input.</strong>
             <p className={styles.emptyHint}>{emptyHint(kind)}</p>

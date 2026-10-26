@@ -37,6 +37,15 @@ describe('ReportScreen — nothing analyzed vs clean', () => {
     expect(screen.getByText(/unused address|off-chain|behind|catching up|lightning/i)).toBeTruthy()
   })
 
+  it('never claims nothing was analyzed above a list of findings', () => {
+    const report = makeReport({ txs: 0 })
+    report.findings = [finding('DUST', 'Dust UTXO at bc1qaaa (600 sats, P2WPKH, unspent)')]
+    report.summary.findings = 1
+    render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.queryByText(/no transactions found for this input/i)).toBeNull()
+    expect(screen.getByText('Dust UTXO at bc1qaaa (600 sats, P2WPKH, unspent)')).toBeTruthy()
+  })
+
   it('shows the clean banner when transactions were analyzed with no findings', () => {
     render(<ReportScreen report={makeReport({ txs: 7 })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
     expect(screen.getByText(/clean history/i)).toBeTruthy()

@@ -58,6 +58,39 @@ mod exit_codes {
     }
 }
 
+mod empty_report {
+    use crate::*;
+
+    fn summary(analyzed_nothing: bool, findings: usize, warnings: usize) -> Summary {
+        Summary {
+            findings,
+            warnings,
+            clean: false,
+            analyzed_nothing,
+        }
+    }
+
+    #[test]
+    fn an_empty_scan_with_nothing_to_report_is_empty() {
+        assert!(is_empty_report(&summary(true, 0, 0)));
+    }
+
+    #[test]
+    fn findings_outrank_the_empty_notice() {
+        assert!(!is_empty_report(&summary(true, 1, 0)));
+    }
+
+    #[test]
+    fn warnings_outrank_the_empty_notice() {
+        assert!(!is_empty_report(&summary(true, 0, 1)));
+    }
+
+    #[test]
+    fn a_scan_that_analyzed_something_is_not_empty() {
+        assert!(!is_empty_report(&summary(false, 0, 0)));
+    }
+}
+
 mod ownership {
     use crate::*;
 
