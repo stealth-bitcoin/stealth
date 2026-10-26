@@ -384,6 +384,48 @@ fn report_serialization_is_deterministic() {
 }
 
 #[test]
+fn address_reuse_correction_recommends_silent_payments() {
+    let history = build_history();
+    let report = scan(&history);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.vulnerability_type == VulnerabilityType::AddressReuse)
+        .expect("expected an AddressReuse finding");
+    let correction = finding
+        .correction
+        .as_deref()
+        .expect("AddressReuse finding has no correction");
+    assert!(
+        correction.contains("Silent Payments"),
+        "AddressReuse correction does not mention Silent Payments: {correction}"
+    );
+    assert!(
+        correction.contains("sp1"),
+        "AddressReuse correction does not mention an sp1 address: {correction}"
+    );
+}
+
+#[test]
+fn script_type_mixing_correction_notes_silent_payments_prerequisite() {
+    let history = build_history();
+    let report = scan(&history);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.vulnerability_type == VulnerabilityType::ScriptTypeMixing)
+        .expect("expected a ScriptTypeMixing finding");
+    let correction = finding
+        .correction
+        .as_deref()
+        .expect("ScriptTypeMixing finding has no correction");
+    assert!(
+        correction.contains("Silent Payments"),
+        "ScriptTypeMixing correction does not mention Silent Payments: {correction}"
+    );
+}
+
+#[test]
 fn cioh_and_consolidation_corrections_recommend_payjoin() {
     let history = build_history();
     let report = scan(&history);
