@@ -5,7 +5,10 @@ import ReportScreen from './ReportScreen'
 
 afterEach(cleanup)
 
-function makeReport({ txs = 0, findings = [], warnings = [], clean = false } = {}) {
+// Mirrors Report::new in model/src/types.rs: a scan is clean only when it
+// analyzed something and found nothing.
+function makeReport({ txs = 0, findings = [], warnings = [] } = {}) {
+  const analyzedNothing = txs === 0
   return {
     stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0 },
     findings,
@@ -13,8 +16,8 @@ function makeReport({ txs = 0, findings = [], warnings = [], clean = false } = {
     summary: {
       findings: findings.length,
       warnings: warnings.length,
-      clean,
-      analyzed_nothing: txs === 0,
+      clean: !analyzedNothing && findings.length === 0 && warnings.length === 0,
+      analyzed_nothing: analyzedNothing,
     },
   }
 }
@@ -35,7 +38,7 @@ describe('ReportScreen — nothing analyzed vs clean', () => {
   })
 
   it('shows the clean banner when transactions were analyzed with no findings', () => {
-    render(<ReportScreen report={makeReport({ txs: 7, clean: true })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    render(<ReportScreen report={makeReport({ txs: 7 })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
     expect(screen.getByText(/clean history/i)).toBeTruthy()
     expect(screen.queryByText(/no transactions found for this input/i)).toBeNull()
   })

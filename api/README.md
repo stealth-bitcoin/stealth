@@ -96,7 +96,7 @@ curl 'http://localhost:20899/api/wallet/scan' \
 The API includes an end-to-end regtest integration test that:
 1. creates wallets,
 2. gets a real descriptor from `bitcoind`,
-3. scans once with no history (`summary.clean = true`),
+3. scans once with no history (`summary.analyzed_nothing = true`, `summary.clean = false`),
 4. creates/mine transactions,
 5. scans again and asserts findings (`summary.clean = false`).
 
