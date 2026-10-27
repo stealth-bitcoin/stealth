@@ -153,6 +153,19 @@ Stealth currently runs **16 detectors** in `stealth-engine`.
 - [ ] Enable external clients (e.g. wallets, tools like am-i-exposed)
 - [ ] Integrate with Floresta
 
+## Ecosystem
+
+_Last updated: 2026-10-27_
+
+Stealth is meant to be used by other tools as much as on its own. Where each integration thread stands:
+
+- **BDK (Bitcoin Dev Kit)** — [bitcoindevkit/bdk_wallet#429](https://github.com/bitcoindevkit/bdk_wallet/issues/429): the direction agreed with the BDK maintainers is an external crate that depends on `bdk_wallet`, not a change to BDK itself. Planned once the engine's library API settles (see Roadmap).
+- **am-i-exposed** ([Copexit](https://github.com/Copexit)) — [#7](https://github.com/stealth-bitcoin/stealth/issues/7): proposal to use Stealth as the analysis backend behind their client. Open; `stealth-api` is the integration point.
+- **Self-hosted node packages** — [#4](https://github.com/stealth-bitcoin/stealth/issues/4): request for Umbrel and Start9 packaging. Stealth already runs against a local Bitcoin Core node, which is the model those platforms expect; packaging comes after the mainnet work.
+- **Freedom Tech Friday** — [episode](https://x.com/i/broadcasts/1mxPaLdXZMZKN) on Stealth's approach to privacy analysis.
+
+Related work: [verso](https://github.com/aljazceru/verso), a wallet privacy tool built on `bdk_wallet`, which the BDK maintainers pointed to in the discussion above.
+
 ## Installation
 
 ### Prerequisites
