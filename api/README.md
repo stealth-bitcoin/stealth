@@ -55,8 +55,12 @@ Accepts one mutually-exclusive source:
 descriptor(s) with a full blockchain rescan, builds a `TxGraph`, runs all
 17 detectors, then cleans up the temporary wallet.
 
-**UTXO scan flow:** resolves each UTXO's address from the node, builds a
-partial transaction graph, and runs applicable detectors.
+**UTXO scan flow:** resolves each UTXO's address from the node, fetches the
+chain history of those addresses the way a descriptor scan does (one `addr()`
+import and rescan for all of them), builds the transaction graph from the
+pasted outputs plus that history, and runs the detectors. When the node cannot
+serve the history, the scan completes on the pasted outputs alone and
+`stats.addresses_without_history` says how many addresses that affected.
 
 #### Example (real descriptor from Bitcoin Core)
 

@@ -7,10 +7,10 @@ afterEach(cleanup)
 
 // Mirrors Report::new in model/src/types.rs: a scan is clean only when it
 // analyzed something and found nothing.
-function makeReport({ txs = 0, findings = [], warnings = [] } = {}) {
+function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0 } = {}) {
   const analyzedNothing = txs === 0
   return {
-    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0 },
+    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved },
     findings,
     warnings,
     summary: {
@@ -345,5 +345,26 @@ describe('ReportScreen — rows are ordered by severity, worst first', () => {
     ]
     render(<ReportScreen report={makeReport({ txs: 9, findings: mixed, warnings })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
     expect(rowTexts('warnings')[0]).toMatch(/tainted/i)
+  })
+})
+
+describe('ReportScreen — history the node could not serve', () => {
+  const two = '8f792eb1a5e79c35628ddfac918321b945f63adabdf43e0a567cd4e3ecb55e65:0\n0d6b4d403d2f139a6c92f2e3fcf67d591ba4fff593cfc8e03e79fbc2eb019dd4:0'
+  const reuse = finding('ADDRESS_REUSE', 'Address bc1q reused across 2 transactions')
+
+  it('says how many addresses fell back to the pasted outputs', () => {
+    render(<ReportScreen report={makeReport({ txs: 2, findings: [reuse], unserved: 1 })} descriptor={two} kind="utxos" onReset={() => {}} />)
+    expect(screen.getByText(/could not serve the chain history of 1 address\b/i)).toBeTruthy()
+  })
+
+  it('pluralizes the addresses', () => {
+    render(<ReportScreen report={makeReport({ txs: 2, findings: [reuse], unserved: 2 })} descriptor={two} kind="utxos" onReset={() => {}} />)
+    expect(screen.getByText(/could not serve the chain history of 2 addresses/i)).toBeTruthy()
+  })
+
+  it('says nothing when the chain history came through', () => {
+    render(<ReportScreen report={makeReport({ txs: 2, findings: [reuse] })} descriptor={two} kind="utxos" onReset={() => {}} />)
+    expect(screen.queryByText(/could not serve/i)).toBeNull()
+    expect(screen.queryByText(/you pasted/i)).toBeNull()
   })
 })

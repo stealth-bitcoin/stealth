@@ -183,6 +183,16 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
           </div>
         )}
 
+        {/* History the node could not serve */}
+        {stats.addresses_without_history > 0 && (
+          <div className={styles.scopeNote}>
+            The node could not serve the chain history of {stats.addresses_without_history}{' '}
+            {stats.addresses_without_history === 1 ? 'address' : 'addresses'} behind these
+            outputs; the counts for {stats.addresses_without_history === 1 ? 'it' : 'them'} cover
+            only the outputs you pasted.
+          </div>
+        )}
+
         {/* Nothing-analyzed banner */}
         {summary.analyzed_nothing && findings.length === 0 && warnings.length === 0 && (
           <div className={styles.emptyBanner}>

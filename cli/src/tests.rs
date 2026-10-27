@@ -178,6 +178,7 @@ mod ordering {
             transactions_analyzed: 3,
             addresses_seen: 3,
             utxos_current: 1,
+            addresses_without_history: 0,
         };
         stealth_engine::Report::new(stats, findings, warnings)
     }
@@ -211,6 +212,7 @@ mod ordering {
             transactions_analyzed: 0,
             addresses_seen: 1,
             utxos_current: 0,
+            addresses_without_history: 0,
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert_eq!(
@@ -229,6 +231,45 @@ mod ordering {
         assert_eq!(
             text,
             "Scanned 3 transactions, 3 addresses, 1 current UTXOs\n\nNo privacy issues found.\n"
+        );
+    }
+
+    #[test]
+    fn the_text_report_names_the_history_the_node_could_not_serve() {
+        let stats = stealth_engine::types::Stats {
+            transactions_analyzed: 2,
+            addresses_seen: 2,
+            utxos_current: 2,
+            addresses_without_history: 2,
+        };
+        let text = text_report(&stealth_engine::Report::new(
+            stats,
+            vec![finding(VulnerabilityType::Dust, Severity::Medium, "dust")],
+            Vec::new(),
+        ));
+        assert!(
+            text.contains("could not serve the chain history of 2 addresses"),
+            "{text}"
+        );
+        assert!(
+            position(&text, "could not serve") < position(&text, "Findings (1):"),
+            "the caveat comes before the findings it qualifies:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_clean_verdict_over_unserved_history_still_carries_the_caveat() {
+        let stats = stealth_engine::types::Stats {
+            transactions_analyzed: 2,
+            addresses_seen: 1,
+            utxos_current: 2,
+            addresses_without_history: 1,
+        };
+        let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
+        assert!(text.contains("No privacy issues found."), "{text}");
+        assert!(
+            text.contains("could not serve the chain history of 1 address;"),
+            "{text}"
         );
     }
 

@@ -111,3 +111,39 @@ fn ownership_descriptors_suppress_own_batch_false_positive() {
         "ownership context must suppress the exchange-origin false positive"
     );
 }
+
+#[test]
+fn utxo_scan_counts_address_reuse_from_the_chain_not_from_the_pasted_outputs() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let a1 = alice.new_address().unwrap();
+    for _ in 0..3 {
+        node.client
+            .send_to_address(&a1, Amount::from_sat(100_000))
+            .unwrap();
+        mine(&node, 1, &da);
+    }
+
+    // One of the three outputs, pasted alone.
+    let one: Vec<UtxoInput> = utxo_inputs_for(&alice).into_iter().take(1).collect();
+    let gateway = gateway_for(&node);
+    let engine = AnalysisEngine::new(&gateway, EngineSettings::default());
+    let report = engine
+        .analyze(ScanTarget::Utxos(one))
+        .expect("utxo scan failed");
+
+    let reuse = report
+        .findings
+        .iter()
+        .find(|f| f.vulnerability_type == VulnerabilityType::AddressReuse)
+        .expect("the address was paid three times, so reuse must be reported");
+    assert!(
+        reuse.description.contains("reused across 3 transactions"),
+        "the count must be the chain's, got: {}",
+        reuse.description
+    );
+    assert_eq!(report.stats.addresses_without_history, 0);
+}

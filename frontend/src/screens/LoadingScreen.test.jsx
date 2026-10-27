@@ -42,17 +42,12 @@ describe('LoadingScreen', () => {
     expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBeNull()
   })
 
-  it('shows the full-chain-scan note for descriptor, xpub, and address scans', () => {
-    for (const kind of ['descriptor', 'xpub', 'address']) {
+  it('shows the full-chain-scan note for every kind, since a UTXO list rescans for its addresses too', () => {
+    for (const kind of ['descriptor', 'xpub', 'address', 'utxos']) {
       const { unmount } = render(<LoadingScreen text="abc" kind={kind} />)
       expect(screen.getByText(NOTE)).toBeTruthy()
       unmount()
     }
-  })
-
-  it('does not show the note for utxo scans', () => {
-    render(<LoadingScreen text="deadbeef:0" kind="utxos" />)
-    expect(screen.queryByText(NOTE)).toBeNull()
   })
 
   it('calls onCancel and disables the button while cancelling', async () => {

@@ -5,7 +5,7 @@
 //! every scan request through the shared gateway abstraction, ensuring a
 //! single execution path for HTTP, CLI, and library consumers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bitcoin::{Amount, Txid};
 
@@ -92,14 +92,49 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
 
     fn analyze_utxos(&self, utxos: Vec<UtxoInput>) -> Result<Report, AnalysisError> {
         self.mark_phase(ScanPhase::LoadingHistory);
-        let history = self.resolve_utxo_history(&utxos)?;
+        let mut history = self.resolve_utxo_history(&utxos)?;
+        let addresses_without_history = self.merge_address_history(&mut history);
         self.mark_phase(ScanPhase::Analyzing);
         let graph = TxGraph::from_wallet_history(history);
-        Ok(graph.detect_all(
+        let mut report = graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
             self.settings.known_exchange_txids.as_ref(),
-        ))
+        );
+        report.stats.addresses_without_history = addresses_without_history;
+        Ok(report)
+    }
+
+    /// A pasted output names its address; the chain knows the rest of that
+    /// address's history, fetched the way a single-address scan fetches it.
+    /// One scan covers every address, so the node serves all of them or
+    /// none; the return value is how many it could not serve, in which case
+    /// the pasted outputs stay as their only history.
+    fn merge_address_history(&self, history: &mut WalletHistory) -> usize {
+        let addresses: BTreeSet<String> = history
+            .utxos
+            .iter()
+            .filter_map(|u| u.address.as_ref())
+            .map(|a| a.assume_checked_ref().to_string())
+            .collect();
+        if addresses.is_empty() {
+            return 0;
+        }
+        let raw: Vec<String> = addresses.iter().map(|a| format!("addr({a})")).collect();
+        let fetched = normalize_descriptors(
+            &raw,
+            self.settings.config.derivation_range_end,
+            self.settings.rescan_since,
+            self.gateway,
+        )
+        .and_then(|resolved| self.gateway.scan_descriptors(&resolved));
+        match fetched {
+            Ok(full) => {
+                merge_chain_history(history, full);
+                0
+            }
+            Err(_) => addresses.len(),
+        }
     }
 
     /// Build a [`WalletHistory`] from raw UTXO inputs by fetching the
@@ -234,3 +269,17 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         Ok((internal, derived))
     }
 }
+
+/// The node's entries replace the ones built from the pasted outputs for the
+/// transactions it returned; an output the node did not return keeps its entry.
+pub(crate) fn merge_chain_history(history: &mut WalletHistory, full: WalletHistory) {
+    let fetched: HashSet<Txid> = full.wallet_txs.iter().map(|e| e.txid).collect();
+    history.wallet_txs.retain(|e| !fetched.contains(&e.txid));
+    history.wallet_txs.extend(full.wallet_txs);
+    history.transactions.extend(full.transactions);
+    history.internal_addresses.extend(full.internal_addresses);
+    history.derived_addresses.extend(full.derived_addresses);
+}
+
+#[cfg(test)]
+mod tests;

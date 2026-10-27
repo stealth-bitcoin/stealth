@@ -230,6 +230,16 @@ fn text_report(report: &stealth_engine::Report) -> String {
         report.stats.transactions_analyzed, report.stats.addresses_seen, report.stats.utxos_current,
     )];
 
+    let unserved = report.stats.addresses_without_history;
+    if unserved > 0 {
+        lines.push(format!(
+            "The node could not serve the chain history of {unserved} address{}; \
+             the counts for {} cover only the outputs you pasted.\n",
+            if unserved == 1 { "" } else { "es" },
+            if unserved == 1 { "it" } else { "them" },
+        ));
+    }
+
     if is_empty_report(&report.summary) {
         lines.push("No transactions found for this input.".to_owned());
         lines.push(

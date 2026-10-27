@@ -177,6 +177,10 @@ pub struct Stats {
     pub transactions_analyzed: usize,
     pub addresses_seen: usize,
     pub utxos_current: usize,
+    /// Addresses behind a pasted UTXO set whose chain history the node could
+    /// not serve; their counts cover only the pasted outputs.
+    #[serde(default)]
+    pub addresses_without_history: usize,
 }
 
 /// Summary of the scan results.
@@ -231,6 +235,7 @@ mod summary_tests {
             transactions_analyzed: txs,
             addresses_seen: 0,
             utxos_current: 0,
+            addresses_without_history: 0,
         }
     }
 

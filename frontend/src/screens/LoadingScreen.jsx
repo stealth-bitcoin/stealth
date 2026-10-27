@@ -8,7 +8,8 @@ const PHASE_LABELS = {
   analyzing: 'Analyzing privacy patterns',
 }
 
-const CHAIN_SCAN_KINDS = ['descriptor', 'xpub', 'address']
+// A UTXO list rescans the chain for its addresses too.
+const CHAIN_SCAN_KINDS = ['descriptor', 'xpub', 'address', 'utxos']
 
 export default function LoadingScreen({ text, kind, state, progress, onCancel }) {
   const [cancelling, setCancelling] = useState(false)
