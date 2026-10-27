@@ -87,3 +87,28 @@ fn list_transactions_paginates_beyond_page_size() {
         "entries must stay oldest-first across page boundaries, got: {heights:?}"
     );
 }
+
+// ─── rpc errors ────────────────────────────────────────────────────────────
+
+#[test]
+fn rpc_error_reports_the_node_message_not_the_http_status() {
+    let node = node();
+    let gateway = gateway_for(&node);
+    let unknown: Txid = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        .parse()
+        .expect("txid");
+
+    let err = gateway
+        .get_transaction(unknown)
+        .expect_err("an unknown txid must fail");
+    let text = err.to_string();
+
+    assert!(
+        text.contains("No such mempool or blockchain transaction"),
+        "the node's own message must reach the caller, got: {text}"
+    );
+    assert!(
+        !text.contains("500"),
+        "an RPC error is not a transport failure, got: {text}"
+    );
+}
