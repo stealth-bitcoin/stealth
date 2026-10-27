@@ -44,17 +44,6 @@ function groupSummary(type, count, noun) {
 
 const SEVERITY_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 }
 
-// Severities vary inside one type, so a collapsed group must carry the worst.
-function worstSeverity(items) {
-  let worst = null
-  for (const f of items) {
-    if (!worst || (SEVERITY_RANK[f.severity] ?? 0) > (SEVERITY_RANK[worst] ?? 0)) {
-      worst = f.severity
-    }
-  }
-  return worst
-}
-
 function groupByType(list) {
   const order = []
   const byType = new Map()
@@ -68,8 +57,7 @@ function groupByType(list) {
   return order.map((type) => ({ type, items: byType.get(type) }))
 }
 
-function FindingGroup({ type, items, noun }) {
-  const severity = worstSeverity(items)
+function FindingGroup({ type, items, severity, noun }) {
   const [open, setOpen] = useState(severity === 'CRITICAL')
   return (
     <div className={styles.group}>
@@ -89,14 +77,29 @@ function FindingGroup({ type, items, noun }) {
   )
 }
 
+const worstFirst = (a, b) => (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0)
+
+// The engine emits findings by detector; the reader goes top-down.
 function FindingList({ list, noun = 'finding' }) {
+  const groups = groupByType(list)
+    .map((group) => {
+      const items = [...group.items].sort(worstFirst)
+      return { ...group, items, severity: items[0].severity }
+    })
+    .sort(worstFirst)
   return (
     <div className={styles.findingList}>
-      {groupByType(list).map((group, i) =>
+      {groups.map((group) =>
         group.items.length > 1 ? (
-          <FindingGroup key={i} type={group.type} items={group.items} noun={noun} />
+          <FindingGroup
+            key={group.type}
+            type={group.type}
+            items={group.items}
+            severity={group.severity}
+            noun={noun}
+          />
         ) : (
-          <FindingCard key={i} finding={group.items[0]} />
+          <FindingCard key={group.type} finding={group.items[0]} />
         ),
       )}
     </div>

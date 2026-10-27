@@ -296,3 +296,54 @@ describe('ReportScreen — the scope note does not overclaim', () => {
     expect(screen.queryByText(/reveals nothing about your other addresses/i)).toBeNull()
   })
 })
+
+describe('ReportScreen — rows are ordered by severity, worst first', () => {
+  // The engine emits findings by detector, so a LOW row can precede a CRITICAL one.
+  const mixed = [
+    finding('UTXO_AGE_SPREAD', 'UTXO age spread of 15 blocks between oldest and newest', { severity: 'LOW' }),
+    finding('CHANGE_DETECTION', 'TX aaa has identifiable change output(s)', { severity: 'MEDIUM' }),
+    finding('CHANGE_DETECTION', 'TX bbb has identifiable change output(s)', { severity: 'MEDIUM' }),
+    finding('CONSOLIDATION', 'UTXO ccc:1 born from a 3-input consolidation', { severity: 'MEDIUM' }),
+    finding('PEEL_CHAIN', 'Peel chain of 4 hops starting at TX ddd', { severity: 'CRITICAL' }),
+    finding('PEEL_CHAIN', 'Peel chain of 2 hops starting at TX eee', { severity: 'HIGH' }),
+  ]
+
+  function rowTexts(section) {
+    const title = screen.getAllByText(section === 'warnings' ? 'Warnings' : 'Findings').find((el) => /listTitle/.test(el.className))
+    const list = title.closest('[class*=listHeader]').nextElementSibling
+    return [...list.children].map((el) => el.querySelector('button').textContent)
+  }
+
+  it('puts the most severe row first, whatever order the engine emitted', () => {
+    render(<ReportScreen report={makeReport({ txs: 9, findings: mixed })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    const rows = rowTexts('findings')
+    expect(rows[0]).toMatch(/peel-chain/i)
+    expect(rows[rows.length - 1]).toMatch(/age spread/i)
+  })
+
+  it('keeps the engine order between rows of equal severity', () => {
+    render(<ReportScreen report={makeReport({ txs: 9, findings: mixed })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    const rows = rowTexts('findings')
+    expect(rows[1]).toMatch(/change outputs/i)
+    expect(rows[2]).toMatch(/consolidation/i)
+  })
+
+  it('orders the findings inside an expanded group the same way', () => {
+    const chain = [
+      finding('PEEL_CHAIN', 'Peel chain of 2 hops starting at TX aaa', { severity: 'HIGH' }),
+      finding('PEEL_CHAIN', 'Peel chain of 4 hops starting at TX bbb', { severity: 'CRITICAL' }),
+    ]
+    render(<ReportScreen report={makeReport({ txs: 9, findings: chain })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    const inner = [...document.querySelectorAll('[class*=groupItems] [class*=description]')].map((e) => e.textContent)
+    expect(inner[0]).toMatch(/4 hops/)
+  })
+
+  it('orders the warnings the same way', () => {
+    const warnings = [
+      finding('DORMANT_UTXOS', '4 UTXO(s) have ≥100 confirmations', { severity: 'LOW' }),
+      finding('TAINTED_UTXO_MERGE', 'TX fff merges tainted and clean inputs', { severity: 'HIGH' }),
+    ]
+    render(<ReportScreen report={makeReport({ txs: 9, findings: mixed, warnings })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(rowTexts('warnings')[0]).toMatch(/tainted/i)
+  })
+})

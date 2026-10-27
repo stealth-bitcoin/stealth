@@ -123,3 +123,164 @@ mod ownership {
         );
     }
 }
+
+mod ordering {
+    use crate::*;
+    use stealth_engine::types::{Finding, Severity, VulnerabilityType};
+
+    fn finding(vtype: VulnerabilityType, severity: Severity, description: &str) -> Finding {
+        Finding {
+            vulnerability_type: vtype,
+            severity,
+            description: description.to_owned(),
+            details: None,
+            correction: None,
+        }
+    }
+
+    fn descriptions(list: &[Finding]) -> Vec<&str> {
+        by_severity(list)
+            .into_iter()
+            .map(|f| f.description.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_worst_finding_prints_first() {
+        let list = vec![
+            finding(VulnerabilityType::UtxoAgeSpread, Severity::Low, "spread"),
+            finding(VulnerabilityType::Cioh, Severity::Critical, "cioh"),
+            finding(VulnerabilityType::AddressReuse, Severity::High, "reuse"),
+        ];
+        assert_eq!(descriptions(&list), ["cioh", "reuse", "spread"]);
+    }
+
+    #[test]
+    fn equal_severities_keep_the_engine_order() {
+        let list = vec![
+            finding(VulnerabilityType::DormantUtxos, Severity::Low, "dormant"),
+            finding(
+                VulnerabilityType::ChangeDetection,
+                Severity::Medium,
+                "change",
+            ),
+            finding(
+                VulnerabilityType::Consolidation,
+                Severity::Medium,
+                "consolidation",
+            ),
+        ];
+        assert_eq!(descriptions(&list), ["change", "consolidation", "dormant"]);
+    }
+
+    fn report(findings: Vec<Finding>, warnings: Vec<Finding>) -> stealth_engine::Report {
+        let stats = stealth_engine::types::Stats {
+            transactions_analyzed: 3,
+            addresses_seen: 3,
+            utxos_current: 1,
+        };
+        stealth_engine::Report::new(stats, findings, warnings)
+    }
+
+    fn position(text: &str, needle: &str) -> usize {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} missing from:\n{text}"))
+    }
+
+    #[test]
+    fn the_text_report_keeps_its_shape() {
+        let text = text_report(&report(
+            vec![finding(VulnerabilityType::Cioh, Severity::Critical, "cioh")],
+            vec![finding(
+                VulnerabilityType::DormantUtxos,
+                Severity::Low,
+                "dormant",
+            )],
+        ));
+        assert_eq!(
+            text,
+            "Scanned 3 transactions, 3 addresses, 1 current UTXOs\n\n\
+             Findings (1):\n  [CRITICAL] CIOH: cioh\n\n\
+             Warnings (1):\n  [LOW] DORMANT_UTXOS: dormant\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_report_keeps_its_shape() {
+        let stats = stealth_engine::types::Stats {
+            transactions_analyzed: 0,
+            addresses_seen: 1,
+            utxos_current: 0,
+        };
+        let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
+        assert_eq!(
+            text,
+            "Scanned 0 transactions, 1 addresses, 0 current UTXOs\n\n\
+             No transactions found for this input.\n\
+             Nothing was analyzed — this can mean an unused address, a wallet whose \
+             activity predates the rescan window, purely off-chain (e.g. Lightning) \
+             history, or a node still catching up to the chain tip.\n"
+        );
+    }
+
+    #[test]
+    fn a_clean_report_keeps_its_shape() {
+        let text = text_report(&report(Vec::new(), Vec::new()));
+        assert_eq!(
+            text,
+            "Scanned 3 transactions, 3 addresses, 1 current UTXOs\n\nNo privacy issues found.\n"
+        );
+    }
+
+    #[test]
+    fn a_findings_only_report_ends_with_its_blank_line() {
+        let text = text_report(&report(
+            vec![finding(VulnerabilityType::Cioh, Severity::Critical, "cioh")],
+            Vec::new(),
+        ));
+        assert!(
+            text.ends_with("Findings (1):\n  [CRITICAL] CIOH: cioh\n\n"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_warnings_only_report_ends_with_its_last_line() {
+        let text = text_report(&report(
+            Vec::new(),
+            vec![finding(
+                VulnerabilityType::DormantUtxos,
+                Severity::Low,
+                "dormant",
+            )],
+        ));
+        assert!(
+            text.ends_with("Warnings (1):\n  [LOW] DORMANT_UTXOS: dormant\n"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn the_text_report_prints_findings_worst_first() {
+        let text = text_report(&report(
+            vec![
+                finding(VulnerabilityType::UtxoAgeSpread, Severity::Low, "spread"),
+                finding(VulnerabilityType::Cioh, Severity::Critical, "cioh"),
+            ],
+            Vec::new(),
+        ));
+        assert!(position(&text, "[CRITICAL] CIOH") < position(&text, "[LOW] UTXO_AGE_SPREAD"));
+    }
+
+    #[test]
+    fn the_text_report_prints_warnings_worst_first() {
+        let text = text_report(&report(
+            Vec::new(),
+            vec![
+                finding(VulnerabilityType::DormantUtxos, Severity::Low, "dormant"),
+                finding(VulnerabilityType::TaintedUtxoMerge, Severity::High, "taint"),
+            ],
+        ));
+        assert!(position(&text, "[HIGH] TAINTED") < position(&text, "[LOW] DORMANT"));
+    }
+}

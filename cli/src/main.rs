@@ -4,7 +4,7 @@ use std::{env, fs};
 
 use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc};
 use stealth_engine::engine::{AnalysisEngine, EngineSettings, ScanTarget, UtxoInput};
-use stealth_engine::types::Summary;
+use stealth_engine::types::{Finding, Summary};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -77,6 +77,13 @@ fn scan_succeeded(summary: &Summary) -> bool {
         return false;
     }
     summary.clean || summary.analyzed_nothing
+}
+
+/// Worst first; the engine's order within one severity.
+fn by_severity(list: &[Finding]) -> Vec<&Finding> {
+    let mut sorted: Vec<&Finding> = list.iter().collect();
+    sorted.sort_by_key(|f| std::cmp::Reverse(f.severity));
+    sorted
 }
 
 #[derive(Debug, Default)]
@@ -214,50 +221,50 @@ fn take_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, Stri
 }
 
 fn print_text_report(report: &stealth_engine::Report) {
-    println!(
+    print!("{}", text_report(report));
+}
+
+fn text_report(report: &stealth_engine::Report) -> String {
+    let mut lines = vec![format!(
         "Scanned {} transactions, {} addresses, {} current UTXOs\n",
         report.stats.transactions_analyzed, report.stats.addresses_seen, report.stats.utxos_current,
-    );
+    )];
 
     if is_empty_report(&report.summary) {
-        println!("No transactions found for this input.");
-        println!(
+        lines.push("No transactions found for this input.".to_owned());
+        lines.push(
             "Nothing was analyzed — this can mean an unused address, a wallet whose \
              activity predates the rescan window, purely off-chain (e.g. Lightning) \
              history, or a node still catching up to the chain tip."
+                .to_owned(),
         );
-        return;
+        return lines.join("\n") + "\n";
     }
 
     if report.summary.clean {
-        println!("No privacy issues found.");
-        return;
+        lines.push("No privacy issues found.".to_owned());
+        return lines.join("\n") + "\n";
     }
 
     if !report.findings.is_empty() {
-        println!("Findings ({}):", report.findings.len());
-        for f in &report.findings {
-            println!(
-                "  [{severity}] {vtype}: {desc}",
-                severity = f.severity,
-                vtype = f.vulnerability_type,
-                desc = f.description,
-            );
-        }
-        println!();
+        lines.push(format!("Findings ({}):", report.findings.len()));
+        lines.extend(by_severity(&report.findings).into_iter().map(finding_line));
+        lines.push(String::new());
     }
-
     if !report.warnings.is_empty() {
-        println!("Warnings ({}):", report.warnings.len());
-        for w in &report.warnings {
-            println!(
-                "  [{severity}] {vtype}: {desc}",
-                severity = w.severity,
-                vtype = w.vulnerability_type,
-                desc = w.description,
-            );
-        }
+        lines.push(format!("Warnings ({}):", report.warnings.len()));
+        lines.extend(by_severity(&report.warnings).into_iter().map(finding_line));
     }
+    lines.join("\n") + "\n"
+}
+
+fn finding_line(f: &Finding) -> String {
+    format!(
+        "  [{severity}] {vtype}: {desc}",
+        severity = f.severity,
+        vtype = f.vulnerability_type,
+        desc = f.description,
+    )
 }
 
 fn print_usage() {
