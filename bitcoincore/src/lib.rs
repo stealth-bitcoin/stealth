@@ -235,10 +235,7 @@ impl BitcoinCoreRpc {
             .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(AnalysisError::EnvironmentUnavailable(format!(
-                "rpc transport error: {}",
-                response.status()
-            )));
+            return Err(rpc_failure(response));
         }
 
         let envelope = response
@@ -275,10 +272,7 @@ impl BitcoinCoreRpc {
             .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(AnalysisError::EnvironmentUnavailable(format!(
-                "rpc transport error: {}",
-                response.status()
-            )));
+            return Err(rpc_failure(response));
         }
 
         let mut envelopes = response
@@ -910,6 +904,20 @@ fn infer_network_from_port(port: u16) -> String {
 
 const RPC_BATCH_SIZE: usize = 100;
 const DEFAULT_TX_PAGE_SIZE: usize = 1000;
+
+// Core answers an RPC-level error (unknown txid, bad params) with HTTP 500
+// and the JSON-RPC error in the body, so the body is the message, not the
+// status.
+fn rpc_failure(response: reqwest::blocking::Response) -> AnalysisError {
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    match serde_json::from_str::<JsonRpcEnvelope<Value>>(&body) {
+        Ok(JsonRpcEnvelope {
+            error: Some(error), ..
+        }) => AnalysisError::EnvironmentUnavailable(error.message),
+        _ => AnalysisError::EnvironmentUnavailable(format!("rpc transport error: {status}")),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcEnvelope<T> {
