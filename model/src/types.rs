@@ -177,6 +177,10 @@ pub struct Stats {
     pub transactions_analyzed: usize,
     pub addresses_seen: usize,
     pub utxos_current: usize,
+    /// Addresses behind a pasted UTXO set whose chain history the node could
+    /// not serve; their counts cover only the pasted outputs.
+    #[serde(default)]
+    pub addresses_without_history: usize,
 }
 
 /// Summary of the scan results.
@@ -184,7 +188,14 @@ pub struct Stats {
 pub struct Summary {
     pub findings: usize,
     pub warnings: usize,
+    /// The scan ran over at least one transaction and turned up no
+    /// findings or warnings. False when nothing was analyzed — see
+    /// `analyzed_nothing`.
     pub clean: bool,
+    /// No transactions were analyzed at all (an unused address, a birth
+    /// date past all activity, purely off-chain history, or a node behind
+    /// the tip). Distinct from `clean`, which means "analyzed and safe".
+    pub analyzed_nothing: bool,
 }
 
 /// The complete vulnerability scan report.
@@ -199,10 +210,12 @@ pub struct Report {
 impl Report {
     /// Construct a report from collected findings and warnings.
     pub fn new(stats: Stats, findings: Vec<Finding>, warnings: Vec<Finding>) -> Self {
+        let analyzed_nothing = stats.transactions_analyzed == 0;
         let summary = Summary {
             findings: findings.len(),
             warnings: warnings.len(),
-            clean: findings.is_empty() && warnings.is_empty(),
+            clean: !analyzed_nothing && findings.is_empty() && warnings.is_empty(),
+            analyzed_nothing,
         };
         Report {
             stats,
@@ -210,6 +223,48 @@ impl Report {
             warnings,
             summary,
         }
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    fn stats(txs: usize) -> Stats {
+        Stats {
+            transactions_analyzed: txs,
+            addresses_seen: 0,
+            utxos_current: 0,
+            addresses_without_history: 0,
+        }
+    }
+
+    #[test]
+    fn zero_transactions_is_analyzed_nothing_not_clean() {
+        let report = Report::new(stats(0), Vec::new(), Vec::new());
+        assert!(report.summary.analyzed_nothing);
+        assert!(!report.summary.clean);
+    }
+
+    #[test]
+    fn transactions_without_findings_is_clean_not_analyzed_nothing() {
+        let report = Report::new(stats(7), Vec::new(), Vec::new());
+        assert!(report.summary.clean);
+        assert!(!report.summary.analyzed_nothing);
+    }
+
+    #[test]
+    fn transactions_with_findings_is_neither() {
+        let finding = Finding {
+            vulnerability_type: VulnerabilityType::AddressReuse,
+            severity: Severity::High,
+            description: "reuse".into(),
+            details: None,
+            correction: None,
+        };
+        let report = Report::new(stats(3), vec![finding], Vec::new());
+        assert!(!report.summary.clean);
+        assert!(!report.summary.analyzed_nothing);
     }
 }
 

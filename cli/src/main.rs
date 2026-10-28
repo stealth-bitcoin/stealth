@@ -4,6 +4,7 @@ use std::{env, fs};
 
 use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc};
 use stealth_engine::engine::{AnalysisEngine, EngineSettings, ScanTarget, UtxoInput};
+use stealth_engine::types::{Finding, Summary};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -59,7 +60,30 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
         Some(other) => return Err(format!("unsupported format '{other}' (use json or text)")),
     }
 
-    Ok(report.summary.clean)
+    Ok(scan_succeeded(&report.summary))
+}
+
+/// Nothing was analyzed and nothing was reported. Findings alongside zero
+/// analyzed transactions would make the empty-scan notice a contradiction, so
+/// the findings take precedence.
+fn is_empty_report(summary: &Summary) -> bool {
+    summary.analyzed_nothing && summary.findings == 0 && summary.warnings == 0
+}
+
+/// Exit 0 only when there is nothing to report: a clean history, or a scan
+/// that analyzed nothing and found nothing.
+fn scan_succeeded(summary: &Summary) -> bool {
+    if summary.findings > 0 || summary.warnings > 0 {
+        return false;
+    }
+    summary.clean || summary.analyzed_nothing
+}
+
+/// Worst first; the engine's order within one severity.
+fn by_severity(list: &[Finding]) -> Vec<&Finding> {
+    let mut sorted: Vec<&Finding> = list.iter().collect();
+    sorted.sort_by_key(|f| std::cmp::Reverse(f.severity));
+    sorted
 }
 
 #[derive(Debug, Default)]
@@ -197,40 +221,60 @@ fn take_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, Stri
 }
 
 fn print_text_report(report: &stealth_engine::Report) {
-    println!(
+    print!("{}", text_report(report));
+}
+
+fn text_report(report: &stealth_engine::Report) -> String {
+    let mut lines = vec![format!(
         "Scanned {} transactions, {} addresses, {} current UTXOs\n",
         report.stats.transactions_analyzed, report.stats.addresses_seen, report.stats.utxos_current,
-    );
+    )];
+
+    let unserved = report.stats.addresses_without_history;
+    if unserved > 0 {
+        lines.push(format!(
+            "The node could not serve the chain history of {unserved} address{}; \
+             the counts for {} cover only the outputs you pasted.\n",
+            if unserved == 1 { "" } else { "es" },
+            if unserved == 1 { "it" } else { "them" },
+        ));
+    }
+
+    if is_empty_report(&report.summary) {
+        lines.push("No transactions found for this input.".to_owned());
+        lines.push(
+            "Nothing was analyzed — this can mean an unused address, a wallet whose \
+             activity predates the rescan window, purely off-chain (e.g. Lightning) \
+             history, or a node still catching up to the chain tip."
+                .to_owned(),
+        );
+        return lines.join("\n") + "\n";
+    }
 
     if report.summary.clean {
-        println!("No privacy issues found.");
-        return;
+        lines.push("No privacy issues found.".to_owned());
+        return lines.join("\n") + "\n";
     }
 
     if !report.findings.is_empty() {
-        println!("Findings ({}):", report.findings.len());
-        for f in &report.findings {
-            println!(
-                "  [{severity}] {vtype}: {desc}",
-                severity = f.severity,
-                vtype = f.vulnerability_type,
-                desc = f.description,
-            );
-        }
-        println!();
+        lines.push(format!("Findings ({}):", report.findings.len()));
+        lines.extend(by_severity(&report.findings).into_iter().map(finding_line));
+        lines.push(String::new());
     }
-
     if !report.warnings.is_empty() {
-        println!("Warnings ({}):", report.warnings.len());
-        for w in &report.warnings {
-            println!(
-                "  [{severity}] {vtype}: {desc}",
-                severity = w.severity,
-                vtype = w.vulnerability_type,
-                desc = w.description,
-            );
-        }
+        lines.push(format!("Warnings ({}):", report.warnings.len()));
+        lines.extend(by_severity(&report.warnings).into_iter().map(finding_line));
     }
+    lines.join("\n") + "\n"
+}
+
+fn finding_line(f: &Finding) -> String {
+    format!(
+        "  [{severity}] {vtype}: {desc}",
+        severity = f.severity,
+        vtype = f.vulnerability_type,
+        desc = f.description,
+    )
 }
 
 fn print_usage() {
@@ -262,61 +306,4 @@ fn print_usage() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn to_args(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn parses_rescan_since() {
-        let opts = parse_scan_args(&to_args(&[
-            "--utxos",
-            "u.json",
-            "--rescan-since",
-            "1700000000",
-        ]))
-        .unwrap();
-        assert_eq!(opts.rescan_since, Some(1_700_000_000));
-    }
-
-    #[test]
-    fn rejects_non_numeric_rescan_since() {
-        assert!(parse_scan_args(&to_args(&["--rescan-since", "yesterday"])).is_err());
-    }
-}
-
-#[cfg(test)]
-mod ownership_tests {
-    use super::*;
-
-    fn temp_file(name: &str, contents: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("stealth-cli-test-{}-{name}", std::process::id()));
-        fs::write(&path, contents).expect("write temp file");
-        path
-    }
-
-    #[test]
-    fn utxos_with_descriptors_is_ownership_context() {
-        let utxos = temp_file(
-            "utxos.json",
-            r#"[{"txid": "d0bf39108641739b186eb18f2992320fa679b4b3ffe787c5ee1f677d1cc1784d", "vout": 0}]"#,
-        );
-        let descriptors = temp_file("descs.json", r#"["wpkh(x/0/*)"]"#);
-        let opts = ScanOpts {
-            utxos_file: Some(utxos),
-            descriptors_file: Some(descriptors),
-            ..ScanOpts::default()
-        };
-
-        let target = opts.scan_target().expect("combined input must be accepted");
-        assert!(matches!(target, ScanTarget::Utxos(ref u) if u.len() == 1));
-        assert_eq!(
-            opts.ownership_descriptors()
-                .expect("ownership descriptors must load"),
-            vec!["wpkh(x/0/*)".to_owned()]
-        );
-    }
-}
+mod tests;

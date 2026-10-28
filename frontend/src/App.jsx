@@ -98,7 +98,7 @@ export default function App() {
         />
       )
     }
-    if (screen === 'report') return <ReportScreen report={report} descriptor={scan?.text} onReset={handleReset} />
+    if (screen === 'report') return <ReportScreen report={report} descriptor={scan?.text} kind={scan?.kind} onReset={handleReset} />
     return <InputScreen onAnalyze={handleAnalyze} error={error} />
   }
 

@@ -54,6 +54,7 @@ impl TxGraph {
             transactions_analyzed: self.our_txids.len(),
             addresses_seen: self.addr_map.len(),
             utxos_current: self.utxos.len(),
+            addresses_without_history: 0,
         };
 
         Report::new(stats, findings, warnings)

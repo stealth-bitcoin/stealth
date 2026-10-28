@@ -42,9 +42,12 @@ async fn scan_descriptor_clean_then_findings_after_regtest_activity() {
     let server = ApiServer::spawn(gateway).await;
     let client = reqwest::Client::new();
 
+    // A freshly derived, never-used descriptor has no on-chain history: the
+    // scan analyzes nothing, which is distinct from an analyzed-and-clean wallet.
     let first = scan_descriptor(&client, &server, &descriptor).await;
     assert_eq!(first.status, StatusCode::OK);
-    assert_eq!(first.body["summary"]["clean"], Value::Bool(true));
+    assert_eq!(first.body["summary"]["clean"], Value::Bool(false));
+    assert_eq!(first.body["summary"]["analyzed_nothing"], Value::Bool(true));
     assert_eq!(first.body["stats"]["transactions_analyzed"], Value::from(0));
 
     // Reuse one receive address twice to trigger address-reuse finding.
