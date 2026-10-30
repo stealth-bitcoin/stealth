@@ -111,7 +111,7 @@ core/
 │   ├── lib.rs        # Crate root and re-exports
 │   ├── engine.rs     # AnalysisEngine — canonical scan entry point
 │   ├── graph.rs      # TxGraph — indexed wallet transaction view
-│   └── detect.rs     # all vulnerability detectors + detect_all()
+│   └── detect/       # detectors by family; mod.rs holds detect_all()
 └── tests/
     └── integration.rs  # all regtest integration tests
 ```
