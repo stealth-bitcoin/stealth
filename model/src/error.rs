@@ -19,6 +19,8 @@ pub enum AnalysisError {
     EnvironmentUnavailable(String),
     #[error("transaction not found: {0}")]
     TransactionNotFound(String),
+    #[error("the node cannot serve this history: {0}")]
+    HistoryUnavailable(String),
     /// `detail` is the reply body, empty for Core's bare 403.
     #[error(
         "{method}: forbidden by the node (rpcwhitelist or rpcallowip){}",

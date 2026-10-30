@@ -54,6 +54,12 @@ pub trait BlockchainGateway {
             .collect()
     }
 
+    /// Whether the node has a synced transaction index, so any confirmed
+    /// transaction can be looked up. Default: false (unknown).
+    fn txindex_synced(&self) -> Result<bool, AnalysisError> {
+        Ok(false)
+    }
+
     /// Install a progress sink for scans started on the current thread.
     /// Default: no-op for gateways without progress reporting.
     fn set_progress_sink(&self, _sink: ScanProgress) {}

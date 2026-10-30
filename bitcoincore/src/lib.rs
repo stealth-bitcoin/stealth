@@ -491,6 +491,41 @@ impl BitcoinCoreRpc {
         })
     }
 
+    /// A failed import is unserved history only when Core says the rescan
+    /// hit blocks it does not have (pruned, or an assumeutxo background sync
+    /// still running); corruption or any other import error fails the scan.
+    fn check_imports(results: &[ImportResult]) -> Result<(), AnalysisError> {
+        if results.iter().all(|result| result.success) {
+            return Ok(());
+        }
+        let failures: Vec<&ImportError> = results
+            .iter()
+            .filter(|result| !result.success)
+            .filter_map(|result| result.error.as_ref())
+            .collect();
+        let messages = failures
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let all_unservable = !failures.is_empty()
+            && failures.iter().all(|error| {
+                error.code == Some(RPC_MISC_ERROR)
+                    && error.message.starts_with("Rescan failed")
+                    && RESCAN_BLOCKS_MISSING
+                        .iter()
+                        .any(|cause| error.message.contains(cause))
+            });
+        if all_unservable {
+            return Err(AnalysisError::HistoryUnavailable(format!(
+                "importdescriptors: {messages}"
+            )));
+        }
+        Err(AnalysisError::EnvironmentUnavailable(format!(
+            "importdescriptors: {messages}"
+        )))
+    }
+
     fn decode_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
         let tx = self
             .call_rpc::<RawTransaction>(
@@ -568,18 +603,20 @@ impl BitcoinCoreRpc {
     }
 
     fn create_watch_only_wallet(&self, wallet_name: &str) -> Result<(), AnalysisError> {
-        let _ = self.call::<Value>(
-            None,
-            "createwallet",
-            vec![
-                json!(wallet_name),
-                json!(true),
-                json!(true),
-                json!(""),
-                json!(false),
-                json!(true),
-            ],
-        )?;
+        let _ = self
+            .call_rpc::<Value>(
+                None,
+                "createwallet",
+                vec![
+                    json!(wallet_name),
+                    json!(true),
+                    json!(true),
+                    json!(""),
+                    json!(false),
+                    json!(true),
+                ],
+            )
+            .map_err(history_unavailable)?;
         Ok(())
     }
 
@@ -741,27 +778,17 @@ impl BitcoinCoreRpc {
                 sink.set_phase(ScanPhase::Rescanning);
                 RescanPoller::start(self, wallet_name, sink.clone())
             });
-            self.call::<Vec<ImportResult>>(
+            self.call_rpc::<Vec<ImportResult>>(
                 Some(wallet_name),
                 "importdescriptors",
                 vec![json!(imports)],
-            )?
+            )
+            .map_err(import_call_error)?
         };
         if let Some(sink) = sink {
             sink.set_phase(ScanPhase::LoadingHistory);
         }
-        if import_results.iter().any(|result| !result.success) {
-            let errors: Vec<_> = import_results
-                .iter()
-                .filter(|r| !r.success)
-                .filter_map(|r| r.error.as_ref().map(|e| e.message.as_str()))
-                .collect();
-            return Err(AnalysisError::EnvironmentUnavailable(format!(
-                "descriptor import failed: {}",
-                errors.join("; ")
-            )));
-        }
-        Ok(())
+        Self::check_imports(&import_results)
     }
 
     // Read wallet history and seed the ownership address sets from every
@@ -1054,6 +1081,23 @@ impl BlockchainGateway for BitcoinCoreRpc {
         self.decode_transaction(txid)
     }
 
+    fn txindex_synced(&self) -> Result<bool, AnalysisError> {
+        match self.call_rpc::<Value>(None, "getindexinfo", vec![json!("txindex")]) {
+            Ok(info) => Ok(info["txindex"]["synced"] == json!(true)),
+            // A node that will not tell (no such RPC, or not allowed) counts as no txindex,
+            // so a whitelisted read-only user on a node without one still gets the caveat.
+            Err(RpcError::Node(
+                _,
+                JsonRpcError {
+                    code: Some(RPC_METHOD_NOT_FOUND),
+                    ..
+                },
+            ))
+            | Err(RpcError::Other(AnalysisError::RpcForbidden { .. })) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn get_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
         self.decode_transactions(txids)
     }
@@ -1238,6 +1282,20 @@ impl From<RpcError> for AnalysisError {
     }
 }
 
+// The node's answers when it cannot run the scan wallet: wallet support
+// disabled, or the wallet cannot be created (e.g. database or disk error).
+const RPC_METHOD_NOT_FOUND: i64 = -32601;
+const RPC_WALLET_ERROR: i64 = -4;
+// What importdescriptors reports a rescan failure with.
+const RPC_MISC_ERROR: i64 = -1;
+// The causes Core (v29+) appends to a rescan failure when the blocks are not
+// on disk: pruned, or not yet validated behind an assumeutxo snapshot. Before
+// v29 the pruning wording was appended to every rescan failure.
+const RESCAN_BLOCKS_MISSING: [&str; 2] = [
+    "This error could be caused by pruning",
+    "This error is likely caused by an in-progress assumeutxo background sync",
+];
+
 /// getrawtransaction's -5 is a lookup miss; any other failure is the node's.
 fn fetch_error(txid: Txid, error: RpcError) -> AnalysisError {
     match error {
@@ -1252,6 +1310,35 @@ fn fetch_error(txid: Txid, error: RpcError) -> AnalysisError {
             "getrawtransaction {txid}: {}",
             error.message
         )),
+        other => other.into(),
+    }
+}
+
+// Only a node without wallet support makes the whole import call unserved
+// history; -4 here is a wallet state (e.g. already rescanning), not a node limit.
+fn import_call_error(error: RpcError) -> AnalysisError {
+    match error {
+        RpcError::Node(
+            _,
+            JsonRpcError {
+                code: Some(RPC_METHOD_NOT_FOUND),
+                message,
+            },
+        ) => AnalysisError::HistoryUnavailable(format!("importdescriptors: {message}")),
+        other => other.into(),
+    }
+}
+
+// createwallet's answers when this node cannot run the scan wallet.
+fn history_unavailable(error: RpcError) -> AnalysisError {
+    match error {
+        RpcError::Node(
+            _,
+            JsonRpcError {
+                code: Some(RPC_METHOD_NOT_FOUND | RPC_WALLET_ERROR),
+                message,
+            },
+        ) => AnalysisError::HistoryUnavailable(format!("createwallet: {message}")),
         other => other.into(),
     }
 }
@@ -1387,6 +1474,7 @@ struct ImportResult {
 
 #[derive(Debug, Deserialize)]
 struct ImportError {
+    code: Option<i64>,
     #[serde(default)]
     message: String,
 }
@@ -1754,6 +1842,162 @@ mod tests {
         assert!(error.to_string().contains("proxy says no"), "{error}");
     }
 
+    #[test]
+    fn a_busy_node_while_creating_the_scan_wallet_fails_the_scan() {
+        let error = super::history_unavailable(super::rpc_error_from_body(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "Work queue depth exceeded\n",
+            "createwallet",
+        ));
+        assert_eq!(
+            error,
+            AnalysisError::EnvironmentUnavailable(
+                "createwallet: 503 Service Unavailable: Work queue depth exceeded".into()
+            )
+        );
+    }
+
+    fn classify(body: &str) -> AnalysisError {
+        super::history_unavailable(super::rpc_error_from_body(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body,
+            "createwallet",
+        ))
+    }
+
+    #[test]
+    fn a_node_that_cannot_run_the_scan_wallet_gives_history_unavailable() {
+        for code in [-32601, -4] {
+            let error = classify(&format!(
+                r#"{{"result": null, "error": {{"code": {code}, "message": "no wallet"}}}}"#
+            ));
+            assert_eq!(
+                error,
+                AnalysisError::HistoryUnavailable("createwallet: no wallet".into()),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_node_errors_while_creating_the_scan_wallet_fail_the_scan() {
+        for body in [
+            r#"{"result": null, "error": {"code": -28, "message": "Loading wallet..."}}"#,
+            r#"{"result": null, "error": {"message": "no code"}}"#,
+        ] {
+            match classify(body) {
+                AnalysisError::EnvironmentUnavailable(message) => {
+                    assert!(message.starts_with("createwallet: "), "{message}")
+                }
+                other => panic!("{body}: {other:?}"),
+            }
+        }
+    }
+
+    // Core's importdescriptors rescan failure (wallet/rpc/backup.cpp, v29+):
+    // a common head plus one suffix naming the cause.
+    const RESCAN_HEAD: &str = "Rescan failed for descriptor with timestamp 0. There was an \
+        error reading a block from time 1700000000, which is after or within 7200 seconds of \
+        key creation, and could contain transactions pertaining to the desc. As a result, \
+        transactions and coins using this desc may not appear in the wallet.";
+    const PRUNED: &str = " This error could be caused by pruning or data corruption (see \
+        bitcoind log for details) and could be dealt with by downloading and rescanning the \
+        relevant blocks (see -reindex option and rescanblockchain RPC).";
+    const ASSUMEUTXO: &str = " This error is likely caused by an in-progress assumeutxo \
+        background sync. Check logs or getchainstates RPC for assumeutxo background sync \
+        progress and try again later.";
+    const CORRUPTION: &str = " This error could potentially caused by data corruption. If the \
+        issue persists you may want to reindex (see -reindex option).";
+
+    fn import(code: i64, message: &str) -> super::ImportResult {
+        serde_json::from_value(json!({
+            "success": false,
+            "error": { "code": code, "message": message },
+        }))
+        .unwrap()
+    }
+
+    fn rescan_failure(suffix: &str) -> super::ImportResult {
+        import(-1, &format!("{RESCAN_HEAD}{suffix}"))
+    }
+
+    #[test]
+    fn a_rescan_over_pruned_or_unsynced_blocks_is_history_unavailable() {
+        for suffix in [PRUNED, ASSUMEUTXO] {
+            match BitcoinCoreRpc::check_imports(&[rescan_failure(suffix)]) {
+                Err(AnalysisError::HistoryUnavailable(message)) => assert!(
+                    message.starts_with("importdescriptors: Rescan failed"),
+                    "{message}"
+                ),
+                other => panic!("{suffix}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_rescan_failure_from_corruption_fails_the_scan() {
+        match BitcoinCoreRpc::check_imports(&[rescan_failure(CORRUPTION)]) {
+            Err(AnalysisError::EnvironmentUnavailable(message)) => {
+                assert!(message.starts_with("importdescriptors: "), "{message}");
+                assert!(
+                    message.contains("potentially caused by data corruption"),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_import_errors_fail_the_scan_with_their_message() {
+        for code in [-4, -5, -8] {
+            let result = BitcoinCoreRpc::check_imports(&[
+                rescan_failure(PRUNED),
+                import(code, "bad descriptor"),
+            ]);
+            match result {
+                Err(AnalysisError::EnvironmentUnavailable(message)) => {
+                    assert!(message.starts_with("importdescriptors: "), "{message}");
+                    assert!(message.contains("bad descriptor"), "{message}");
+                }
+                other => panic!("{code}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn successful_imports_pass() {
+        let ok: super::ImportResult = serde_json::from_value(json!({ "success": true })).unwrap();
+        assert!(BitcoinCoreRpc::check_imports(&[ok]).is_ok());
+    }
+
+    #[test]
+    fn only_a_missing_wallet_rpc_makes_importdescriptors_unserved_history() {
+        let classify = |body: &str| {
+            super::import_call_error(super::rpc_error_from_body(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                body,
+                "importdescriptors",
+            ))
+        };
+        let missing = classify(
+            r#"{"result": null, "error": {"code": -32601, "message": "Method not found"}}"#,
+        );
+        assert_eq!(
+            missing,
+            AnalysisError::HistoryUnavailable("importdescriptors: Method not found".into())
+        );
+        let busy = classify(
+            r#"{"result": null, "error": {"code": -4, "message": "Wallet is currently rescanning"}}"#,
+        );
+        match busy {
+            AnalysisError::EnvironmentUnavailable(message) => {
+                assert_eq!(message, "importdescriptors: Wallet is currently rescanning")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// A node that answers `failing` with `error` (a bare 403 when `error` is
     /// null, a raw 200 body when it is a string) and every other call with an
     /// empty result.
@@ -1821,6 +2065,54 @@ mod tests {
             Some("pass".into()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_wallet_error_on_importdescriptors_fails_the_scan_with_cores_message() {
+        use stealth_model::gateway::{BlockchainGateway, ResolvedDescriptor};
+        let rpc = fake_node(
+            "importdescriptors",
+            json!({ "code": -4, "message": "Wallet is currently rescanning" }),
+        );
+        let error = rpc
+            .scan_descriptors(
+                &[ResolvedDescriptor {
+                    desc: format!("addr({ADDR})"),
+                    internal: false,
+                    active: false,
+                    range_end: 0,
+                }],
+                false,
+            )
+            .expect_err("the import call failed");
+        match error {
+            AnalysisError::EnvironmentUnavailable(message) => {
+                assert_eq!(message, "importdescriptors: Wallet is currently rescanning")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_index_state_the_node_will_not_give_counts_as_no_txindex() {
+        use stealth_model::gateway::BlockchainGateway;
+        for error in [
+            json!({ "code": -32601, "message": "Method not found" }),
+            serde_json::Value::Null,
+        ] {
+            let rpc = fake_node("getindexinfo", error.clone());
+            assert_eq!(rpc.txindex_synced(), Ok(false), "{error}");
+        }
+    }
+
+    #[test]
+    fn any_other_index_probe_failure_fails() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node(
+            "getindexinfo",
+            json!({ "code": -28, "message": "Loading block index..." }),
+        );
+        assert!(rpc.txindex_synced().is_err());
     }
 
     #[test]
@@ -2063,5 +2355,22 @@ mod tests {
             message.contains("deriveaddresses: invalid address 'bogus'"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn only_a_misc_error_that_is_a_rescan_failure_counts() {
+        // The pruning wording under another code, and a -1 that is not a rescan failure.
+        for result in [
+            import(-4, &format!("{RESCAN_HEAD}{PRUNED}")),
+            import(-1, &format!("Some other failure.{PRUNED}")),
+        ] {
+            assert!(
+                matches!(
+                    BitcoinCoreRpc::check_imports(&[result]),
+                    Err(AnalysisError::EnvironmentUnavailable(_))
+                ),
+                "must fail the scan"
+            );
+        }
     }
 }

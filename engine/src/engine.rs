@@ -94,7 +94,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
     fn analyze_utxos(&self, utxos: Vec<UtxoInput>) -> Result<Report, AnalysisError> {
         self.mark_phase(ScanPhase::LoadingHistory);
         let mut history = self.resolve_utxo_history(&utxos)?;
-        let addresses_without_history = self.merge_address_history(&mut history);
+        let addresses_without_history = self.merge_address_history(&mut history)?;
         self.mark_phase(ScanPhase::Analyzing);
         let graph = TxGraph::from_wallet_history(history);
         let mut report = graph.detect_all(
@@ -110,8 +110,9 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
     /// address's history, fetched the way a single-address scan fetches it.
     /// One scan covers every address, so the node serves all of them or
     /// none; the return value is how many it could not serve, in which case
-    /// the pasted outputs stay as their only history.
-    fn merge_address_history(&self, history: &mut WalletHistory) -> usize {
+    /// the pasted outputs stay as their only history. Any other error, such
+    /// as invalid data in the history it did serve, fails the scan.
+    fn merge_address_history(&self, history: &mut WalletHistory) -> Result<usize, AnalysisError> {
         let addresses: BTreeSet<String> = history
             .utxos
             .iter()
@@ -119,7 +120,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .map(|a| a.assume_checked_ref().to_string())
             .collect();
         if addresses.is_empty() {
-            return 0;
+            return Ok(0);
         }
         let raw: Vec<String> = addresses.iter().map(|a| format!("addr({a})")).collect();
         let fetched = normalize_descriptors(
@@ -131,9 +132,23 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         match fetched {
             Ok(full) => {
                 merge_chain_history(history, full);
-                0
+                Ok(0)
             }
-            Err(_) => addresses.len(),
+            // A user whose rpcwhitelist leaves out a call this load needs
+            // cannot have the history served either.
+            Err(AnalysisError::HistoryUnavailable(_) | AnalysisError::RpcForbidden { .. }) => {
+                Ok(addresses.len())
+            }
+            // Without a synced txindex the node cannot look up the address's
+            // older txs; with one, a missing wallet tx is a real failure.
+            Err(AnalysisError::TransactionNotFound(message)) => {
+                if self.gateway.txindex_synced()? {
+                    Err(AnalysisError::TransactionNotFound(message))
+                } else {
+                    Ok(addresses.len())
+                }
+            }
+            Err(error) => Err(error),
         }
     }
 

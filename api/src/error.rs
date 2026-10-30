@@ -41,6 +41,7 @@ impl ApiError {
             }
             Self::Analysis(AnalysisError::EnvironmentUnavailable(_))
             | Self::Analysis(AnalysisError::TransactionNotFound(_))
+            | Self::Analysis(AnalysisError::HistoryUnavailable(_))
             | Self::Analysis(AnalysisError::RpcForbidden { .. }) => StatusCode::BAD_GATEWAY,
             Self::Analysis(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ScannerNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
@@ -91,6 +92,7 @@ mod tests {
         for error in [
             AnalysisError::EnvironmentUnavailable("down".into()),
             AnalysisError::TransactionNotFound("gone".into()),
+            AnalysisError::HistoryUnavailable("pruned".into()),
             AnalysisError::RpcForbidden {
                 method: "listunspent".into(),
                 detail: String::new(),
