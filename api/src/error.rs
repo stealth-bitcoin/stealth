@@ -40,6 +40,7 @@ impl ApiError {
                 StatusCode::BAD_REQUEST
             }
             Self::Analysis(AnalysisError::EnvironmentUnavailable(_))
+            | Self::Analysis(AnalysisError::TransactionNotFound(_))
             | Self::Analysis(AnalysisError::RpcForbidden { .. }) => StatusCode::BAD_GATEWAY,
             Self::Analysis(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ScannerNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
@@ -89,6 +90,7 @@ mod tests {
     fn node_side_failures_are_bad_gateway() {
         for error in [
             AnalysisError::EnvironmentUnavailable("down".into()),
+            AnalysisError::TransactionNotFound("gone".into()),
             AnalysisError::RpcForbidden {
                 method: "listunspent".into(),
                 detail: String::new(),

@@ -17,6 +17,8 @@ pub enum AnalysisError {
     MultisigKeyUnsupported,
     #[error("environment unavailable: {0}")]
     EnvironmentUnavailable(String),
+    #[error("transaction not found: {0}")]
+    TransactionNotFound(String),
     /// `detail` is the reply body, empty for Core's bare 403.
     #[error(
         "{method}: forbidden by the node (rpcwhitelist or rpcallowip){}",

@@ -111,3 +111,25 @@ fn rpc_error_reports_the_node_message_not_the_http_status() {
         "an RPC error is not a transport failure, got: {text}"
     );
 }
+
+#[test]
+fn a_single_fetch_of_an_unknown_txid_is_not_found_and_names_it() {
+    let node = node();
+    let gateway = gateway_for(&node);
+    let unknown: Txid = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        .parse()
+        .expect("txid");
+
+    let err = gateway
+        .get_transaction(unknown)
+        .expect_err("an unknown txid must fail");
+
+    assert!(
+        matches!(
+            err,
+            stealth_engine::error::AnalysisError::TransactionNotFound(_)
+        ),
+        "a lookup miss must be classified like the batch fetch, got: {err:?}"
+    );
+    assert!(err.to_string().contains(&unknown.to_string()), "{err}");
+}

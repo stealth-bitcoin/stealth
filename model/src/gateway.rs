@@ -40,14 +40,18 @@ pub trait BlockchainGateway {
     fn known_wallet_txids(&self, wallet_names: &[String]) -> Result<HashSet<Txid>, AnalysisError>;
     fn get_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError>;
 
-    /// Fetch many transactions. The outer `Result` is transport-level;
-    /// per-transaction failures come back in the inner `Result`s.
-    /// Implementations may batch; the default fetches sequentially.
+    /// Fetch many transactions. Only [`AnalysisError::TransactionNotFound`]
+    /// comes back in the inner per-transaction `Result`s; any other error
+    /// fails the whole fetch. Implementations may batch; the default fetches
+    /// sequentially.
     fn get_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
-        Ok(txids
+        txids
             .iter()
-            .map(|&txid| (txid, self.get_transaction(txid)))
-            .collect())
+            .map(|&txid| match self.get_transaction(txid) {
+                Err(error @ AnalysisError::TransactionNotFound(_)) => Ok((txid, Err(error))),
+                fetched => Ok((txid, Ok(fetched?))),
+            })
+            .collect()
     }
 
     /// Install a progress sink for scans started on the current thread.

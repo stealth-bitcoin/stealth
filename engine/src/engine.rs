@@ -148,7 +148,10 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         for utxo in utxos {
             // Fetch the UTXO's parent transaction.
             if let std::collections::hash_map::Entry::Vacant(e) = transactions.entry(utxo.txid) {
-                let tx = self.gateway.get_transaction(utxo.txid)?;
+                let tx = self
+                    .gateway
+                    .get_transaction(utxo.txid)
+                    .map_err(|error| name_pasted_output(error, utxo))?;
                 fetch_queue.extend(
                     tx.vin
                         .iter()
@@ -200,8 +203,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         // Fetch ancestor transactions for input resolution, bounded by
         // max_ancestor_depth to prevent unbounded graph traversal.
         // A depth of 0 means we only keep the UTXO's own transaction.
-        // Level-order so the gateway can batch each frontier; failed
-        // ancestor fetches are skipped, transport errors propagate.
+        // Level-order so the gateway can batch each frontier; ancestors the
+        // node cannot find are skipped, any other error fails the scan.
         let max_depth = self.settings.config.max_ancestor_depth;
         let mut frontier: Vec<Txid> = fetch_queue
             .into_iter()
@@ -266,6 +269,21 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             derived.extend(addrs);
         }
         Ok((internal, derived))
+    }
+}
+
+/// Prefix a node error with the pasted output it came from, so the user
+/// knows which one to check or remove.
+fn name_pasted_output(error: AnalysisError, utxo: &UtxoInput) -> AnalysisError {
+    let place = format!("pasted output {}:{}", utxo.txid, utxo.vout);
+    match error {
+        AnalysisError::EnvironmentUnavailable(message) => {
+            AnalysisError::EnvironmentUnavailable(format!("{place}: {message}"))
+        }
+        AnalysisError::TransactionNotFound(message) => {
+            AnalysisError::TransactionNotFound(format!("{place}: {message}"))
+        }
+        other => other,
     }
 }
 

@@ -262,7 +262,7 @@ impl BitcoinCoreRpc {
         &self,
         method: &str,
         params_list: &[Vec<Value>],
-    ) -> Result<Vec<Result<T, AnalysisError>>, AnalysisError> {
+    ) -> Result<Vec<JsonRpcBatchEnvelope<T>>, AnalysisError> {
         let (user, password) = self.credentials()?;
         let batch: Vec<Value> = params_list
             .iter()
@@ -292,16 +292,7 @@ impl BitcoinCoreRpc {
             )));
         }
         envelopes.sort_by_key(|envelope| envelope.id);
-        Ok(envelopes
-            .into_iter()
-            .map(|envelope| match (envelope.result, envelope.error) {
-                (Some(result), None) => Ok(result),
-                (_, Some(error)) => Err(RpcError::Node(method.to_string(), error).into()),
-                _ => Err(AnalysisError::EnvironmentUnavailable(format!(
-                    "{method}: rpc returned neither result nor error"
-                ))),
-            })
-            .collect())
+        Ok(envelopes)
     }
 
     fn decode_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
@@ -312,11 +303,34 @@ impl BitcoinCoreRpc {
                 .map(|txid| vec![json!(txid.to_string()), json!(true)])
                 .collect();
             let results = self.call_batch::<RawTransaction>("getrawtransaction", &params)?;
-            for (txid, result) in chunk.iter().zip(results) {
-                out.push((*txid, result.and_then(Self::convert_raw_transaction)));
-            }
+            out.extend(Self::convert_fetched(
+                chunk.iter().copied().zip(results).collect(),
+            )?);
         }
         Ok(out)
+    }
+
+    fn convert_fetched(
+        fetched: Vec<(Txid, JsonRpcBatchEnvelope<RawTransaction>)>,
+    ) -> Result<TxFetchResults, AnalysisError> {
+        // Only not-found stays per tx; callers skip ancestors a node without txindex lacks.
+        fetched
+            .into_iter()
+            .map(|(txid, envelope)| match (envelope.result, envelope.error) {
+                (_, Some(error)) => {
+                    match fetch_error(txid, RpcError::Node("getrawtransaction".into(), error)) {
+                        not_found @ AnalysisError::TransactionNotFound(_) => {
+                            Ok((txid, Err(not_found)))
+                        }
+                        other => Err(other),
+                    }
+                }
+                (Some(raw), None) => Ok((txid, Ok(Self::convert_raw_transaction(raw)?))),
+                (None, None) => Err(AnalysisError::EnvironmentUnavailable(format!(
+                    "getrawtransaction {txid} returned no result"
+                ))),
+            })
+            .collect()
     }
 
     fn load_history_for_wallet(&self, wallet_name: &str) -> Result<WalletHistory, AnalysisError> {
@@ -329,8 +343,8 @@ impl BitcoinCoreRpc {
         txids.extend(utxos.iter().map(|utxo| utxo.txid));
 
         // Level-order, batched, bounded by max_ancestor_depth (depth 0 is
-        // the wallet's own transactions; those must resolve, ancestors may
-        // be skipped on error).
+        // the wallet's own transactions; those must resolve, ancestors the
+        // node cannot find are skipped).
         let mut transactions = HashMap::new();
         let mut frontier: Vec<Txid> = txids.into_iter().collect();
         let mut depth = 0u32;
@@ -454,11 +468,13 @@ impl BitcoinCoreRpc {
     }
 
     fn decode_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
-        let tx = self.call::<RawTransaction>(
-            None,
-            "getrawtransaction",
-            vec![json!(txid.to_string()), json!(true)],
-        )?;
+        let tx = self
+            .call_rpc::<RawTransaction>(
+                None,
+                "getrawtransaction",
+                vec![json!(txid.to_string()), json!(true)],
+            )
+            .map_err(|error| fetch_error(txid, error))?;
         Self::convert_raw_transaction(tx)
     }
 
@@ -1139,6 +1155,8 @@ fn infer_network_from_port(port: u16) -> String {
 
 const RPC_BATCH_SIZE: usize = 100;
 const DEFAULT_TX_PAGE_SIZE: usize = 1000;
+// What getrawtransaction returns for a tx the node cannot look up.
+const RPC_INVALID_ADDRESS_OR_KEY: i64 = -5;
 
 /// An RPC failure: either the node answered with a JSON-RPC error, or the
 /// call never got an answer (transport, HTTP status without an error body).
@@ -1163,6 +1181,24 @@ impl From<RpcError> for AnalysisError {
             }
             RpcError::Other(error) => error,
         }
+    }
+}
+
+/// getrawtransaction's -5 is a lookup miss; any other failure is the node's.
+fn fetch_error(txid: Txid, error: RpcError) -> AnalysisError {
+    match error {
+        RpcError::Node(
+            _,
+            JsonRpcError {
+                code: Some(RPC_INVALID_ADDRESS_OR_KEY),
+                message,
+            },
+        ) => AnalysisError::TransactionNotFound(format!("getrawtransaction {txid}: {message}")),
+        RpcError::Node(_, error) => AnalysisError::EnvironmentUnavailable(format!(
+            "getrawtransaction {txid}: {}",
+            error.message
+        )),
+        other => other.into(),
     }
 }
 
@@ -1279,6 +1315,7 @@ struct JsonRpcBatchEnvelope<T> {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcError {
+    code: Option<i64>,
     message: String,
 }
 
@@ -1386,7 +1423,10 @@ struct RawScriptPubKey {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_wallet_name, default_rpc_port, scan_wallet_name, BitcoinCoreRpc};
+    use super::{
+        cache_wallet_name, default_rpc_port, scan_wallet_name, BitcoinCoreRpc,
+        JsonRpcBatchEnvelope, RawTransaction,
+    };
     use bitcoin::Txid;
     use serde_json::json;
     use stealth_model::error::AnalysisError;
@@ -1442,6 +1482,82 @@ mod tests {
             first, second,
             "concurrent scans in the same millisecond must not collide"
         );
+    }
+
+    fn envelope(reply: serde_json::Value) -> JsonRpcBatchEnvelope<RawTransaction> {
+        serde_json::from_value(reply).unwrap()
+    }
+
+    fn fetch(
+        reply: serde_json::Value,
+    ) -> Result<stealth_model::gateway::TxFetchResults, AnalysisError> {
+        let txid: Txid = TXID.parse().unwrap();
+        BitcoinCoreRpc::convert_fetched(vec![(txid, envelope(reply))])
+    }
+
+    #[test]
+    fn a_transaction_the_node_cannot_find_stays_per_transaction() {
+        let results = fetch(json!({
+            "id": 0, "result": null,
+            "error": { "code": -5, "message": "No such mempool or blockchain transaction" },
+        }))
+        .unwrap();
+        assert!(matches!(
+            results[0].1,
+            Err(AnalysisError::TransactionNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_fetched_transaction_converts() {
+        let raw = json!({
+            "txid": TXID, "vin": [],
+            "vout": [{ "value": 1.0, "n": 0, "scriptPubKey": { "address": ADDR } }],
+        });
+        let results = fetch(json!({ "id": 0, "result": raw, "error": null })).unwrap();
+        assert!(results[0].1.is_ok());
+    }
+
+    #[test]
+    fn other_rpc_errors_fail_the_fetch() {
+        let result = fetch(json!({
+            "id": 0, "result": null,
+            "error": { "code": -28, "message": "Loading block index..." },
+        }));
+        assert!(matches!(
+            result,
+            Err(AnalysisError::EnvironmentUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn an_rpc_error_without_a_code_fails_the_fetch() {
+        let result = fetch(json!({
+            "id": 0, "result": null, "error": { "message": "proxy says no" },
+        }));
+        assert!(matches!(
+            result,
+            Err(AnalysisError::EnvironmentUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn a_null_result_fails_the_fetch() {
+        let result = fetch(json!({ "id": 0, "result": null, "error": null }));
+        assert!(matches!(
+            result,
+            Err(AnalysisError::EnvironmentUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn an_error_body_without_a_code_still_surfaces_its_message() {
+        let error = AnalysisError::from(super::rpc_error_from_body(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"result": null, "error": {"message": "proxy says no"}}"#,
+            "test",
+        ));
+        assert!(error.to_string().contains("proxy says no"), "{error}");
     }
 
     /// A node that answers `failing` with `error` (a bare 403 when `error` is
@@ -1537,6 +1653,20 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "getrawtransaction: forbidden by the node (rpcwhitelist or rpcallowip)"
+        );
+    }
+
+    #[test]
+    fn a_transaction_not_found_names_getrawtransaction() {
+        let results = fetch(json!({
+            "id": 0, "result": null,
+            "error": { "code": -5, "message": "No such mempool or blockchain transaction" },
+        }))
+        .unwrap();
+        let message = results[0].1.as_ref().unwrap_err().to_string();
+        assert!(
+            message.contains(&format!("getrawtransaction {TXID}")),
+            "{message}"
         );
     }
 

@@ -91,6 +91,7 @@ fn pasted() -> UtxoInput {
 
 struct FakeGateway {
     transactions: HashMap<Txid, DecodedTransaction>,
+    broken: HashSet<Txid>,
     history: Result<WalletHistory, String>,
     scanned: RefCell<Vec<String>>,
     persisted: RefCell<Vec<bool>>,
@@ -100,6 +101,7 @@ impl FakeGateway {
     fn new(history: Result<WalletHistory, String>) -> Self {
         Self {
             transactions: HashMap::from([(txid(1), payment(1))]),
+            broken: HashSet::new(),
             history,
             scanned: RefCell::new(Vec::new()),
             persisted: RefCell::new(Vec::new()),
@@ -146,10 +148,13 @@ impl BlockchainGateway for FakeGateway {
     }
 
     fn get_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
+        if self.broken.contains(&txid) {
+            return Err(AnalysisError::EnvironmentUnavailable(format!("bad {txid}")));
+        }
         self.transactions
             .get(&txid)
             .cloned()
-            .ok_or_else(|| AnalysisError::EnvironmentUnavailable(format!("unknown {txid}")))
+            .ok_or_else(|| AnalysisError::TransactionNotFound(format!("unknown {txid}")))
     }
 }
 
@@ -239,4 +244,59 @@ fn utxo_mode_never_keeps_a_cache_wallet_for_its_addresses() {
         .analyze(ScanTarget::Utxos(vec![pasted()]))
         .expect("utxo scan");
     assert_eq!(gateway.persisted.borrow().as_slice(), [false]);
+}
+
+#[test]
+fn an_ancestor_the_node_cannot_find_is_skipped() {
+    let gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    let fetched = gateway.get_transactions(&[txid(1001)]).expect("lookup");
+    assert!(matches!(
+        fetched[0].1,
+        Err(AnalysisError::TransactionNotFound(_))
+    ));
+    scan(&gateway);
+}
+
+#[test]
+fn an_ancestor_with_invalid_data_fails_the_scan() {
+    let mut gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    gateway.broken.insert(txid(1001));
+    let result = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn a_pasted_output_the_node_cannot_find_is_named_in_the_error() {
+    let gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    let missing = UtxoInput {
+        txid: txid(7),
+        vout: 3,
+        value: None,
+        address: None,
+    };
+    let error = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![missing]))
+        .expect_err("an unknown pasted output must fail the scan");
+    assert!(
+        matches!(error, AnalysisError::TransactionNotFound(_)),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains(&format!("{}:3", txid(7))),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_pasted_output_the_node_fails_on_is_named_in_the_error() {
+    let mut gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    gateway.broken.insert(txid(1));
+    let error = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]))
+        .expect_err("a node error on a pasted output must fail the scan");
+    assert!(
+        error.to_string().contains(&format!("{}:0", txid(1))),
+        "{error}"
+    );
 }
