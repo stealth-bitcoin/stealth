@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +10,8 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::{Address, Amount, Txid};
 use ini::Ini;
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
+use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -176,6 +177,8 @@ pub struct BitcoinCoreRpc {
     // One lock per cache-wallet name, serialising in-process scans that
     // share a persistent cache so they never race on create/import/read.
     cache_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    // Cookie credentials read once, re-read only when the node answers 401.
+    cookie: RwLock<Option<(String, String)>>,
 }
 
 impl BitcoinCoreRpc {
@@ -192,6 +195,7 @@ impl BitcoinCoreRpc {
             tx_page_size: DEFAULT_TX_PAGE_SIZE,
             progress_sinks: Mutex::new(HashMap::new()),
             cache_locks: Mutex::new(HashMap::new()),
+            cookie: RwLock::new(None),
         })
     }
 
@@ -233,14 +237,72 @@ impl BitcoinCoreRpc {
             .unwrap_or(base)
     }
 
-    fn credentials(&self) -> Result<(String, String), AnalysisError> {
-        if let (Some(user), Some(password)) =
-            (self.config.rpcuser.clone(), self.config.rpcpassword.clone())
-        {
-            Ok((user, password))
-        } else {
-            self.config.cookie_credentials()
+    fn explicit_credentials(&self) -> Option<(String, String)> {
+        match (&self.config.rpcuser, &self.config.rpcpassword) {
+            (Some(user), Some(password)) => Some((user.clone(), password.clone())),
+            _ => None,
         }
+    }
+
+    fn credentials(&self) -> Result<(String, String), AnalysisError> {
+        if let Some(explicit) = self.explicit_credentials() {
+            return Ok(explicit);
+        }
+        let cached = self
+            .cookie
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        match cached {
+            Some(cookie) => Ok(cookie),
+            None => self.reload_cookie(None),
+        }
+    }
+
+    // Re-reads the cookie unless another caller already replaced `stale`.
+    fn reload_cookie(
+        &self,
+        stale: Option<&(String, String)>,
+    ) -> Result<(String, String), AnalysisError> {
+        let mut cached = self
+            .cookie
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(current) = cached.as_ref().filter(|current| Some(*current) != stale) {
+            return Ok(current.clone());
+        }
+        let fresh = self.config.cookie_credentials()?;
+        *cached = Some(fresh.clone());
+        Ok(fresh)
+    }
+
+    // Core regenerates the cookie on restart, so a 401 on cookie auth earns one re-read and retry.
+    fn post(&self, url: &str, method: &str, body: &Value) -> Result<Response, AnalysisError> {
+        let used = self.credentials()?;
+        let response = self.send(url, method, &used, body)?;
+        if response.status() != StatusCode::UNAUTHORIZED || self.explicit_credentials().is_some() {
+            return Ok(response);
+        }
+        let fresh = self.reload_cookie(Some(&used))?;
+        if fresh == used {
+            return Ok(response);
+        }
+        self.send(url, method, &fresh, body)
+    }
+
+    fn send(
+        &self,
+        url: &str,
+        method: &str,
+        (user, password): &(String, String),
+        body: &Value,
+    ) -> Result<Response, AnalysisError> {
+        self.client
+            .post(url)
+            .basic_auth(user, Some(password))
+            .json(body)
+            .send()
+            .map_err(|error| unreachable_node(method, error))
     }
 
     fn call<T: DeserializeOwned>(
@@ -260,19 +322,13 @@ impl BitcoinCoreRpc {
         method: &str,
         params: Vec<Value>,
     ) -> Result<T, RpcError> {
-        let (user, password) = self.credentials()?;
-        let response = self
-            .client
-            .post(self.rpc_url(wallet))
-            .basic_auth(user, Some(password))
-            .json(&json!({
-                "jsonrpc": "1.0",
-                "id": "stealth-rust",
-                "method": method,
-                "params": params,
-            }))
-            .send()
-            .map_err(|error| unreachable_node(method, error))?;
+        let body = json!({
+            "jsonrpc": "1.0",
+            "id": "stealth-rust",
+            "method": method,
+            "params": params,
+        });
+        let response = self.post(&self.rpc_url(wallet), method, &body)?;
 
         if !response.status().is_success() {
             return Err(rpc_failure(response, method));
@@ -287,7 +343,6 @@ impl BitcoinCoreRpc {
         method: &str,
         params_list: &[Vec<Value>],
     ) -> Result<Vec<JsonRpcBatchEnvelope<T>>, AnalysisError> {
-        let (user, password) = self.credentials()?;
         let batch: Vec<Value> = params_list
             .iter()
             .enumerate()
@@ -295,13 +350,7 @@ impl BitcoinCoreRpc {
                 json!({ "jsonrpc": "1.0", "id": id, "method": method, "params": params })
             })
             .collect();
-        let response = self
-            .client
-            .post(self.rpc_url(None))
-            .basic_auth(user, Some(password))
-            .json(&batch)
-            .send()
-            .map_err(|error| unreachable_node(method, error))?;
+        let response = self.post(&self.rpc_url(None), method, &Value::from(batch))?;
 
         if !response.status().is_success() {
             return Err(rpc_failure(response, method).into());
@@ -1603,11 +1652,193 @@ mod tests {
         JsonRpcBatchEnvelope, ListTransactionEntry, ListUnspentEntry, RawTransaction,
     };
     use bitcoin::{Amount, Txid};
-    use serde_json::json;
+    use serde_json::{json, Value};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
     use stealth_model::error::AnalysisError;
     use stealth_model::gateway::{ResolvedDescriptor, WalletTxCategory};
+
+    const AUTH_A: &str = "Basic X19jb29raWVfXzph"; // __cookie__:a
+    const AUTH_B: &str = "Basic X19jb29raWVfXzpi"; // __cookie__:b
+    const AUTH_USERPASS: &str = "Basic dTpw"; // u:p
+
+    // Fake node: 401 unless the auth header matches `accepted` (None accepts all).
+    struct FakeNode {
+        port: u16,
+        accepted: Arc<Mutex<Option<String>>>,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FakeNode {
+        fn start(accepted: Option<&str>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let accepted = Arc::new(Mutex::new(accepted.map(str::to_owned)));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (gate, log) = (Arc::clone(&accepted), Arc::clone(&seen));
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let (mut auth, mut length) = (String::new(), 0usize);
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                        let (name, value) = line.split_once(':').unwrap_or((&line, ""));
+                        match name.to_ascii_lowercase().as_str() {
+                            "authorization" => auth = value.trim().to_owned(),
+                            "content-length" => length = value.trim().parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                    let mut body = vec![0u8; length];
+                    reader.read_exact(&mut body).unwrap();
+                    let request: Value = serde_json::from_slice(&body).unwrap();
+                    log.lock().unwrap().push(auth.clone());
+                    let ok = gate
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_none_or(|want| *want == auth);
+                    let (status, payload) = if !ok {
+                        ("401 Unauthorized", String::new())
+                    } else if let Some(batch) = request.as_array() {
+                        let replies: Vec<Value> = batch
+                            .iter()
+                            .map(|r| json!({"id": r["id"], "result": 1, "error": null}))
+                            .collect();
+                        ("200 OK", Value::from(replies).to_string())
+                    } else {
+                        (
+                            "200 OK",
+                            json!({"id": 1, "result": 1, "error": null}).to_string(),
+                        )
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                }
+            });
+            Self {
+                port,
+                accepted,
+                seen,
+            }
+        }
+
+        fn accept_only(&self, auth: &str) {
+            *self.accepted.lock().unwrap() = Some(auth.to_owned());
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    // Gateway on cookie auth against a regtest datadir holding `__cookie__:a`.
+    fn cookie_gateway(node: &FakeNode) -> (BitcoinCoreRpc, PathBuf, PathBuf) {
+        let datadir = temp_dir("cookie-auth");
+        let cookie = datadir.join("regtest").join(".cookie");
+        std::fs::create_dir_all(cookie.parent().unwrap()).unwrap();
+        std::fs::write(&cookie, "__cookie__:a").unwrap();
+        let mut config = cookie_config(datadir.clone(), "regtest");
+        config.rpcport = node.port;
+        (BitcoinCoreRpc::new(config).unwrap(), cookie, datadir)
+    }
+
+    fn ping(rpc: &BitcoinCoreRpc) -> Result<Value, stealth_model::error::AnalysisError> {
+        rpc.call::<Value>(None, "getblockcount", Vec::new())
+    }
+
+    #[test]
+    fn cookie_is_read_once_not_per_call() {
+        let node = FakeNode::start(None);
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        ping(&rpc).unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        ping(&rpc).unwrap();
+        rpc.call_batch::<Value>("getblockcount", &[Vec::new()])
+            .unwrap();
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_A, AUTH_A]);
+    }
+
+    #[test]
+    fn unauthorized_rereads_cookie_and_retries_once() {
+        let node = FakeNode::start(Some(AUTH_A));
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        ping(&rpc).unwrap();
+        // Node restarted: new cookie on disk, old one rejected.
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        node.accept_only(AUTH_B);
+        let first = ping(&rpc);
+        let after = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(
+            first.is_ok(),
+            "retry with the new cookie must succeed: {first:?}"
+        );
+        assert!(after.is_ok());
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_A, AUTH_B, AUTH_B]);
+    }
+
+    #[test]
+    fn unauthorized_batch_rereads_cookie_and_retries_once() {
+        let node = FakeNode::start(Some(AUTH_B));
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        rpc.credentials().unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        let result = rpc.call_batch::<Value>("getblockcount", &[Vec::new()]);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(result.is_ok(), "batch retry must succeed: {result:?}");
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_B]);
+    }
+
+    #[test]
+    fn unauthorized_with_a_new_cookie_still_rejected_is_not_retried_again() {
+        let node = FakeNode::start(Some("nobody"));
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        rpc.credentials().unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        let result = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(result.is_err());
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_B]);
+    }
+
+    #[test]
+    fn unauthorized_with_an_unchanged_cookie_is_not_resent() {
+        let node = FakeNode::start(Some("nobody"));
+        let (rpc, _cookie, datadir) = cookie_gateway(&node);
+        let result = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(result.is_err());
+        assert_eq!(node.seen(), vec![AUTH_A]);
+    }
+
+    #[test]
+    fn unauthorized_with_explicit_credentials_is_not_retried() {
+        // A readable cookie the node would accept must not rescue explicit credentials.
+        let node = FakeNode::start(Some(AUTH_A));
+        let datadir = temp_dir("explicit-auth");
+        std::fs::create_dir_all(datadir.join("regtest")).unwrap();
+        std::fs::write(datadir.join("regtest").join(".cookie"), "__cookie__:a").unwrap();
+        let mut config = cookie_config(datadir.clone(), "regtest");
+        config.rpcport = node.port;
+        config.rpcuser = Some("u".into());
+        config.rpcpassword = Some("p".into());
+        let result = ping(&BitcoinCoreRpc::new(config).unwrap());
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(result.is_err());
+        assert_eq!(node.seen(), vec![AUTH_USERPASS]);
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         static SEQ: AtomicU64 = AtomicU64::new(0);
