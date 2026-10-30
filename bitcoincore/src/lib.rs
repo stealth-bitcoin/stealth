@@ -404,8 +404,14 @@ impl BitcoinCoreRpc {
             Some("receive") => WalletTxCategory::Receive,
             _ => WalletTxCategory::Unknown,
         };
-        let address: Option<Address<NetworkUnchecked>> =
-            entry.address.as_deref().and_then(|s| s.parse().ok());
+        // A send's address is the counterparty's; every other entry's is ours.
+        let address = match (entry.address.as_deref(), category) {
+            (None, _) => None,
+            (Some(s), WalletTxCategory::Send) => s.parse().ok(),
+            (Some(s), _) => Some(parse_address("listtransactions", s, || {
+                format!("entry of tx {}", entry.txid)
+            })?),
+        };
         // Core reports sends as negative; the entry carries the magnitude.
         let btc = match category {
             WalletTxCategory::Send => entry.amount.abs(),
@@ -467,8 +473,11 @@ impl BitcoinCoreRpc {
 
     fn convert_list_unspent_entry(utxo: ListUnspentEntry) -> Result<Utxo, AnalysisError> {
         let place = || format!("output {}:{}", utxo.txid, utxo.vout);
-        let address: Option<Address<NetworkUnchecked>> =
-            utxo.address.as_deref().and_then(|s| s.parse().ok());
+        let address = utxo
+            .address
+            .as_deref()
+            .map(|s| parse_address("listunspent", s, place))
+            .transpose()?;
         Ok(Utxo {
             txid: parse_txid("listunspent", &utxo.txid)?,
             vout: utxo.vout,
@@ -520,6 +529,7 @@ impl BitcoinCoreRpc {
                 .vout
                 .into_iter()
                 .map(|output| {
+                    // Outputs include counterparties'; ownership comes from the wallet calls.
                     let address: Option<Address<NetworkUnchecked>> = output
                         .script_pub_key
                         .address
@@ -1119,6 +1129,19 @@ fn scan_wallet_name(timestamp_millis: u128) -> String {
     format!("_stealth_scan_{timestamp_millis}_{pid}_{sequence}")
 }
 
+fn parse_address(
+    method: &str,
+    s: &str,
+    place: impl Fn() -> String,
+) -> Result<Address<NetworkUnchecked>, AnalysisError> {
+    s.parse().map_err(|e| {
+        AnalysisError::EnvironmentUnavailable(format!(
+            "{method}: invalid wallet address '{s}' in {}: {e}",
+            place()
+        ))
+    })
+}
+
 fn node_amount(
     method: &str,
     btc: f64,
@@ -1573,6 +1596,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unparseable_own_receive_address_is_an_error() {
+        let result =
+            BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("receive", "bogus", 1.0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unparseable_own_coinbase_address_is_an_error() {
+        for category in ["generate", "immature", "orphan"] {
+            let result =
+                BitcoinCoreRpc::convert_list_transaction_entry(tx_entry(category, "bogus", 1.0));
+            assert!(result.is_err(), "{category}");
+        }
+    }
+
+    #[test]
+    fn unparseable_counterparty_send_address_is_tolerated() {
+        let entry = BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("send", "bogus", -1.0))
+            .unwrap();
+        assert_eq!(entry.address, None);
+        assert_eq!(entry.amount, Amount::from_sat(100_000_000));
+    }
+
+    #[test]
+    fn unparseable_own_utxo_address_is_an_error() {
+        let result = BitcoinCoreRpc::convert_list_unspent_entry(unspent_entry("bogus", 1.0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unparseable_output_address_is_tolerated() {
+        let tx = BitcoinCoreRpc::convert_raw_transaction(raw_tx("bogus", 1.0)).unwrap();
+        assert_eq!(tx.vout[0].address, None);
+        assert_eq!(tx.vout[0].value, Amount::from_sat(100_000_000));
+    }
+
     fn assert_names_call_and_txid(result: Result<impl std::fmt::Debug, AnalysisError>, call: &str) {
         let message = result.unwrap_err().to_string();
         let body = message
@@ -1580,6 +1640,30 @@ mod tests {
             .unwrap_or(&message);
         assert!(body.starts_with(&format!("{call}: ")), "{message}");
         assert!(message.contains(TXID), "{message}");
+    }
+
+    #[test]
+    fn invalid_wallet_data_errors_name_the_call_and_the_txid() {
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("send", ADDR, -1e300)),
+            "listtransactions",
+        );
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("receive", "bogus", 1.0)),
+            "listtransactions",
+        );
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_list_unspent_entry(unspent_entry(ADDR, -1.0)),
+            "listunspent",
+        );
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_list_unspent_entry(unspent_entry("bogus", 1.0)),
+            "listunspent",
+        );
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_raw_transaction(raw_tx(ADDR, -1.0)),
+            "getrawtransaction",
+        );
     }
 
     fn envelope(reply: serde_json::Value) -> JsonRpcBatchEnvelope<RawTransaction> {
