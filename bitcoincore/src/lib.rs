@@ -56,6 +56,7 @@ impl BitcoinCoreConfig {
 
         let network = section
             .get("network")
+            .or_else(|| section.get("chain"))
             .map(|value| value.trim().to_lowercase())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "regtest".into());
@@ -1312,12 +1313,13 @@ fn parse_txid(method: &str, s: &str) -> Result<Txid, AnalysisError> {
     })
 }
 
+// Accepts the same names as `network_datadir_subdir`, plus mainnet's.
 fn default_rpc_port(network: &str) -> u16 {
-    match network {
-        "mainnet" => 8332,
-        "testnet" => 18332,
-        "testnet4" => 48332,
-        "signet" => 38332,
+    match (network, network_datadir_subdir(network)) {
+        ("main" | "mainnet", _) => 8332,
+        (_, Some("testnet3")) => 18332,
+        (_, Some("testnet4")) => 48332,
+        (_, Some("signet")) => 38332,
         _ => 18443,
     }
 }
@@ -1949,6 +1951,39 @@ mod tests {
         assert_eq!(default_rpc_port("testnet4"), 48332);
         assert_eq!(default_rpc_port("signet"), 38332);
         assert_eq!(default_rpc_port("mainnet"), 8332);
+    }
+
+    #[test]
+    fn every_network_name_gets_its_core_port() {
+        for (network, port) in [
+            ("main", 8332),
+            ("mainnet", 8332),
+            ("test", 18332),
+            ("testnet", 18332),
+            ("testnet3", 18332),
+            ("testnet4", 48332),
+            ("signet", 38332),
+            ("regtest", 18443),
+        ] {
+            assert_eq!(default_rpc_port(network), port, "{network}");
+        }
+    }
+
+    #[test]
+    fn ini_network_or_chain_without_rpcport_gets_the_network_port() {
+        for (key, network, port) in [
+            ("network", "testnet3", 18332),
+            ("chain", "testnet3", 18332),
+            ("chain", "main", 8332),
+            ("chain", "testnet4", 48332),
+        ] {
+            let dir = temp_dir("ini");
+            let path = dir.join("stealth.ini");
+            std::fs::write(&path, format!("[bitcoin]\n{key}={network}\n")).unwrap();
+            let config = BitcoinCoreConfig::from_ini_file(&path).unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+            assert_eq!(config.rpcport, port, "{key}={network}");
+        }
     }
 
     #[test]
