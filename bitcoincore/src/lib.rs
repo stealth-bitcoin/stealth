@@ -548,11 +548,7 @@ impl BitcoinCoreRpc {
                         previous_txid: match &input.txid {
                             Some(s) => parse_txid("getrawtransaction", s)?,
                             // Bitcoin protocol: coinbase inputs reference all-zeros.
-                            None => parse_txid(
-                                "getrawtransaction",
-                                "0000000000000000000000000000000000000000000000000000000000000000",
-                            )
-                            .expect("zero txid is always valid"),
+                            None => <Txid as bitcoin::hashes::Hash>::all_zeros(),
                         },
                         previous_vout: input.vout.unwrap_or_default(),
                         sequence: input.sequence.unwrap_or(0xffff_ffff),
