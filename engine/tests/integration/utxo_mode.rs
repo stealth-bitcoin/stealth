@@ -155,6 +155,7 @@ fn utxo_scan_for_a_user_the_whitelist_denies_a_history_call_reports_the_history_
     // Each case leaves a call the address-history load needs out of the whitelist.
     for allowed in [
         "getdescriptorinfo",
+        "createwallet",
         "getdescriptorinfo,createwallet",
         "getdescriptorinfo,createwallet,importdescriptors",
     ] {
@@ -339,4 +340,34 @@ fn payment_vout(node: &Node, txid: Txid, to: &Address) -> u32 {
         .find(|o| o["scriptPubKey"]["address"] == to.to_string())
         .and_then(|o| o["n"].as_u64())
         .expect("the payment output") as u32
+}
+
+#[test]
+fn utxo_scan_with_an_address_of_another_network_is_a_descriptor_error() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let a1 = alice.new_address().unwrap();
+    node.client.send_to_address(&a1, Amount::ONE_BTC).unwrap();
+    mine(&node, 1, &da);
+
+    let mut pasted = utxo_inputs_for(&alice);
+    pasted.truncate(1);
+    pasted[0].address = Some(
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+            .parse()
+            .expect("mainnet address"),
+    );
+    let gateway = gateway_for(&node);
+    let error = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(pasted))
+        .expect_err("a mainnet address cannot be scanned on regtest");
+    assert!(
+        matches!(
+            error,
+            stealth_engine::error::AnalysisError::DescriptorNormalization { .. }
+        ),
+        "{error:?}"
+    );
 }

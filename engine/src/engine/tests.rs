@@ -92,6 +92,7 @@ fn pasted() -> UtxoInput {
 struct FakeGateway {
     transactions: HashMap<Txid, DecodedTransaction>,
     broken: HashSet<Txid>,
+    normalize_error: Option<AnalysisError>,
     txindex: Result<bool, AnalysisError>,
     history: Result<WalletHistory, AnalysisError>,
     scanned: RefCell<Vec<String>>,
@@ -103,6 +104,7 @@ impl FakeGateway {
         Self {
             transactions: HashMap::from([(txid(1), payment(1))]),
             broken: HashSet::new(),
+            normalize_error: None,
             txindex: Ok(false),
             history,
             scanned: RefCell::new(Vec::new()),
@@ -113,7 +115,10 @@ impl FakeGateway {
 
 impl BlockchainGateway for FakeGateway {
     fn normalize_descriptor(&self, descriptor: &str) -> Result<String, AnalysisError> {
-        Ok(descriptor.to_owned())
+        match &self.normalize_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(descriptor.to_owned()),
+        }
     }
 
     fn derive_addresses(
@@ -332,6 +337,16 @@ fn a_descriptor_scan_still_fails_on_a_wallet_tx_the_node_cannot_find() {
     let result = AnalysisEngine::new(&gateway, EngineSettings::default())
         .analyze(ScanTarget::Descriptor(format!("addr({ADDR})")));
     assert_eq!(result.err(), Some(missing));
+}
+
+#[test]
+fn a_node_error_while_normalizing_the_address_history_keeps_its_variant() {
+    let mut gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    let busy = AnalysisError::EnvironmentUnavailable("Loading block index...".into());
+    gateway.normalize_error = Some(busy.clone());
+    let result = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]));
+    assert_eq!(result.err(), Some(busy));
 }
 
 #[test]

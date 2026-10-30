@@ -924,8 +924,9 @@ impl BlockchainGateway for BitcoinCoreRpc {
         // Core keeps the hardened marker it was given; one spelling keeps
         // the cache name and the stored descriptors comparable.
         let canonical = descriptor.replace('\'', "h");
-        let response =
-            self.call::<DescriptorInfo>(None, "getdescriptorinfo", vec![json!(canonical)])?;
+        let response = self
+            .call_rpc::<DescriptorInfo>(None, "getdescriptorinfo", vec![json!(canonical)])
+            .map_err(|error| descriptor_info_error(descriptor, error))?;
         Ok(response.descriptor)
     }
 
@@ -1310,6 +1311,23 @@ fn fetch_error(txid: Txid, error: RpcError) -> AnalysisError {
             "getrawtransaction {txid}: {}",
             error.message
         )),
+        other => other.into(),
+    }
+}
+
+fn descriptor_info_error(descriptor: &str, error: RpcError) -> AnalysisError {
+    match error {
+        // Core rejects a descriptor it cannot parse with -5.
+        RpcError::Node(
+            _,
+            JsonRpcError {
+                code: Some(RPC_INVALID_ADDRESS_OR_KEY),
+                message,
+            },
+        ) => AnalysisError::DescriptorNormalization {
+            descriptor: descriptor.to_string(),
+            message,
+        },
         other => other.into(),
     }
 }
@@ -2091,6 +2109,40 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_node_error_from_getdescriptorinfo_is_not_blamed_on_the_descriptor() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node(
+            "getdescriptorinfo",
+            json!({ "code": -28, "message": "Loading block index..." }),
+        );
+        let error = rpc
+            .normalize_descriptor(&format!("addr({ADDR})"))
+            .expect_err("the node is warming up");
+        assert_eq!(
+            error,
+            AnalysisError::EnvironmentUnavailable(
+                "getdescriptorinfo: Loading block index...".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_descriptor_core_cannot_parse_is_a_descriptor_error() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node(
+            "getdescriptorinfo",
+            json!({ "code": -5, "message": "Address is not valid" }),
+        );
+        let error = rpc
+            .normalize_descriptor("addr(bogus)")
+            .expect_err("Core rejected it");
+        assert!(
+            matches!(error, AnalysisError::DescriptorNormalization { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
