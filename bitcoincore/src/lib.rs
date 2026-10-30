@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::{Address, Txid};
+use bitcoin::{Address, Amount, Txid};
 use ini::Ini;
 use reqwest::blocking::Client;
 use serde::de::DeserializeOwned;
@@ -392,23 +392,35 @@ impl BitcoinCoreRpc {
         }
         entries
             .into_iter()
-            .map(|entry| {
-                let address: Option<Address<NetworkUnchecked>> =
-                    entry.address.as_deref().and_then(|s| s.parse().ok());
-                Ok(WalletTxEntry {
-                    txid: parse_txid("listtransactions", &entry.txid)?,
-                    address,
-                    category: match entry.category.as_deref() {
-                        Some("send") => WalletTxCategory::Send,
-                        Some("receive") => WalletTxCategory::Receive,
-                        _ => WalletTxCategory::Unknown,
-                    },
-                    amount: btc_to_amount(entry.amount.abs()),
-                    confirmations: entry.confirmations.unwrap_or_default(),
-                    blockheight: entry.blockheight.unwrap_or_default(),
-                })
-            })
+            .map(Self::convert_list_transaction_entry)
             .collect()
+    }
+
+    fn convert_list_transaction_entry(
+        entry: ListTransactionEntry,
+    ) -> Result<WalletTxEntry, AnalysisError> {
+        let category = match entry.category.as_deref() {
+            Some("send") => WalletTxCategory::Send,
+            Some("receive") => WalletTxCategory::Receive,
+            _ => WalletTxCategory::Unknown,
+        };
+        let address: Option<Address<NetworkUnchecked>> =
+            entry.address.as_deref().and_then(|s| s.parse().ok());
+        // Core reports sends as negative; the entry carries the magnitude.
+        let btc = match category {
+            WalletTxCategory::Send => entry.amount.abs(),
+            _ => entry.amount,
+        };
+        Ok(WalletTxEntry {
+            txid: parse_txid("listtransactions", &entry.txid)?,
+            address,
+            category,
+            amount: node_amount("listtransactions", btc, || {
+                format!("entry of tx {}", entry.txid)
+            })?,
+            confirmations: entry.confirmations.unwrap_or_default(),
+            blockheight: entry.blockheight.unwrap_or_default(),
+        })
     }
 
     fn fetch_transaction_pages(
@@ -449,22 +461,25 @@ impl BitcoinCoreRpc {
         )?;
         utxos
             .into_iter()
-            .map(|utxo| {
-                let address: Option<Address<NetworkUnchecked>> =
-                    utxo.address.as_deref().and_then(|s| s.parse().ok());
-                Ok(Utxo {
-                    txid: parse_txid("listunspent", &utxo.txid)?,
-                    vout: utxo.vout,
-                    script_type: address
-                        .as_ref()
-                        .map(DescriptorType::infer_from_address)
-                        .unwrap_or(DescriptorType::Unknown),
-                    address,
-                    amount: btc_to_amount(utxo.amount),
-                    confirmations: utxo.confirmations.unwrap_or_default(),
-                })
-            })
+            .map(Self::convert_list_unspent_entry)
             .collect()
+    }
+
+    fn convert_list_unspent_entry(utxo: ListUnspentEntry) -> Result<Utxo, AnalysisError> {
+        let place = || format!("output {}:{}", utxo.txid, utxo.vout);
+        let address: Option<Address<NetworkUnchecked>> =
+            utxo.address.as_deref().and_then(|s| s.parse().ok());
+        Ok(Utxo {
+            txid: parse_txid("listunspent", &utxo.txid)?,
+            vout: utxo.vout,
+            script_type: address
+                .as_ref()
+                .map(DescriptorType::infer_from_address)
+                .unwrap_or(DescriptorType::Unknown),
+            address,
+            amount: node_amount("listunspent", utxo.amount, place)?,
+            confirmations: utxo.confirmations.unwrap_or_default(),
+        })
     }
 
     fn decode_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
@@ -515,7 +530,7 @@ impl BitcoinCoreRpc {
                                 .and_then(|mut items| items.pop())
                         })
                         .and_then(|s| s.parse().ok());
-                    TxOutput {
+                    Ok(TxOutput {
                         n: output.n,
                         script_type: address
                             .as_ref()
@@ -529,10 +544,12 @@ impl BitcoinCoreRpc {
                             })
                             .unwrap_or(DescriptorType::Unknown),
                         address,
-                        value: btc_to_amount(output.value),
-                    }
+                        value: node_amount("getrawtransaction", output.value, || {
+                            format!("output {}:{}", tx.txid, output.n)
+                        })?,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, AnalysisError>>()?,
             version: tx.version.unwrap_or(2),
             locktime: tx.locktime.unwrap_or_default(),
             vsize: tx.vsize.unwrap_or_default(),
@@ -1102,6 +1119,20 @@ fn scan_wallet_name(timestamp_millis: u128) -> String {
     format!("_stealth_scan_{timestamp_millis}_{pid}_{sequence}")
 }
 
+fn node_amount(
+    method: &str,
+    btc: f64,
+    place: impl Fn() -> String,
+) -> Result<Amount, AnalysisError> {
+    // btc_to_amount's error only restates the value; the place is what helps.
+    btc_to_amount(btc).map_err(|_| {
+        AnalysisError::EnvironmentUnavailable(format!(
+            "{method}: invalid amount {btc} BTC in {}",
+            place()
+        ))
+    })
+}
+
 fn parse_txid(method: &str, s: &str) -> Result<Txid, AnalysisError> {
     s.parse::<Txid>().map_err(|e| {
         AnalysisError::EnvironmentUnavailable(format!("{method}: invalid txid '{s}': {e}"))
@@ -1425,12 +1456,12 @@ struct RawScriptPubKey {
 mod tests {
     use super::{
         cache_wallet_name, default_rpc_port, scan_wallet_name, BitcoinCoreRpc,
-        JsonRpcBatchEnvelope, RawTransaction,
+        JsonRpcBatchEnvelope, ListTransactionEntry, ListUnspentEntry, RawTransaction,
     };
-    use bitcoin::Txid;
+    use bitcoin::{Amount, Txid};
     use serde_json::json;
     use stealth_model::error::AnalysisError;
-    use stealth_model::gateway::ResolvedDescriptor;
+    use stealth_model::gateway::{ResolvedDescriptor, WalletTxCategory};
 
     const TXID: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
     const ADDR: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
@@ -1461,6 +1492,64 @@ mod tests {
         assert_ne!(one, two, "distinct descriptors must map to distinct names");
     }
 
+    fn tx_entry(category: &str, address: &str, amount: f64) -> ListTransactionEntry {
+        serde_json::from_value(json!({
+            "txid": TXID, "address": address, "category": category, "amount": amount,
+        }))
+        .unwrap()
+    }
+
+    fn unspent_entry(address: &str, amount: f64) -> ListUnspentEntry {
+        serde_json::from_value(json!({
+            "txid": TXID, "vout": 0, "address": address, "amount": amount,
+        }))
+        .unwrap()
+    }
+
+    fn raw_tx(address: &str, value: f64) -> RawTransaction {
+        serde_json::from_value(json!({
+            "txid": TXID,
+            "vin": [],
+            "vout": [{ "value": value, "n": 0, "scriptPubKey": { "address": address } }],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn send_amounts_reported_negative_become_their_absolute_value() {
+        let entry =
+            BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("send", ADDR, -0.5)).unwrap();
+        assert_eq!(entry.category, WalletTxCategory::Send);
+        assert_eq!(entry.amount, Amount::from_sat(50_000_000));
+    }
+
+    #[test]
+    fn negative_amount_outside_a_send_is_an_error() {
+        for category in ["receive", "generate", "immature", "orphan"] {
+            let result =
+                BitcoinCoreRpc::convert_list_transaction_entry(tx_entry(category, ADDR, -1.0));
+            assert_names_call_and_txid(result, "listtransactions");
+        }
+    }
+
+    #[test]
+    fn wallet_amount_beyond_supply_is_an_error() {
+        let result = BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("send", ADDR, -1e300));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_utxo_amount_is_an_error() {
+        let result = BitcoinCoreRpc::convert_list_unspent_entry(unspent_entry(ADDR, -1.0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_output_value_is_an_error() {
+        let result = BitcoinCoreRpc::convert_raw_transaction(raw_tx(ADDR, -1.0));
+        assert!(result.is_err());
+    }
+
     #[test]
     fn network_defaults_match_bitcoin_core_ports() {
         assert_eq!(default_rpc_port("regtest"), 18443);
@@ -1482,6 +1571,15 @@ mod tests {
             first, second,
             "concurrent scans in the same millisecond must not collide"
         );
+    }
+
+    fn assert_names_call_and_txid(result: Result<impl std::fmt::Debug, AnalysisError>, call: &str) {
+        let message = result.unwrap_err().to_string();
+        let body = message
+            .strip_prefix("environment unavailable: ")
+            .unwrap_or(&message);
+        assert!(body.starts_with(&format!("{call}: ")), "{message}");
+        assert!(message.contains(TXID), "{message}");
     }
 
     fn envelope(reply: serde_json::Value) -> JsonRpcBatchEnvelope<RawTransaction> {
@@ -1548,6 +1646,18 @@ mod tests {
             result,
             Err(AnalysisError::EnvironmentUnavailable(_))
         ));
+    }
+
+    #[test]
+    fn fetched_transaction_with_invalid_data_fails_the_fetch() {
+        let result = fetch(json!({
+            "id": 0, "error": null,
+            "result": {
+                "txid": TXID, "vin": [],
+                "vout": [{ "value": -1.0, "n": 0, "scriptPubKey": { "address": ADDR } }],
+            },
+        }));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1803,6 +1913,50 @@ mod tests {
             forbidden(""),
             "listunspent: forbidden by the node (rpcwhitelist or rpcallowip)"
         );
+    }
+
+    #[test]
+    fn an_invalid_txid_names_the_call() {
+        let bad = "zz";
+        let lt: ListTransactionEntry = serde_json::from_value(json!({
+            "txid": bad, "address": ADDR, "category": "receive", "amount": 1.0,
+        }))
+        .unwrap();
+        let lu: ListUnspentEntry = serde_json::from_value(json!({
+            "txid": bad, "vout": 0, "address": ADDR, "amount": 1.0,
+        }))
+        .unwrap();
+        let tx: RawTransaction =
+            serde_json::from_value(json!({ "txid": bad, "vin": [], "vout": [] })).unwrap();
+        let vin: RawTransaction = serde_json::from_value(json!({
+            "txid": TXID, "vin": [{ "txid": bad, "vout": 0 }], "vout": [],
+        }))
+        .unwrap();
+        let cases = [
+            (
+                BitcoinCoreRpc::convert_list_transaction_entry(lt).map(|_| ()),
+                "listtransactions",
+            ),
+            (
+                BitcoinCoreRpc::convert_list_unspent_entry(lu).map(|_| ()),
+                "listunspent",
+            ),
+            (
+                BitcoinCoreRpc::convert_raw_transaction(tx).map(|_| ()),
+                "getrawtransaction",
+            ),
+            (
+                BitcoinCoreRpc::convert_raw_transaction(vin).map(|_| ()),
+                "getrawtransaction",
+            ),
+        ];
+        for (result, method) in cases {
+            let message = result.unwrap_err().to_string();
+            assert!(
+                message.contains(&format!("{method}: invalid txid 'zz'")),
+                "{message}"
+            );
+        }
     }
 
     #[test]
