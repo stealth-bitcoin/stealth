@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use ini::Ini;
 use stealth_api::app_with_gateway;
-use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc};
+use stealth_bitcoincore::{
+    default_cookie_candidates, network_for_rpc_port, read_cookie_file, BitcoinCoreRpc,
+};
 use stealth_engine::gateway::BlockchainGateway;
 use tracing_subscriber::EnvFilter;
 
@@ -140,29 +142,10 @@ fn detect_cookie_file(url: &str) -> Option<PathBuf> {
         .map(|(_, port)| port)
         .unwrap_or(8332);
 
-    cookie_candidates(&bitcoin_dir, port)
+    let network = network_for_rpc_port(port).unwrap_or("mainnet");
+    default_cookie_candidates(&bitcoin_dir, network)
         .into_iter()
         .find(|candidate| candidate.exists())
-}
-
-fn cookie_candidates(bitcoin_dir: &Path, port: u16) -> Vec<PathBuf> {
-    match port {
-        18443 => vec![
-            bitcoin_dir.join("regtest/.cookie"),
-            bitcoin_dir.join(".cookie"),
-        ],
-        18332 => vec![
-            bitcoin_dir.join("testnet4/.cookie"),
-            bitcoin_dir.join("testnet3/.cookie"),
-            bitcoin_dir.join("testnet/.cookie"),
-            bitcoin_dir.join(".cookie"),
-        ],
-        38332 => vec![
-            bitcoin_dir.join("signet/.cookie"),
-            bitcoin_dir.join(".cookie"),
-        ],
-        _ => vec![bitcoin_dir.join(".cookie")],
-    }
 }
 
 fn read_bitcoin_conf_credentials() -> Option<(String, String)> {

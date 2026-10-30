@@ -89,15 +89,7 @@ impl BitcoinCoreConfig {
         let datadir = self.datadir.as_ref().ok_or_else(|| {
             AnalysisError::EnvironmentUnavailable("missing datadir for cookie auth".into())
         })?;
-        let mut candidates = Vec::new();
-        if self.network == "mainnet" {
-            candidates.push(datadir.join(".cookie"));
-        } else {
-            candidates.push(datadir.join(&self.network).join(".cookie"));
-            candidates.push(datadir.join(".cookie"));
-        }
-
-        for candidate in candidates {
+        for candidate in default_cookie_candidates(datadir, &self.network) {
             if !candidate.exists() {
                 continue;
             }
@@ -109,6 +101,38 @@ impl BitcoinCoreConfig {
         Err(AnalysisError::EnvironmentUnavailable(
             "could not locate a readable Bitcoin Core cookie file".into(),
         ))
+    }
+}
+
+/// Datadir subdirectory Bitcoin Core uses for a network; `None` means the root.
+pub fn network_datadir_subdir(network: &str) -> Option<&'static str> {
+    match network {
+        "testnet" | "testnet3" | "test" => Some("testnet3"),
+        "testnet4" => Some("testnet4"),
+        "signet" => Some("signet"),
+        "regtest" => Some("regtest"),
+        _ => None,
+    }
+}
+
+/// Network a default Bitcoin Core RPC port belongs to.
+pub fn network_for_rpc_port(port: u16) -> Option<&'static str> {
+    match port {
+        8332 => Some("mainnet"),
+        18332 => Some("testnet"),
+        48332 => Some("testnet4"),
+        38332 => Some("signet"),
+        18443 => Some("regtest"),
+        _ => None,
+    }
+}
+
+/// Where Bitcoin Core writes the `.cookie` for a network, most specific first.
+pub fn default_cookie_candidates(datadir: &Path, network: &str) -> Vec<PathBuf> {
+    let root = datadir.join(".cookie");
+    match network_datadir_subdir(network) {
+        Some(subdir) => vec![datadir.join(subdir).join(".cookie"), root],
+        None => vec![root],
     }
 }
 
@@ -1207,6 +1231,7 @@ fn default_rpc_port(network: &str) -> u16 {
     match network {
         "mainnet" => 8332,
         "testnet" => 18332,
+        "testnet4" => 48332,
         "signet" => 38332,
         _ => 18443,
     }
@@ -1238,14 +1263,7 @@ fn parse_host_port_from_url(url: &str) -> (String, u16) {
 }
 
 fn infer_network_from_port(port: u16) -> String {
-    match port {
-        8332 => "mainnet",
-        18332 => "testnet",
-        38332 => "signet",
-        18443 => "regtest",
-        _ => "regtest",
-    }
-    .to_owned()
+    network_for_rpc_port(port).unwrap_or("regtest").to_owned()
 }
 
 const RPC_BATCH_SIZE: usize = 100;
@@ -1580,13 +1598,121 @@ struct RawScriptPubKey {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_wallet_name, default_rpc_port, scan_wallet_name, BitcoinCoreRpc,
+        cache_wallet_name, default_cookie_candidates, default_rpc_port, network_datadir_subdir,
+        network_for_rpc_port, scan_wallet_name, BitcoinCoreConfig, BitcoinCoreRpc,
         JsonRpcBatchEnvelope, ListTransactionEntry, ListUnspentEntry, RawTransaction,
     };
     use bitcoin::{Amount, Txid};
     use serde_json::json;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use stealth_model::error::AnalysisError;
     use stealth_model::gateway::{ResolvedDescriptor, WalletTxCategory};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "stealth-bitcoincore-{label}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn cookie_config(datadir: PathBuf, network: &str) -> BitcoinCoreConfig {
+        BitcoinCoreConfig {
+            network: network.into(),
+            datadir: Some(datadir),
+            rpchost: "127.0.0.1".into(),
+            rpcport: default_rpc_port(network),
+            rpcuser: None,
+            rpcpassword: None,
+        }
+    }
+
+    #[test]
+    fn default_cookie_path_follows_core_datadir_layout() {
+        for (network, subdir) in [
+            ("testnet", "testnet3"),
+            ("testnet4", "testnet4"),
+            ("signet", "signet"),
+            ("regtest", "regtest"),
+            ("mainnet", ""),
+        ] {
+            let datadir = temp_dir(network);
+            let dir = datadir.join(subdir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(".cookie"), format!("__cookie__:{network}")).unwrap();
+            let creds = cookie_config(datadir.clone(), network).cookie_credentials();
+            std::fs::remove_dir_all(&datadir).unwrap();
+            assert_eq!(
+                creds.ok(),
+                Some(("__cookie__".to_string(), network.to_string())),
+                "{network} cookie must be read from <datadir>/{subdir}/.cookie"
+            );
+        }
+    }
+
+    #[test]
+    fn network_defaults_match_bitcoin_core_ports() {
+        assert_eq!(default_rpc_port("regtest"), 18443);
+        assert_eq!(default_rpc_port("testnet"), 18332);
+        assert_eq!(default_rpc_port("testnet4"), 48332);
+        assert_eq!(default_rpc_port("signet"), 38332);
+        assert_eq!(default_rpc_port("mainnet"), 8332);
+    }
+
+    #[test]
+    fn network_maps_to_core_datadir_subdir() {
+        assert_eq!(network_datadir_subdir("mainnet"), None);
+        assert_eq!(network_datadir_subdir("testnet"), Some("testnet3"));
+        assert_eq!(network_datadir_subdir("testnet3"), Some("testnet3"));
+        assert_eq!(network_datadir_subdir("test"), Some("testnet3"));
+        assert_eq!(network_datadir_subdir("testnet4"), Some("testnet4"));
+        assert_eq!(network_datadir_subdir("signet"), Some("signet"));
+        assert_eq!(network_datadir_subdir("regtest"), Some("regtest"));
+        assert_eq!(network_datadir_subdir("bogus"), None);
+    }
+
+    #[test]
+    fn rpc_ports_round_trip_through_network() {
+        for network in ["mainnet", "testnet", "testnet4", "signet", "regtest"] {
+            assert_eq!(
+                network_for_rpc_port(default_rpc_port(network)),
+                Some(network)
+            );
+        }
+        assert_eq!(network_for_rpc_port(1234), None);
+    }
+
+    #[test]
+    fn cookie_candidates_try_network_dir_then_root() {
+        let dir = Path::new("/data");
+        assert_eq!(
+            default_cookie_candidates(dir, "testnet"),
+            vec![dir.join("testnet3/.cookie"), dir.join(".cookie")]
+        );
+        assert_eq!(
+            default_cookie_candidates(dir, "mainnet"),
+            vec![dir.join(".cookie")]
+        );
+    }
+
+    #[test]
+    fn scan_wallet_names_differ_for_same_timestamp() {
+        let first = scan_wallet_name(1_700_000_000_000);
+        let second = scan_wallet_name(1_700_000_000_000);
+        let pid = std::process::id();
+        assert!(
+            first.starts_with(&format!("_stealth_scan_1700000000000_{pid}_")),
+            "name must embed the process id to avoid cross-process collisions, got: {first}"
+        );
+        assert_ne!(
+            first, second,
+            "concurrent scans in the same millisecond must not collide"
+        );
+    }
 
     const TXID: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
     const ADDR: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
@@ -1673,29 +1799,6 @@ mod tests {
     fn negative_output_value_is_an_error() {
         let result = BitcoinCoreRpc::convert_raw_transaction(raw_tx(ADDR, -1.0));
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn network_defaults_match_bitcoin_core_ports() {
-        assert_eq!(default_rpc_port("regtest"), 18443);
-        assert_eq!(default_rpc_port("testnet"), 18332);
-        assert_eq!(default_rpc_port("signet"), 38332);
-        assert_eq!(default_rpc_port("mainnet"), 8332);
-    }
-
-    #[test]
-    fn scan_wallet_names_differ_for_same_timestamp() {
-        let first = scan_wallet_name(1_700_000_000_000);
-        let second = scan_wallet_name(1_700_000_000_000);
-        let pid = std::process::id();
-        assert!(
-            first.starts_with(&format!("_stealth_scan_1700000000000_{pid}_")),
-            "name must embed the process id to avoid cross-process collisions, got: {first}"
-        );
-        assert_ne!(
-            first, second,
-            "concurrent scans in the same millisecond must not collide"
-        );
     }
 
     #[test]
