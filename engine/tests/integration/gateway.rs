@@ -188,6 +188,7 @@ fn cookie_gateway_survives_node_restart() {
         rpcport: port,
         rpcuser: None,
         rpcpassword: None,
+        cookie_file: None,
     })
     .expect("build gateway");
     gateway

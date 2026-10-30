@@ -1,13 +1,12 @@
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ini::Ini;
 use stealth_api::app_with_gateway;
-use stealth_bitcoincore::{
-    default_cookie_candidates, network_for_rpc_port, read_cookie_file, BitcoinCoreRpc,
-};
+use stealth_api::rpc::{self, RpcSettings};
+use stealth_bitcoincore::{default_cookie_candidates, network_for_rpc_port, BitcoinCoreRpc};
 use stealth_engine::gateway::BlockchainGateway;
 use tracing_subscriber::EnvFilter;
 
@@ -49,30 +48,17 @@ fn read_bind_addr() -> Result<SocketAddr, String> {
 
 fn build_gateway() -> Result<BitcoinCoreRpc, Box<dyn std::error::Error>> {
     let url = std::env::var("STEALTH_RPC_URL").unwrap_or_else(|_| auto_detect_rpc_url());
-    let env_user = std::env::var("STEALTH_RPC_USER").ok();
-    let env_pass = std::env::var("STEALTH_RPC_PASS").ok();
-    let env_cookie = std::env::var("STEALTH_RPC_COOKIE").ok();
-
-    let (user, pass) = if let (Some(user), Some(pass)) = (env_user, env_pass) {
-        tracing::info!(rpc_url = %url, rpc_auth = "userpass", "stealth-api RPC configured");
-        (Some(user), Some(pass))
-    } else if let Some(cookie_path) = env_cookie {
-        let (u, p) = read_cookie_file(Path::new(&cookie_path))?;
-        tracing::info!(rpc_url = %url, rpc_auth = "cookie", "stealth-api RPC configured");
-        (Some(u), Some(p))
-    } else if let Some((user, pass)) = read_bitcoin_conf_credentials() {
-        tracing::info!(rpc_url = %url, rpc_auth = "bitcoin.conf", "stealth-api RPC configured");
-        (Some(user), Some(pass))
-    } else if let Some(cookie) = detect_cookie_file(&url) {
-        let (u, p) = read_cookie_file(&cookie)?;
-        tracing::info!(rpc_url = %url, rpc_auth = "cookie", "stealth-api RPC configured");
-        (Some(u), Some(p))
-    } else {
-        tracing::info!(rpc_url = %url, rpc_auth = "none", "stealth-api RPC configured");
-        (None, None)
+    let settings = RpcSettings {
+        user: std::env::var("STEALTH_RPC_USER").ok(),
+        pass: std::env::var("STEALTH_RPC_PASS").ok(),
+        cookie: std::env::var_os("STEALTH_RPC_COOKIE").map(PathBuf::from),
+        url,
     };
-
-    Ok(BitcoinCoreRpc::from_url(&url, user, pass)?)
+    Ok(rpc::build_gateway(
+        &settings,
+        read_bitcoin_conf_credentials,
+        || detect_cookie_file(&settings.url),
+    )?)
 }
 
 fn init_tracing() {

@@ -32,6 +32,17 @@ pub struct BitcoinCoreConfig {
     pub rpcport: u16,
     pub rpcuser: Option<String>,
     pub rpcpassword: Option<String>,
+    /// Cookie file to authenticate with, in place of the datadir's default.
+    pub cookie_file: Option<PathBuf>,
+}
+
+/// How the gateway authenticates to Bitcoin Core.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RpcAuth {
+    UserPass(String, String),
+    /// Read by the gateway, cached, and re-read when the node answers 401.
+    CookieFile(PathBuf),
+    None,
 }
 
 impl BitcoinCoreConfig {
@@ -83,10 +94,14 @@ impl BitcoinCoreConfig {
                 .filter(|value| !value.is_empty()),
             network,
             datadir,
+            cookie_file: None,
         })
     }
 
     fn cookie_credentials(&self) -> Result<(String, String), AnalysisError> {
+        if let Some(path) = &self.cookie_file {
+            return read_cookie_file(path);
+        }
         let datadir = self.datadir.as_ref().ok_or_else(|| {
             AnalysisError::EnvironmentUnavailable("missing datadir for cookie auth".into())
         })?;
@@ -226,8 +241,29 @@ impl BitcoinCoreRpc {
             rpcport: port,
             rpcuser: user,
             rpcpassword: password,
+            cookie_file: None,
         };
         Self::new(config)
+    }
+
+    /// Construct a gateway from a URL and an [`RpcAuth`].
+    pub fn from_url_auth(url: &str, auth: RpcAuth) -> Result<Self, AnalysisError> {
+        match auth {
+            RpcAuth::UserPass(user, password) => Self::from_url(url, Some(user), Some(password)),
+            RpcAuth::None => Self::from_url(url, None, None),
+            RpcAuth::CookieFile(path) => {
+                let (host, port) = parse_host_port_from_url(url);
+                Self::new(BitcoinCoreConfig {
+                    network: infer_network_from_port(port),
+                    datadir: None,
+                    rpchost: host,
+                    rpcport: port,
+                    rpcuser: None,
+                    rpcpassword: None,
+                    cookie_file: Some(path),
+                })
+            }
+        }
     }
 
     fn rpc_url(&self, wallet: Option<&str>) -> String {
@@ -1649,7 +1685,7 @@ mod tests {
     use super::{
         cache_wallet_name, default_cookie_candidates, default_rpc_port, network_datadir_subdir,
         network_for_rpc_port, scan_wallet_name, BitcoinCoreConfig, BitcoinCoreRpc,
-        JsonRpcBatchEnvelope, ListTransactionEntry, ListUnspentEntry, RawTransaction,
+        JsonRpcBatchEnvelope, ListTransactionEntry, ListUnspentEntry, RawTransaction, RpcAuth,
     };
     use bitcoin::{Amount, Txid};
     use serde_json::{json, Value};
@@ -1814,6 +1850,26 @@ mod tests {
     }
 
     #[test]
+    fn cookie_file_auth_is_cached_and_reread_on_401() {
+        let node = FakeNode::start(Some(AUTH_A));
+        let dir = temp_dir("cookie-file");
+        let cookie = dir.join("custom.cookie");
+        std::fs::write(&cookie, "__cookie__:a").unwrap();
+        let url = format!("http://127.0.0.1:{}", node.port);
+        let rpc = BitcoinCoreRpc::from_url_auth(&url, RpcAuth::CookieFile(cookie.clone())).unwrap();
+        ping(&rpc).unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        node.accept_only(AUTH_B);
+        let after = ping(&rpc);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            after.is_ok(),
+            "retry with the rewritten cookie file must succeed: {after:?}"
+        );
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_A, AUTH_B]);
+    }
+
+    #[test]
     fn unauthorized_with_an_unchanged_cookie_is_not_resent() {
         let node = FakeNode::start(Some("nobody"));
         let (rpc, _cookie, datadir) = cookie_gateway(&node);
@@ -1859,6 +1915,7 @@ mod tests {
             rpcport: default_rpc_port(network),
             rpcuser: None,
             rpcpassword: None,
+            cookie_file: None,
         }
     }
 
