@@ -6,7 +6,7 @@ use std::time::Duration;
 use ini::Ini;
 use stealth_api::app_with_gateway;
 use stealth_api::rpc::{self, RpcSettings};
-use stealth_bitcoincore::{default_cookie_candidates, network_for_rpc_port, BitcoinCoreRpc};
+use stealth_bitcoincore::BitcoinCoreRpc;
 use stealth_engine::gateway::BlockchainGateway;
 use tracing_subscriber::EnvFilter;
 
@@ -128,8 +128,7 @@ fn detect_cookie_file(url: &str) -> Option<PathBuf> {
         .map(|(_, port)| port)
         .unwrap_or(8332);
 
-    let network = network_for_rpc_port(port).unwrap_or("mainnet");
-    default_cookie_candidates(&bitcoin_dir, network)
+    rpc::cookie_candidates_for_port(&bitcoin_dir, port)
         .into_iter()
         .find(|candidate| candidate.exists())
 }

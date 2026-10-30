@@ -1,8 +1,10 @@
 //! How the API builds its Bitcoin Core gateway from its settings.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc, RpcAuth};
+use stealth_bitcoincore::{
+    default_cookie_candidates, network_for_rpc_port, read_cookie_file, BitcoinCoreRpc, RpcAuth,
+};
 use stealth_engine::error::AnalysisError;
 
 /// RPC settings the API reads from `STEALTH_RPC_*`.
@@ -50,6 +52,17 @@ pub fn build_gateway(
     };
     tracing::info!(rpc_url = %settings.url, rpc_auth = kind, "stealth-api RPC configured");
     BitcoinCoreRpc::from_url_auth(&settings.url, auth)
+}
+
+/// Where to look for a cookie given only the RPC port.
+pub fn cookie_candidates_for_port(bitcoin_dir: &Path, port: u16) -> Vec<PathBuf> {
+    let network = network_for_rpc_port(port).unwrap_or("mainnet");
+    let mut candidates = default_cookie_candidates(bitcoin_dir, network);
+    // A testnet4 node may keep the testnet3 port; Core then writes under testnet4/.
+    if network == "testnet" {
+        candidates.insert(1, bitcoin_dir.join("testnet4").join(".cookie"));
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -129,6 +142,27 @@ mod tests {
             ..settings()
         };
         assert!(build_gateway(&settings, no_conf, no_cookie).is_err());
+    }
+
+    #[test]
+    fn port_18332_tries_testnet3_then_testnet4_then_root() {
+        let dir = std::path::Path::new("/home/u/.bitcoin");
+        assert_eq!(
+            cookie_candidates_for_port(dir, 18332),
+            vec![
+                dir.join("testnet3/.cookie"),
+                dir.join("testnet4/.cookie"),
+                dir.join(".cookie"),
+            ]
+        );
+        assert_eq!(
+            cookie_candidates_for_port(dir, 48332),
+            vec![dir.join("testnet4/.cookie"), dir.join(".cookie")]
+        );
+        assert_eq!(
+            cookie_candidates_for_port(dir, 1234),
+            vec![dir.join(".cookie")]
+        );
     }
 
     #[test]
