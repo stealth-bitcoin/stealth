@@ -1694,7 +1694,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use stealth_model::error::AnalysisError;
     use stealth_model::gateway::{ResolvedDescriptor, WalletTxCategory};
@@ -1708,6 +1708,7 @@ mod tests {
         port: u16,
         accepted: Arc<Mutex<Option<String>>>,
         seen: Arc<Mutex<Vec<String>>>,
+        rpc_error: Arc<AtomicBool>,
     }
 
     impl FakeNode {
@@ -1716,7 +1717,12 @@ mod tests {
             let port = listener.local_addr().unwrap().port();
             let accepted = Arc::new(Mutex::new(accepted.map(str::to_owned)));
             let seen = Arc::new(Mutex::new(Vec::new()));
-            let (gate, log) = (Arc::clone(&accepted), Arc::clone(&seen));
+            let rpc_error = Arc::new(AtomicBool::new(false));
+            let (gate, log, fail) = (
+                Arc::clone(&accepted),
+                Arc::clone(&seen),
+                Arc::clone(&rpc_error),
+            );
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(mut stream) = stream else { return };
@@ -1745,6 +1751,10 @@ mod tests {
                         .is_none_or(|want| *want == auth);
                     let (status, payload) = if !ok {
                         ("401 Unauthorized", String::new())
+                    } else if fail.load(Ordering::Relaxed) {
+                        let error = json!({"code": -5, "message": "No such transaction"});
+                        let body = json!({"id": 1, "result": null, "error": error});
+                        ("500 Internal Server Error", body.to_string())
                     } else if let Some(batch) = request.as_array() {
                         let replies: Vec<Value> = batch
                             .iter()
@@ -1768,11 +1778,16 @@ mod tests {
                 port,
                 accepted,
                 seen,
+                rpc_error,
             }
         }
 
         fn accept_only(&self, auth: &str) {
             *self.accepted.lock().unwrap() = Some(auth.to_owned());
+        }
+
+        fn answer_rpc_errors(&self) {
+            self.rpc_error.store(true, Ordering::Relaxed);
         }
 
         fn seen(&self) -> Vec<String> {
@@ -1791,7 +1806,7 @@ mod tests {
         (BitcoinCoreRpc::new(config).unwrap(), cookie, datadir)
     }
 
-    fn ping(rpc: &BitcoinCoreRpc) -> Result<Value, stealth_model::error::AnalysisError> {
+    fn ping(rpc: &BitcoinCoreRpc) -> Result<Value, AnalysisError> {
         rpc.call::<Value>(None, "getblockcount", Vec::new())
     }
 
@@ -1847,7 +1862,10 @@ mod tests {
         std::fs::write(&cookie, "__cookie__:b").unwrap();
         let result = ping(&rpc);
         std::fs::remove_dir_all(datadir).unwrap();
-        assert!(result.is_err());
+        assert!(
+            matches!(&result, Err(AnalysisError::EnvironmentUnavailable(m)) if m.starts_with("getblockcount: 401")),
+            "a 401 that persists must name the method: {result:?}"
+        );
         assert_eq!(node.seen(), vec![AUTH_A, AUTH_B]);
     }
 
@@ -1869,6 +1887,22 @@ mod tests {
             "retry with the rewritten cookie file must succeed: {after:?}"
         );
         assert_eq!(node.seen(), vec![AUTH_A, AUTH_A, AUTH_B]);
+    }
+
+    #[test]
+    fn an_rpc_error_is_not_retried_even_with_a_new_cookie_on_disk() {
+        let node = FakeNode::start(None);
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        rpc.credentials().unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        node.answer_rpc_errors();
+        let result = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(
+            matches!(&result, Err(AnalysisError::EnvironmentUnavailable(m)) if m == "getblockcount: No such transaction"),
+            "the node's RPC error must surface: {result:?}"
+        );
+        assert_eq!(node.seen(), vec![AUTH_A]);
     }
 
     #[test]
