@@ -320,11 +320,11 @@ impl BitcoinCoreRpc {
         if response.status() != StatusCode::UNAUTHORIZED || self.explicit_credentials().is_some() {
             return Ok(response);
         }
-        let fresh = self.reload_cookie(Some(&used))?;
-        if fresh == used {
-            return Ok(response);
+        // An unreadable or unchanged cookie keeps the node's 401 as the answer.
+        match self.reload_cookie(Some(&used)) {
+            Ok(fresh) if fresh != used => self.send(url, method, &fresh, body),
+            _ => Ok(response),
         }
-        self.send(url, method, &fresh, body)
     }
 
     fn send(
@@ -1901,6 +1901,21 @@ mod tests {
         assert!(
             matches!(&result, Err(AnalysisError::EnvironmentUnavailable(m)) if m == "getblockcount: No such transaction"),
             "the node's RPC error must surface: {result:?}"
+        );
+        assert_eq!(node.seen(), vec![AUTH_A]);
+    }
+
+    #[test]
+    fn unauthorized_with_the_cookie_gone_keeps_the_401() {
+        let node = FakeNode::start(Some("nobody"));
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        rpc.credentials().unwrap();
+        std::fs::remove_file(&cookie).unwrap();
+        let result = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(
+            matches!(&result, Err(AnalysisError::EnvironmentUnavailable(m)) if m.starts_with("getblockcount: 401")),
+            "a failed re-read must not hide the node's 401: {result:?}"
         );
         assert_eq!(node.seen(), vec![AUTH_A]);
     }
