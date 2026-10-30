@@ -225,6 +225,17 @@ impl BitcoinCoreRpc {
         method: &str,
         params: Vec<Value>,
     ) -> Result<T, AnalysisError> {
+        Ok(self.call_rpc(wallet, method, params)?)
+    }
+
+    /// Like [`Self::call`], but keeps an error the node answered with apart
+    /// from one that never got an answer.
+    fn call_rpc<T: DeserializeOwned>(
+        &self,
+        wallet: Option<&str>,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<T, RpcError> {
         let (user, password) = self.credentials()?;
         let response = self
             .client
@@ -237,22 +248,14 @@ impl BitcoinCoreRpc {
                 "params": params,
             }))
             .send()
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
+            .map_err(|error| unreachable_node(method, error))?;
 
         if !response.status().is_success() {
-            return Err(rpc_failure(response));
+            return Err(rpc_failure(response, method));
         }
 
-        // A null result is a valid reply (setlabel, unloadwallet); what it
-        // deserializes into is up to the caller's type.
-        let reply = response
-            .json::<JsonRpcReply>()
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
-        if let Some(error) = reply.error {
-            return Err(AnalysisError::EnvironmentUnavailable(error.message));
-        }
-        serde_json::from_value(reply.result)
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(format!("rpc result: {error}")))
+        let reply = decode_reply::<JsonRpcReply>(response, method)?;
+        reply_result(reply, method)
     }
 
     fn call_batch<T: DeserializeOwned>(
@@ -274,18 +277,16 @@ impl BitcoinCoreRpc {
             .basic_auth(user, Some(password))
             .json(&batch)
             .send()
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
+            .map_err(|error| unreachable_node(method, error))?;
 
         if !response.status().is_success() {
-            return Err(rpc_failure(response));
+            return Err(rpc_failure(response, method).into());
         }
 
-        let mut envelopes = response
-            .json::<Vec<JsonRpcBatchEnvelope<T>>>()
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
+        let mut envelopes = decode_reply::<Vec<JsonRpcBatchEnvelope<T>>>(response, method)?;
         if envelopes.len() != params_list.len() {
             return Err(AnalysisError::EnvironmentUnavailable(format!(
-                "rpc batch returned {} responses for {} requests",
+                "{method}: rpc batch returned {} responses for {} requests",
                 envelopes.len(),
                 params_list.len()
             )));
@@ -295,10 +296,10 @@ impl BitcoinCoreRpc {
             .into_iter()
             .map(|envelope| match (envelope.result, envelope.error) {
                 (Some(result), None) => Ok(result),
-                (_, Some(error)) => Err(AnalysisError::EnvironmentUnavailable(error.message)),
-                _ => Err(AnalysisError::EnvironmentUnavailable(
-                    "rpc returned neither result nor error".into(),
-                )),
+                (_, Some(error)) => Err(RpcError::Node(method.to_string(), error).into()),
+                _ => Err(AnalysisError::EnvironmentUnavailable(format!(
+                    "{method}: rpc returned neither result nor error"
+                ))),
             })
             .collect())
     }
@@ -381,7 +382,7 @@ impl BitcoinCoreRpc {
                 let address: Option<Address<NetworkUnchecked>> =
                     entry.address.as_deref().and_then(|s| s.parse().ok());
                 Ok(WalletTxEntry {
-                    txid: parse_txid(&entry.txid)?,
+                    txid: parse_txid("listtransactions", &entry.txid)?,
                     address,
                     category: match entry.category.as_deref() {
                         Some("send") => WalletTxCategory::Send,
@@ -438,7 +439,7 @@ impl BitcoinCoreRpc {
                 let address: Option<Address<NetworkUnchecked>> =
                     utxo.address.as_deref().and_then(|s| s.parse().ok());
                 Ok(Utxo {
-                    txid: parse_txid(&utxo.txid)?,
+                    txid: parse_txid("listunspent", &utxo.txid)?,
                     vout: utxo.vout,
                     script_type: address
                         .as_ref()
@@ -463,16 +464,17 @@ impl BitcoinCoreRpc {
 
     fn convert_raw_transaction(tx: RawTransaction) -> Result<DecodedTransaction, AnalysisError> {
         Ok(DecodedTransaction {
-            txid: parse_txid(&tx.txid)?,
+            txid: parse_txid("getrawtransaction", &tx.txid)?,
             vin: tx
                 .vin
                 .into_iter()
                 .map(|input| {
                     Ok(TxInputRef {
                         previous_txid: match &input.txid {
-                            Some(s) => parse_txid(s)?,
+                            Some(s) => parse_txid("getrawtransaction", s)?,
                             // Bitcoin protocol: coinbase inputs reference all-zeros.
                             None => parse_txid(
+                                "getrawtransaction",
                                 "0000000000000000000000000000000000000000000000000000000000000000",
                             )
                             .expect("zero txid is always valid"),
@@ -871,7 +873,9 @@ impl BlockchainGateway for BitcoinCoreRpc {
             .into_iter()
             .map(|s| {
                 s.parse::<Address<NetworkUnchecked>>().map_err(|e| {
-                    AnalysisError::EnvironmentUnavailable(format!("invalid address '{s}': {e}"))
+                    AnalysisError::EnvironmentUnavailable(format!(
+                        "deriveaddresses: invalid address '{s}': {e}"
+                    ))
                 })
             })
             .collect()
@@ -1082,9 +1086,10 @@ fn scan_wallet_name(timestamp_millis: u128) -> String {
     format!("_stealth_scan_{timestamp_millis}_{pid}_{sequence}")
 }
 
-fn parse_txid(s: &str) -> Result<Txid, AnalysisError> {
-    s.parse::<Txid>()
-        .map_err(|e| AnalysisError::EnvironmentUnavailable(format!("invalid txid '{s}': {e}")))
+fn parse_txid(method: &str, s: &str) -> Result<Txid, AnalysisError> {
+    s.parse::<Txid>().map_err(|e| {
+        AnalysisError::EnvironmentUnavailable(format!("{method}: invalid txid '{s}': {e}"))
+    })
 }
 
 fn default_rpc_port(network: &str) -> u16 {
@@ -1135,25 +1140,134 @@ fn infer_network_from_port(port: u16) -> String {
 const RPC_BATCH_SIZE: usize = 100;
 const DEFAULT_TX_PAGE_SIZE: usize = 1000;
 
-// Core answers an RPC-level error (unknown txid, bad params) with HTTP 500
-// and the JSON-RPC error in the body, so the body is the message, not the
-// status.
-fn rpc_failure(response: reqwest::blocking::Response) -> AnalysisError {
-    let status = response.status();
-    let body = response.text().unwrap_or_default();
-    match serde_json::from_str::<JsonRpcReply>(&body) {
-        Ok(JsonRpcReply {
-            error: Some(error), ..
-        }) => AnalysisError::EnvironmentUnavailable(error.message),
-        _ => AnalysisError::EnvironmentUnavailable(format!("rpc transport error: {status}")),
+/// An RPC failure: either the node answered with a JSON-RPC error, or the
+/// call never got an answer (transport, HTTP status without an error body).
+#[derive(Debug)]
+enum RpcError {
+    /// The method and the node's JSON-RPC error.
+    Node(String, JsonRpcError),
+    Other(AnalysisError),
+}
+
+impl From<AnalysisError> for RpcError {
+    fn from(error: AnalysisError) -> Self {
+        Self::Other(error)
     }
 }
 
+impl From<RpcError> for AnalysisError {
+    fn from(error: RpcError) -> Self {
+        match error {
+            RpcError::Node(method, error) => {
+                AnalysisError::EnvironmentUnavailable(format!("{method}: {}", error.message))
+            }
+            RpcError::Other(error) => error,
+        }
+    }
+}
+
+/// The request never got an answer. reqwest's message names the URL, so it
+/// is dropped; its sources say why (e.g. connection refused).
+fn unreachable_node(method: &str, error: reqwest::Error) -> AnalysisError {
+    let error = error.without_url();
+    let mut reason = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        reason.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    AnalysisError::EnvironmentUnavailable(format!("{method}: could not reach the node: {reason}"))
+}
+
+fn decode_reply<T: DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    method: &str,
+) -> Result<T, AnalysisError> {
+    let body = response.text().map_err(|error| {
+        AnalysisError::EnvironmentUnavailable(format!("{method}: unreadable reply: {error}"))
+    })?;
+    serde_json::from_str(&body).map_err(|error| {
+        AnalysisError::EnvironmentUnavailable(with_body(
+            format!("{method}: undecodable reply ({error})"),
+            &body,
+        ))
+    })
+}
+
+/// Append the reply body's excerpt when there is one.
+fn with_body(head: String, body: &str) -> String {
+    match body_excerpt(body) {
+        excerpt if excerpt.is_empty() => head,
+        excerpt => format!("{head}: {excerpt}"),
+    }
+}
+
+/// The trimmed reply body, cut to a readable length.
+fn body_excerpt(body: &str) -> String {
+    const MAX_BODY_CHARS: usize = 200;
+    let body = body.trim();
+    let mut cut: String = body.chars().take(MAX_BODY_CHARS).collect();
+    if body.chars().count() > MAX_BODY_CHARS {
+        cut.push_str("...");
+    }
+    cut
+}
+
+// Core answers an RPC-level error (unknown txid, bad params) with HTTP 500
+// and the JSON-RPC error in the body, so the body is the message, not the
+// status.
+fn rpc_failure(response: reqwest::blocking::Response, method: &str) -> RpcError {
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    rpc_error_from_body(status, &body, method)
+}
+
+fn rpc_error_from_body(status: reqwest::StatusCode, body: &str, method: &str) -> RpcError {
+    match serde_json::from_str::<JsonRpcReply>(body) {
+        Ok(JsonRpcReply {
+            error: Some(error), ..
+        }) => RpcError::Node(method.to_string(), error),
+        // Core answers a call -rpcwhitelist denies, or a client outside
+        // -rpcallowip, with a bare 403.
+        _ if status == reqwest::StatusCode::FORBIDDEN => AnalysisError::RpcForbidden {
+            method: method.to_string(),
+            detail: body_excerpt(body),
+        }
+        .into(),
+        _ => AnalysisError::EnvironmentUnavailable(with_body(format!("{method}: {status}"), body))
+            .into(),
+    }
+}
+
+/// One JSON-RPC reply. Core always sends the `result` key, null when the
+/// call returns nothing (setlabel, unloadwallet): a present null is
+/// `Some(Value::Null)`, a missing key is `None`.
 #[derive(Debug, Deserialize)]
 struct JsonRpcReply {
-    #[serde(default)]
-    result: Value,
+    #[serde(default, deserialize_with = "present_value")]
+    result: Option<Value>,
     error: Option<JsonRpcError>,
+}
+
+fn present_value<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+/// A null result is a valid reply; what it deserializes into is up to the
+/// caller's type.
+fn reply_result<T: DeserializeOwned>(reply: JsonRpcReply, method: &str) -> Result<T, RpcError> {
+    match (reply.result, reply.error) {
+        (_, Some(error)) => Err(RpcError::Node(method.to_string(), error)),
+        (Some(result), None) => serde_json::from_value(result).map_err(|error| {
+            AnalysisError::EnvironmentUnavailable(format!("{method}: rpc result: {error}")).into()
+        }),
+        (None, None) => Err(AnalysisError::EnvironmentUnavailable(format!(
+            "{method}: rpc returned neither result nor error"
+        ))
+        .into()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1272,8 +1386,14 @@ struct RawScriptPubKey {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_wallet_name, default_rpc_port, scan_wallet_name};
+    use super::{cache_wallet_name, default_rpc_port, scan_wallet_name, BitcoinCoreRpc};
+    use bitcoin::Txid;
+    use serde_json::json;
+    use stealth_model::error::AnalysisError;
     use stealth_model::gateway::ResolvedDescriptor;
+
+    const TXID: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+    const ADDR: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     fn resolved(desc: &str) -> ResolvedDescriptor {
         ResolvedDescriptor {
@@ -1321,6 +1441,259 @@ mod tests {
         assert_ne!(
             first, second,
             "concurrent scans in the same millisecond must not collide"
+        );
+    }
+
+    /// A node that answers `failing` with `error` (a bare 403 when `error` is
+    /// null, a raw 200 body when it is a string) and every other call with an
+    /// empty result.
+    fn fake_node(failing: &'static str, error: serde_json::Value) -> BitcoinCoreRpc {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let error = error.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut stream = stream;
+                    loop {
+                        let mut length = 0;
+                        loop {
+                            let mut line = String::new();
+                            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let lower = line.to_ascii_lowercase();
+                            if let Some(value) = lower.strip_prefix("content-length:") {
+                                length = value.trim().parse().unwrap();
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        let mut body = vec![0; length];
+                        reader.read_exact(&mut body).unwrap();
+                        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        // A batch is an array; its first request names the method.
+                        let method = request
+                            .get("method")
+                            .or_else(|| request.get(0).and_then(|r| r.get("method")))
+                            .cloned()
+                            .unwrap_or_default();
+                        let (status, reply) = if method != failing {
+                            ("200 OK", json!({ "result": {}, "error": null }).to_string())
+                        } else if let Some(raw) = error.as_str() {
+                            // A string stands for a raw, non-JSON 200 reply.
+                            ("200 OK", raw.to_string())
+                        } else if error.is_null() {
+                            // Null stands for Core's empty-bodied 403.
+                            ("403 Forbidden", String::new())
+                        } else {
+                            (
+                                "500 Internal Server Error",
+                                json!({ "result": null, "error": error }).to_string(),
+                            )
+                        };
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
+                            reply.len()
+                        );
+                    }
+                });
+            }
+        });
+        BitcoinCoreRpc::from_url(
+            &format!("http://127.0.0.1:{port}"),
+            Some("user".into()),
+            Some("pass".into()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_403_on_any_method_names_the_method() {
+        for method in ["listunspent", "getrawtransaction", "createwallet"] {
+            let error = AnalysisError::from(super::rpc_error_from_body(
+                reqwest::StatusCode::FORBIDDEN,
+                "",
+                method,
+            ));
+            assert_eq!(
+                error.to_string(),
+                format!("{method}: forbidden by the node (rpcwhitelist or rpcallowip)")
+            );
+        }
+    }
+
+    #[test]
+    fn a_forbidden_batch_names_its_method() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node("getrawtransaction", serde_json::Value::Null);
+        let txid: Txid = TXID.parse().unwrap();
+        let error = rpc.get_transactions(&[txid]).expect_err("forbidden");
+        assert_eq!(
+            error.to_string(),
+            "getrawtransaction: forbidden by the node (rpcwhitelist or rpcallowip)"
+        );
+    }
+
+    #[test]
+    fn a_node_error_names_its_method() {
+        let error = AnalysisError::from(super::rpc_error_from_body(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"result": null, "error": {"code": -28, "message": "Loading wallet..."}}"#,
+            "listunspent",
+        ));
+        assert_eq!(
+            error.to_string(),
+            "environment unavailable: listunspent: Loading wallet..."
+        );
+    }
+
+    #[test]
+    fn an_undecodable_reply_names_the_method_and_shows_the_body() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node("getdescriptorinfo", json!("<html>proxy error</html>"));
+        let message = rpc
+            .normalize_descriptor(&format!("addr({ADDR})"))
+            .expect_err("not JSON")
+            .to_string();
+        assert!(message.contains("getdescriptorinfo: "), "{message}");
+        assert!(message.contains("<html>proxy error</html>"), "{message}");
+    }
+
+    #[test]
+    fn a_long_reply_body_is_cut() {
+        let body = "x".repeat(10_000);
+        let message = AnalysisError::from(super::rpc_error_from_body(
+            reqwest::StatusCode::BAD_GATEWAY,
+            &body,
+            "listunspent",
+        ))
+        .to_string();
+        assert!(message.len() < 400, "{}", message.len());
+    }
+
+    #[test]
+    fn a_reply_with_neither_result_nor_error_names_the_method() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node(
+            "getdescriptorinfo",
+            json!(r#"{"error": null, "id": "stealth-rust"}"#),
+        );
+        let error = rpc
+            .normalize_descriptor(&format!("addr({ADDR})"))
+            .expect_err("empty reply");
+        assert_eq!(
+            error.to_string(),
+            "environment unavailable: getdescriptorinfo: rpc returned neither result nor error"
+        );
+    }
+
+    #[test]
+    fn a_null_result_is_a_reply_the_callers_type_decides() {
+        let rpc = fake_node(
+            "setlabel",
+            json!(r#"{"result": null, "error": null, "id": "stealth-rust"}"#),
+        );
+        rpc.call::<()>(None, "setlabel", Vec::new())
+            .expect("a null result decodes into ()");
+        let value = rpc
+            .call::<Option<serde_json::Value>>(None, "setlabel", Vec::new())
+            .expect("a null result decodes into Option");
+        assert_eq!(value, None);
+        let error = rpc
+            .call::<Vec<String>>(None, "setlabel", Vec::new())
+            .expect_err("a null result is not a list");
+        assert!(
+            error
+                .to_string()
+                .starts_with("environment unavailable: setlabel: rpc result: "),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_short_batch_reply_names_the_method() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node("getrawtransaction", json!("[]"));
+        let txid: Txid = TXID.parse().unwrap();
+        let error = rpc.get_transactions(&[txid]).expect_err("short batch");
+        assert_eq!(
+            error.to_string(),
+            "environment unavailable: getrawtransaction: rpc batch returned 0 responses for 1 requests"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_node_names_the_method_and_never_the_password() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = BitcoinCoreRpc::from_url(
+            "http://alice:s3cret@127.0.0.1:1",
+            Some("alice".into()),
+            Some("s3cret".into()),
+        )
+        .unwrap();
+        let single = rpc
+            .normalize_descriptor(&format!("addr({ADDR})"))
+            .expect_err("nothing listens on port 1")
+            .to_string();
+        let txid: Txid = TXID.parse().unwrap();
+        let batch = rpc
+            .get_transactions(&[txid])
+            .expect_err("nothing listens on port 1")
+            .to_string();
+        for (message, method) in [(single, "getdescriptorinfo"), (batch, "getrawtransaction")] {
+            assert!(
+                message.contains(&format!("{method}: could not reach the node: ")),
+                "{message}"
+            );
+            assert!(!message.contains("s3cret"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_403_with_a_body_keeps_it() {
+        let forbidden = |body: &str| {
+            AnalysisError::from(super::rpc_error_from_body(
+                reqwest::StatusCode::FORBIDDEN,
+                body,
+                "listunspent",
+            ))
+            .to_string()
+        };
+        assert_eq!(
+            forbidden("  denied by proxy\n"),
+            "listunspent: forbidden by the node (rpcwhitelist or rpcallowip): denied by proxy"
+        );
+        assert_eq!(
+            forbidden(""),
+            "listunspent: forbidden by the node (rpcwhitelist or rpcallowip)"
+        );
+    }
+
+    #[test]
+    fn an_invalid_derived_address_names_deriveaddresses() {
+        use stealth_model::gateway::{BlockchainGateway, ResolvedDescriptor};
+        let rpc = fake_node(
+            "deriveaddresses",
+            json!(r#"{"result": ["bogus"], "error": null}"#),
+        );
+        let message = rpc
+            .derive_addresses(&ResolvedDescriptor {
+                desc: format!("addr({ADDR})"),
+                internal: false,
+                active: false,
+                range_end: 0,
+            })
+            .expect_err("bogus address")
+            .to_string();
+        assert!(
+            message.contains("deriveaddresses: invalid address 'bogus'"),
+            "{message}"
         );
     }
 }
