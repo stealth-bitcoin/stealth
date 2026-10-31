@@ -858,8 +858,9 @@ mod history_limit {
         assert!(asking.join().unwrap().is_err());
         assert!(
             !interrupts.interrupt(),
-            "a second interrupt must not hide the stop's error"
+            "the next interrupt must not hide the stop's error"
         );
+        assert!(interrupts.interrupt(), "the one after that exits");
     }
 
     #[test]
@@ -882,8 +883,31 @@ mod history_limit {
     }
 
     #[test]
-    fn after_a_typed_no_interrupts_wait_for_the_error() {
-        assert!(!interrupts_after_answering("n\n").interrupt());
+    fn after_a_typed_no_one_interrupt_is_ignored_and_the_next_exits() {
+        let interrupts = interrupts_after_answering("n\n");
+        assert!(!interrupts.interrupt());
+        assert!(interrupts.interrupt());
+    }
+
+    #[test]
+    fn an_interrupt_after_the_typed_yes_won_exits() {
+        let interrupts = Interrupts::default();
+        let (reply, _answer) = std::sync::mpsc::channel();
+        interrupts.begin_asking(reply);
+        assert!(interrupts.answer(true), "the typed answer came first");
+        assert!(interrupts.interrupt(), "an interrupt in the gap exits");
+    }
+
+    #[test]
+    fn a_typed_answer_after_the_interrupt_won_is_dropped() {
+        let interrupts = Interrupts::default();
+        let (reply, answer) = std::sync::mpsc::channel();
+        interrupts.begin_asking(reply);
+        assert!(!interrupts.interrupt());
+        assert!(!interrupts.answer(true), "the interrupt answered first");
+        assert!(matches!(answer.try_recv(), Ok(Reply::Interrupted)));
+        assert!(!interrupts.interrupt(), "one ignored after the no");
+        assert!(interrupts.interrupt());
     }
 
     #[test]

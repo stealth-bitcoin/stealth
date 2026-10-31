@@ -115,7 +115,7 @@ fn is_yes(answer: &str) -> bool {
 }
 
 enum Reply {
-    Line(String),
+    Answered(bool),
     Interrupted,
 }
 
@@ -126,12 +126,16 @@ enum Moment {
     Scanning,
     Asking(mpsc::Sender<Reply>),
     /// Answered no: the scan is unloading its wallet on its way to the error.
-    Stopping,
+    Stopping {
+        ignored_one: bool,
+    },
 }
 
 /// What Ctrl-C does: while the question waits it answers no, so the scan
-/// stops the usual way and unloads its wallet; after a no it is ignored until
-/// the error prints; at any other moment it exits at once.
+/// stops the usual way and unloads its wallet; after a no the first one is
+/// ignored, so the error with the count can print, and the next exits; at any
+/// other moment it exits at once. Whichever of the typed answer and an
+/// interrupt comes first answers the question.
 #[derive(Debug, Default)]
 struct Interrupts {
     moment: Mutex<Moment>,
@@ -141,17 +145,34 @@ impl Interrupts {
     /// Whether the process should exit now.
     fn interrupt(&self) -> bool {
         let mut moment = self.moment();
-        match std::mem::replace(&mut *moment, Moment::Stopping) {
+        match &mut *moment {
             Moment::Asking(reply) => {
                 let _ = reply.send(Reply::Interrupted);
+                *moment = Moment::Stopping { ignored_one: false };
                 false
             }
-            Moment::Stopping => false,
-            Moment::Scanning => {
-                *moment = Moment::Scanning;
-                true
-            }
+            Moment::Stopping { ignored_one } => std::mem::replace(ignored_one, true),
+            Moment::Scanning => true,
         }
+    }
+
+    fn begin_asking(&self, reply: mpsc::Sender<Reply>) {
+        *self.moment() = Moment::Asking(reply);
+    }
+
+    /// Records the typed answer, unless an interrupt answered first; says
+    /// whether it did.
+    fn answer(&self, go_on: bool) -> bool {
+        let mut moment = self.moment();
+        if !matches!(*moment, Moment::Asking(_)) {
+            return false;
+        }
+        *moment = if go_on {
+            Moment::Scanning
+        } else {
+            Moment::Stopping { ignored_one: false }
+        };
+        true
     }
 
     #[cfg(test)]
@@ -176,22 +197,19 @@ fn terminal_ask<R: BufRead, W: Write>(
     let input = Arc::new(input);
     Arc::new(move |of, tx_count, limit| {
         let (reply, answer) = mpsc::channel();
-        *interrupts.moment() = Moment::Asking(reply.clone());
+        interrupts.begin_asking(reply.clone());
         show_question(of, tx_count, limit, &mut output());
-        let input = Arc::clone(&input);
+        let (input, reader) = (Arc::clone(&input), Arc::clone(&interrupts));
         // Read apart so an interrupt can answer instead; a read left blocked ends with the process.
         thread::spawn(move || {
             let mut line = String::new();
             let _ = input().read_line(&mut line);
-            let _ = reply.send(Reply::Line(line));
+            let go_on = is_yes(&line);
+            if reader.answer(go_on) {
+                let _ = reply.send(Reply::Answered(go_on));
+            }
         });
-        let go_on = matches!(answer.recv(), Ok(Reply::Line(line)) if is_yes(&line));
-        *interrupts.moment() = if go_on {
-            Moment::Scanning
-        } else {
-            Moment::Stopping
-        };
-        go_on
+        matches!(answer.recv(), Ok(Reply::Answered(true)))
     })
 }
 

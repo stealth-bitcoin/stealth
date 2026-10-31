@@ -82,11 +82,7 @@ fn the_default_limit_lets_a_small_history_through() {
 /// Runs a scan on a pseudo-terminal, sends SIGINT once it asks whether to go
 /// on, and returns what it printed and how it exited.
 #[cfg(unix)]
-fn interrupt_at_the_prompt(
-    node: &Node,
-    address: &Address,
-    flags: &[&str],
-) -> (String, Option<i32>) {
+fn interrupt_at_the_prompt(node: &Node, input: &[String], flags: &[&str]) -> (String, Option<i32>) {
     use std::fs::File;
     use std::io::Read;
     use std::os::fd::{FromRawFd, OwnedFd};
@@ -110,7 +106,8 @@ fn interrupt_at_the_prompt(
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_stealth-cli"))
-        .args(["scan", "--descriptor", &format!("addr({address})")])
+        .arg("scan")
+        .args(input)
         .args(["--rpc-url", &node.rpc_url()])
         .arg("--rpc-cookie")
         .arg(&node.params.cookie_file)
@@ -165,7 +162,7 @@ fn ctrl_c_at_the_prompt_is_a_no_and_leaves_no_wallet_loaded() {
         &["--max-txs", "3"][..],
         &["--max-txs", "3", "--cache-wallet"],
     ] {
-        let (printed, code) = interrupt_at_the_prompt(&node, &aa, flags);
+        let (printed, code) = interrupt_at_the_prompt(&node, &descriptor_input(&aa), flags);
         assert_eq!(code, Some(2), "{flags:?}: {printed}");
         assert!(printed.contains("5 transactions"), "{flags:?}: {printed}");
         assert_eq!(
@@ -227,4 +224,38 @@ fn ctrl_c_outside_the_question_exits_at_once_with_130() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(status.code(), Some(130), "{status:?}");
+}
+
+#[cfg(unix)]
+fn descriptor_input(address: &Address) -> Vec<String> {
+    vec!["--descriptor".into(), format!("addr({address})")]
+}
+
+#[cfg(unix)]
+#[test]
+fn a_utxo_scan_asks_about_the_pasted_outputs_addresses_and_ctrl_c_is_a_no() {
+    let (node, aa) = node_with_an_address_paid_five_times();
+    let alice = corepc_node::Client::new_with_auth(
+        &format!("{}/wallet/alice", node.rpc_url()),
+        corepc_node::client::client_sync::Auth::CookieFile(node.params.cookie_file.clone()),
+    )
+    .expect("alice client");
+    let coins: Vec<serde_json::Value> = alice.call("listunspent", &[]).expect("listunspent");
+    let utxos = std::env::temp_dir().join(format!("stealth-cli-utxos-{}.json", std::process::id()));
+    let pasted = serde_json::json!([{
+        "txid": coins[0]["txid"],
+        "vout": coins[0]["vout"],
+        "address": aa.to_string(),
+    }]);
+    std::fs::write(&utxos, pasted.to_string()).expect("write utxos");
+
+    let input = vec!["--utxos".to_owned(), utxos.display().to_string()];
+    let (printed, code) = interrupt_at_the_prompt(&node, &input, &["--max-txs", "3"]);
+    let _ = std::fs::remove_file(&utxos);
+    assert_eq!(code, Some(2), "{printed}");
+    assert!(
+        printed.contains("The history of the pasted outputs' addresses holds 5 transactions"),
+        "{printed}"
+    );
+    assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
 }
