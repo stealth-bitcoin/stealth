@@ -88,6 +88,11 @@ pasted outputs plus that history, and runs the detectors. When the node cannot
 serve the history, the scan completes on the pasted outputs alone and
 `stats.addresses_without_history` says how many addresses that affected.
 
+**Conflicted transactions:** a wallet transaction Core reports at negative
+confirmations (it, or a transaction it depends on, conflicts with another one)
+is left out of the analysis in any scan, and `stats.conflicted_txids` lists
+those txids as hex strings.
+
 #### Example (real descriptor from Bitcoin Core)
 
 ```bash
