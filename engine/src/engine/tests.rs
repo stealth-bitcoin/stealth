@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, OutPoint, Txid};
 
-use crate::engine::{merge_chain_history, AnalysisEngine, EngineSettings, ScanTarget, UtxoInput};
+use crate::engine::{
+    merge_chain_history, AnalysisEngine, EngineSettings, HistoryLimit, ScanTarget, UtxoInput,
+};
 use crate::error::AnalysisError;
 use crate::gateway::{
     BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, TxFetchResults,
@@ -99,6 +101,7 @@ struct FakeGateway {
     history: Result<WalletHistory, AnalysisError>,
     scanned: RefCell<Vec<String>>,
     persisted: RefCell<Vec<bool>>,
+    limits: RefCell<Vec<Option<u64>>>,
     unspent: Result<HashSet<OutPoint>, String>,
     failing: HashSet<OutPoint>,
     asked: RefCell<Vec<OutPoint>>,
@@ -118,6 +121,7 @@ impl FakeGateway {
             history,
             scanned: RefCell::new(Vec::new()),
             persisted: RefCell::new(Vec::new()),
+            limits: RefCell::new(Vec::new()),
             unspent: Ok(HashSet::new()),
             failing: HashSet::new(),
             asked: RefCell::new(Vec::new()),
@@ -148,8 +152,10 @@ impl BlockchainGateway for FakeGateway {
         &self,
         descriptors: &[ResolvedDescriptor],
         persist: bool,
+        limit: &HistoryLimit,
     ) -> Result<WalletHistory, AnalysisError> {
         self.persisted.borrow_mut().push(persist);
+        self.limits.borrow_mut().push(limit.max_txs);
         self.scanned
             .borrow_mut()
             .extend(descriptors.iter().map(|d| d.desc.clone()));
@@ -317,6 +323,46 @@ fn utxo_mode_never_keeps_a_cache_wallet_for_its_addresses() {
         .analyze(ScanTarget::Utxos(vec![pasted()]))
         .expect("utxo scan");
     assert_eq!(gateway.persisted.borrow().as_slice(), [false]);
+}
+
+#[test]
+fn the_address_history_load_of_a_utxo_scan_carries_the_history_limit() {
+    let gateway = FakeGateway::new(Ok(chain_history(3, 1)));
+    scan(&gateway);
+    let settings = EngineSettings {
+        history_limit: HistoryLimit::at_most(3),
+        ..EngineSettings::default()
+    };
+    AnalysisEngine::new(&gateway, settings)
+        .analyze(ScanTarget::Utxos(vec![pasted()]))
+        .expect("utxo scan");
+    assert_eq!(gateway.limits.borrow().as_slice(), [Some(5_000), Some(3)]);
+}
+
+#[test]
+fn a_descriptor_scan_carries_the_history_limit() {
+    let gateway = FakeGateway::new(Ok(chain_history(3, 1)));
+    let settings = EngineSettings {
+        history_limit: HistoryLimit::unlimited(),
+        ..EngineSettings::default()
+    };
+    AnalysisEngine::new(&gateway, settings)
+        .analyze(ScanTarget::Descriptor(format!("addr({ADDR})")))
+        .expect("descriptor scan");
+    assert_eq!(gateway.limits.borrow().as_slice(), [None]);
+}
+
+#[test]
+fn a_utxo_scan_whose_address_history_is_above_the_limit_stops_instead_of_going_on_without_it() {
+    let too_large = AnalysisError::HistoryTooLarge {
+        tx_count: 5_001,
+        limit: 5_000,
+    };
+    let gateway = FakeGateway::new(Err(too_large.clone()));
+    let error = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]))
+        .expect_err("the history is above the limit");
+    assert_eq!(error, too_large);
 }
 
 #[test]

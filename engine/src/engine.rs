@@ -19,7 +19,9 @@ use crate::graph::TxGraph;
 use crate::types::Report;
 
 pub use stealth_model::progress::{ScanPhase, ScanProgress};
-pub use stealth_model::scan::{EngineSettings, ScanTarget, UtxoInput};
+pub use stealth_model::scan::{
+    EngineSettings, HistoryLimit, ScanTarget, UtxoInput, DEFAULT_MAX_WALLET_TXS,
+};
 
 type AddressSet = HashSet<bitcoin::Address<bitcoin::address::NetworkUnchecked>>;
 
@@ -77,9 +79,11 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             self.settings.config.derivation_range_end,
             self.gateway,
         )?;
-        let history = self
-            .gateway
-            .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
+        let history = self.gateway.scan_descriptors(
+            &resolved,
+            self.settings.persist_scan_wallet,
+            &self.settings.history_limit,
+        )?;
         self.mark_phase(ScanPhase::Analyzing);
         let mut graph = TxGraph::from_wallet_history(history);
         // Without a ranged descriptor the scan knows only the scripts it was given.
@@ -194,7 +198,10 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             self.settings.config.derivation_range_end,
             self.gateway,
         )
-        .and_then(|resolved| self.gateway.scan_descriptors(&resolved, false));
+        .and_then(|resolved| {
+            self.gateway
+                .scan_descriptors(&resolved, false, &self.settings.history_limit)
+        });
         match fetched {
             Ok(full) => Ok((0, merge_chain_history(history, full))),
             // A user whose rpcwhitelist leaves out a call this load needs

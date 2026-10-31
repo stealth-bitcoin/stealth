@@ -1,6 +1,7 @@
 use crate::common::*;
 
 use stealth_bitcoincore::BitcoinCoreConfig;
+use stealth_engine::engine::HistoryLimit;
 use stealth_engine::gateway::ResolvedDescriptor;
 
 // ─── Non-ranged descriptor derivation ──────────────────────────────────────
@@ -30,7 +31,7 @@ fn scan_descriptors_derives_addresses_for_unranged_addr_descriptor() {
     };
 
     let history = gateway
-        .scan_descriptors(&[resolved], false)
+        .scan_descriptors(&[resolved], false, &HistoryLimit::default())
         .expect("scan_descriptors");
 
     assert!(

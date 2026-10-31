@@ -27,6 +27,12 @@ pub enum AnalysisError {
         if detail.is_empty() { String::new() } else { format!(": {detail}") }
     )]
     RpcForbidden { method: String, detail: String },
+    /// The scan stopped before loading a history above its limit.
+    #[error(
+        "the wallet history holds {tx_count} transactions, more than the limit of {limit}; \
+         loading it can take long and put a heavy load on the node"
+    )]
+    HistoryTooLarge { tx_count: u64, limit: u64 },
     #[error("analysis execution failed: {0}")]
     Execution(String),
 }

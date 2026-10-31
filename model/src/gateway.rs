@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::descriptor::DescriptorNormalizer;
 use crate::error::AnalysisError;
 use crate::progress::ScanProgress;
+use crate::scan::HistoryLimit;
 use crate::types::{serde_addr, serde_addr_opt, serde_addr_set};
 
 /// Abstraction over a blockchain data source (e.g. Bitcoin Core RPC).
@@ -27,10 +28,14 @@ pub trait BlockchainGateway {
     /// deterministic watch-only wallet keyed to these descriptors so a
     /// repeat scan only performs an incremental catch-up. When `false`,
     /// any wallet it creates is discarded before returning.
+    ///
+    /// Once the descriptors are imported, a history above `limit` stops the
+    /// scan before any of it is fetched, and leaves no wallet loaded.
     fn scan_descriptors(
         &self,
         descriptors: &[ResolvedDescriptor],
         persist: bool,
+        limit: &HistoryLimit,
     ) -> Result<WalletHistory, AnalysisError>;
     fn list_wallet_descriptors(
         &self,
