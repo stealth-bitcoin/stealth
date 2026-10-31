@@ -140,8 +140,8 @@ function ConflictedNote({ txids }) {
         conflicted: {one ? 'it' : 'each'}, or a transaction it depends on, conflicts with
         another one, so {one ? 'it is' : 'they are'} not part of the wallet's history.{' '}
         {one
-          ? 'It may still have been seen by the network before it was replaced; Stealth does not analyze it.'
-          : 'They may still have been seen by the network before they were replaced; Stealth does not analyze them.'}
+          ? 'It may still have been seen by the network before it became conflicted; Stealth does not analyze it.'
+          : 'They may still have been seen by the network before they became conflicted; Stealth does not analyze them.'}
       </p>
       <ul className={styles.txidList}>
         {txids.map((txid) => (

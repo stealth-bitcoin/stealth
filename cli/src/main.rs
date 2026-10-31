@@ -260,10 +260,10 @@ fn text_report(report: &stealth_engine::Report) -> String {
             if one { "it" } else { "each" },
             if one { "it is" } else { "they are" },
             if one {
-                "It may still have been seen by the network before it was replaced; \
+                "It may still have been seen by the network before it became conflicted; \
                  Stealth does not analyze it."
             } else {
-                "They may still have been seen by the network before they were replaced; \
+                "They may still have been seen by the network before they became conflicted; \
                  Stealth does not analyze them."
             },
         ));
