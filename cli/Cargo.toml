@@ -17,5 +17,8 @@ serde_json = { workspace = true }
 stealth-bitcoincore = { path = "../bitcoincore" }
 stealth-engine = { workspace = true }
 
+[dev-dependencies]
+corepc-node = { workspace = true }
+
 [lints.rust]
 missing_debug_implementations = "deny"

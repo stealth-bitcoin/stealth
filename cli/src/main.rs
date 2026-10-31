@@ -1,9 +1,14 @@
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::{env, fs};
 
 use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc, RpcAuth};
-use stealth_engine::engine::{AnalysisEngine, EngineSettings, ScanTarget, UtxoInput};
+use stealth_engine::engine::{
+    AnalysisEngine, EngineSettings, HistoryLimit, ScanTarget, UtxoInput, DEFAULT_MAX_WALLET_TXS,
+};
+use stealth_engine::error::AnalysisError;
 use stealth_engine::types::{Finding, Summary};
 
 fn main() -> ExitCode {
@@ -42,8 +47,10 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     let gateway = opts.build_gateway()?;
     let target = opts.scan_target()?;
 
-    let engine = AnalysisEngine::new(&gateway, opts.engine_settings()?);
-    let report = engine.analyze(target).map_err(|e| e.to_string())?;
+    let mut settings = opts.engine_settings()?;
+    settings.history_limit = opts.history_limit(io::stdin().is_terminal());
+    let engine = AnalysisEngine::new(&gateway, settings);
+    let report = engine.analyze(target).map_err(scan_error)?;
 
     match opts.format.as_deref() {
         Some("text") | None => print_text_report(&report),
@@ -56,6 +63,36 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     }
 
     Ok(scan_succeeded(&report.summary))
+}
+
+/// A stop at the history limit says how to scan anyway.
+fn scan_error(error: AnalysisError) -> String {
+    match error {
+        AnalysisError::HistoryTooLarge { tx_count, .. } => {
+            format!("{error}; to scan it anyway, pass --max-txs {tx_count} or --no-limits")
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Asks on `output` whether to load a history above the limit; only a yes goes on.
+fn ask_to_go_on(
+    tx_count: u64,
+    limit: u64,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> bool {
+    let _ = write!(
+        output,
+        "This wallet's history holds {tx_count} transactions, more than the limit of {limit}. \
+         Loading it can take long and put a heavy load on the node. Go on? [y/N] "
+    );
+    let _ = output.flush();
+    let mut answer = String::new();
+    if input.read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// Nothing was analyzed and nothing was reported. Findings alongside zero
@@ -108,6 +145,8 @@ struct ScanOpts {
     rpc_cookie: Option<PathBuf>,
     format: Option<String>,
     cache_wallet: bool,
+    max_txs: Option<u64>,
+    no_limits: bool,
 }
 
 impl ScanOpts {
@@ -158,8 +197,23 @@ impl ScanOpts {
         Ok(EngineSettings {
             ownership_descriptors: self.ownership_descriptors()?,
             persist_scan_wallet: self.cache_wallet,
+            history_limit: self.history_limit(false),
             ..EngineSettings::default()
         })
+    }
+
+    /// In a terminal a history above the limit is asked about; elsewhere it stops the scan.
+    fn history_limit(&self, interactive: bool) -> HistoryLimit {
+        if self.no_limits {
+            return HistoryLimit::unlimited();
+        }
+        let mut limit = HistoryLimit::at_most(self.max_txs.unwrap_or(DEFAULT_MAX_WALLET_TXS));
+        if interactive {
+            limit.ask = Some(Arc::new(|tx_count, limit| {
+                ask_to_go_on(tx_count, limit, &mut io::stdin().lock(), &mut io::stderr())
+            }));
+        }
+        limit
     }
 
     fn ownership_descriptors(&self) -> Result<Vec<String>, String> {
@@ -201,11 +255,24 @@ fn parse_scan_args(args: &[String]) -> Result<ScanOpts, String> {
             "--cache-wallet" => {
                 opts.cache_wallet = true;
             }
+            "--max-txs" => {
+                let value = take_value(args, &mut i, "--max-txs")?;
+                let max_txs = value
+                    .parse()
+                    .map_err(|_| format!("--max-txs takes a whole number, not '{value}'"))?;
+                opts.max_txs = Some(max_txs);
+            }
+            "--no-limits" => {
+                opts.no_limits = true;
+            }
             other => return Err(format!("unknown flag '{other}'")),
         }
         i += 1;
     }
 
+    if opts.max_txs.is_some() && opts.no_limits {
+        return Err("--max-txs cannot be combined with --no-limits".to_owned());
+    }
     Ok(opts)
 }
 
@@ -541,6 +608,13 @@ fn print_usage() {
     eprintln!("                           durable _stealth_cache_<hash> wallet revealing");
     eprintln!("                           the descriptors were scanned. Use only on a");
     eprintln!("                           node you trust.\n");
+    eprintln!("HISTORY LIMIT:");
+    eprintln!("  --max-txs <N>            Stop before loading a wallet history of more");
+    eprintln!("                           than N transactions (default: 5000). Loading a");
+    eprintln!("                           large history can take long and put a heavy");
+    eprintln!("                           load on the node. In a terminal the scan asks");
+    eprintln!("                           whether to go on instead of stopping.");
+    eprintln!("  --no-limits              Lift the limit\n");
     eprintln!("RPC CONNECTION:");
     eprintln!("  --rpc-url <URL>          bitcoind RPC endpoint");
     eprintln!("  --rpc-user <USER>        RPC username");

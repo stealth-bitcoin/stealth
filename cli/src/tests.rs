@@ -707,3 +707,120 @@ mod ordering {
         assert!(position(&text, "[HIGH] TAINTED") < position(&text, "[LOW] DORMANT"));
     }
 }
+
+mod history_limit {
+    use crate::*;
+    use stealth_engine::error::AnalysisError;
+
+    fn to_args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn limit_of(parts: &[&str]) -> Option<u64> {
+        parse_scan_args(&to_args(parts))
+            .expect("flags")
+            .engine_settings()
+            .expect("settings")
+            .history_limit
+            .max_txs
+    }
+
+    #[test]
+    fn the_default_limit_is_5000() {
+        assert_eq!(limit_of(&["--descriptor", "wpkh(x/0/*)"]), Some(5_000));
+    }
+
+    #[test]
+    fn max_txs_sets_the_limit() {
+        assert_eq!(
+            limit_of(&["--descriptor", "wpkh(x/0/*)", "--max-txs", "3"]),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn no_limits_lifts_it() {
+        assert_eq!(
+            limit_of(&["--descriptor", "wpkh(x/0/*)", "--no-limits"]),
+            None
+        );
+    }
+
+    #[test]
+    fn max_txs_needs_a_whole_number() {
+        for value in ["many", "1.5", "-3"] {
+            assert!(
+                parse_scan_args(&to_args(&["--max-txs", value])).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_txs_and_no_limits_do_not_go_together() {
+        let error = parse_scan_args(&to_args(&["--max-txs", "3", "--no-limits"]))
+            .expect_err("conflicting flags");
+        assert!(error.contains("--max-txs"), "{error}");
+        assert!(error.contains("--no-limits"), "{error}");
+    }
+
+    #[test]
+    fn a_stop_names_the_count_and_the_flags_that_go_on() {
+        let message = scan_error(AnalysisError::HistoryTooLarge {
+            tx_count: 12_345,
+            limit: 5_000,
+        });
+        assert!(message.contains("12345 transactions"), "{message}");
+        assert!(message.contains("limit of 5000"), "{message}");
+        assert!(message.contains("--max-txs 12345"), "{message}");
+        assert!(message.contains("--no-limits"), "{message}");
+    }
+
+    #[test]
+    fn any_other_error_keeps_its_message() {
+        let error = AnalysisError::EnvironmentUnavailable("down".into());
+        assert_eq!(scan_error(error.clone()), error.to_string());
+    }
+
+    fn answer(typed: &str) -> (bool, String) {
+        let mut shown = Vec::new();
+        let go_on = ask_to_go_on(12_345, 5_000, &mut typed.as_bytes(), &mut shown);
+        (go_on, String::from_utf8(shown).expect("utf-8"))
+    }
+
+    #[test]
+    fn the_prompt_says_how_many_txs_and_what_loading_them_costs() {
+        let (_, shown) = answer("n\n");
+        assert!(shown.contains("12345 transactions"), "{shown}");
+        assert!(shown.contains("limit of 5000"), "{shown}");
+        assert!(shown.contains("take long"), "{shown}");
+        assert!(shown.contains("load on the node"), "{shown}");
+        assert!(shown.contains("[y/N]"), "{shown}");
+    }
+
+    #[test]
+    fn only_a_yes_goes_on() {
+        for typed in ["y\n", "Y\n", "yes\n", " YES \n"] {
+            assert!(answer(typed).0, "{typed:?}");
+        }
+        for typed in ["\n", "n\n", "no\n", "", "sure\n"] {
+            assert!(!answer(typed).0, "{typed:?}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_gets_asked_and_a_pipe_does_not() {
+        let opts = ScanOpts::default();
+        assert!(opts.history_limit(true).ask.is_some());
+        assert!(opts.history_limit(false).ask.is_none());
+    }
+
+    #[test]
+    fn with_the_limit_lifted_nobody_is_asked() {
+        let opts = ScanOpts {
+            no_limits: true,
+            ..ScanOpts::default()
+        };
+        assert!(opts.history_limit(true).ask.is_none());
+    }
+}
