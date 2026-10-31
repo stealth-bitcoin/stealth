@@ -130,22 +130,43 @@ function effectiveKind(kind, descriptor) {
   return kind
 }
 
-function ConflictedNote({ txids }) {
-  if (txids.length === 0) return null
-  const one = txids.length === 1
+// Why a note's transactions were left out, for one and for several.
+const LEFT_OUT = {
+  conflicted: {
+    one: 'Core reports as conflicted: it, or a transaction it depends on, conflicts with another one',
+    many: 'Core reports as conflicted: each, or a transaction it depends on, conflicts with another one',
+    beforeOne: 'it became conflicted',
+    beforeMany: 'they became conflicted',
+  },
+  replaced: {
+    one: 'the wallet replaced',
+    many: 'the wallet replaced',
+    beforeOne: 'it was replaced',
+    beforeMany: 'they were replaced',
+  },
+  abandoned: {
+    one: 'that was abandoned in the wallet',
+    many: 'that were abandoned in the wallet',
+    beforeOne: 'it was abandoned',
+    beforeMany: 'they were abandoned',
+  },
+}
+
+function LeftOutNote({ items, reason }) {
+  if (items.length === 0) return null
+  const one = items.length === 1
   return (
     <div className={styles.scopeNote}>
       <p className={styles.noteText}>
-        Left out {txids.length} {one ? 'transaction' : 'transactions'} Core reports as
-        conflicted: {one ? 'it' : 'each'}, or a transaction it depends on, conflicts with
-        another one, so {one ? 'it is' : 'they are'} not part of the wallet's history.{' '}
-        {one
-          ? 'It may still have been seen by the network before it became conflicted; Stealth does not analyze it.'
-          : 'They may still have been seen by the network before they became conflicted; Stealth does not analyze them.'}
+        Left out {items.length} {one ? 'transaction' : 'transactions'}{' '}
+        {one ? reason.one : reason.many}, so {one ? 'it is' : 'they are'} not part of the
+        wallet's history. {one ? 'It' : 'They'} may still have been seen by the network
+        before {one ? reason.beforeOne : reason.beforeMany}; Stealth does not
+        analyze {one ? 'it' : 'them'}.
       </p>
       <ul className={styles.txidList}>
-        {txids.map((txid) => (
-          <li key={txid} className={styles.txid}>{txid}</li>
+        {items.map((item) => (
+          <li key={item} className={styles.txid}>{item}</li>
         ))}
       </ul>
     </div>
@@ -156,6 +177,11 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
   const { stats, findings, warnings, summary } = report
   const kind = effectiveKind(rawKind, descriptor)
   const conflicted = stats.conflicted_txids ?? []
+  const replaced = (stats.replaced_txids ?? []).map(
+    (r) => `${r.txid} was replaced by ${r.replaced_by}, which is not confirmed yet`,
+  )
+  const abandoned = stats.abandoned_txids ?? []
+  const anyLeftOut = conflicted.length + replaced.length + abandoned.length > 0
   const emptyScan = summary.analyzed_nothing && findings.length === 0 && warnings.length === 0
 
   return (
@@ -217,16 +243,18 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
           </div>
         )}
 
-        {/* Conflicted transactions left out */}
-        <ConflictedNote txids={conflicted} />
+        {/* Wallet transactions left out */}
+        <LeftOutNote items={conflicted} reason={LEFT_OUT.conflicted} />
+        <LeftOutNote items={replaced} reason={LEFT_OUT.replaced} />
+        <LeftOutNote items={abandoned} reason={LEFT_OUT.abandoned} />
 
-        {/* Nothing-analyzed banner; the conflicted note already says why, when it is shown */}
-        {emptyScan && conflicted.length > 0 && (
+        {/* Nothing-analyzed banner; the notes above already say why, when they are shown */}
+        {emptyScan && anyLeftOut && (
           <div className={styles.emptyBanner}>
             <strong>Nothing else was left to analyze.</strong>
           </div>
         )}
-        {emptyScan && conflicted.length === 0 && (
+        {emptyScan && !anyLeftOut && (
           <div className={styles.emptyBanner}>
             <strong>No transactions found for this input.</strong>
             <p className={styles.emptyHint}>{emptyHint(kind)}</p>
