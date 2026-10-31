@@ -236,6 +236,39 @@ describe('App scan flow', () => {
       expect(screen.queryByRole('alert')).toBeNull()
     })
 
+    it('forgets a cancel sent for an earlier scan', async () => {
+      queueJobs(job('rescanning'))
+      cancelScan.mockResolvedValue()
+      render(<App />)
+      await submitScan()
+      await tick()
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      await act(async () => {})
+      queueJobs(job('cancelled'))
+      await tick()
+      expect(screen.getByPlaceholderText(/paste a descriptor/i)).toBeTruthy()
+
+      startScan.mockResolvedValue('scan-2')
+      queueJobs(tooLarge())
+      await submitScan()
+      await tick()
+      expect(screen.getByRole('alertdialog').textContent).toMatch(/12,345 transactions/)
+    })
+
+    it('shows the confirm step when the cancel request failed', async () => {
+      queueJobs(job('rescanning'))
+      cancelScan.mockRejectedValue(new Error('HTTP 500'))
+      render(<App />)
+      await submitScan()
+      await tick()
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      await act(async () => {})
+
+      queueJobs(tooLarge())
+      await tick()
+      expect(screen.getByRole('alertdialog').textContent).toMatch(/12,345 transactions/)
+    })
+
     it('lets the scan sent again from the confirm step be cancelled', async () => {
       queueJobs(tooLarge())
       cancelScan.mockResolvedValue()

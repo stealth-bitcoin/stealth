@@ -6,9 +6,14 @@ use corepc_node::client::bitcoin::{Address, Amount};
 use corepc_node::Node;
 
 fn node_with_an_address_paid_five_times() -> (Node, Address) {
+    node_with_an_address_paid_five_times_and(&[])
+}
+
+fn node_with_an_address_paid_five_times_and(args: &[&'static str]) -> (Node, Address) {
     let exe = corepc_node::exe_path().expect("bitcoind not found");
     let mut conf = corepc_node::Conf::default();
     conf.args.push("-txindex");
+    conf.args.extend_from_slice(args);
     let node = Node::with_conf(exe, &conf).expect("failed to start bitcoind");
     let da = node.client.new_address().expect("default address");
     node.client.generate_to_address(110, &da).expect("mine");
@@ -83,8 +88,22 @@ fn the_default_limit_lets_a_small_history_through() {
 /// on, and returns what it printed and how it exited.
 #[cfg(unix)]
 fn interrupt_at_the_prompt(node: &Node, input: &[String], flags: &[&str]) -> (String, Option<i32>) {
+    let (printed, _, code) = answer_at_the_prompt(node, input, flags, None);
+    (printed, code)
+}
+
+/// Runs a scan on a pseudo-terminal and, once it asks whether to go on,
+/// types `typed` after `delay`, or sends SIGINT when `typed` is `None`.
+/// Returns what it printed on the terminal, its stdout and how it exited.
+#[cfg(unix)]
+fn answer_at_the_prompt(
+    node: &Node,
+    input: &[String],
+    flags: &[&str],
+    typed: Option<(std::time::Duration, &str)>,
+) -> (String, String, Option<i32>) {
     use std::fs::File;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::os::unix::process::ExitStatusExt;
     use std::sync::mpsc;
@@ -116,9 +135,11 @@ fn interrupt_at_the_prompt(node: &Node, input: &[String], flags: &[&str]) -> (St
         .env_remove("STEALTH_RPC_PASS")
         .stdin(Stdio::from(slave.try_clone().expect("dup slave")))
         .stderr(Stdio::from(slave))
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .spawn()
         .expect("run stealth-cli");
+    let mut stdout = child.stdout.take().expect("stdout");
+    let mut keyboard = File::from(master.try_clone().expect("dup master"));
 
     let (sent, shown) = mpsc::channel();
     std::thread::spawn(move || {
@@ -141,8 +162,18 @@ fn interrupt_at_the_prompt(node: &Node, input: &[String], flags: &[&str]) -> (St
         });
         printed.extend(chunk);
     }
-    // SAFETY: kill only sends a signal to the child started above.
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    match typed {
+        Some((delay, answer)) => {
+            std::thread::sleep(delay);
+            keyboard
+                .write_all(answer.as_bytes())
+                .expect("type the answer");
+        }
+        // SAFETY: kill only sends a signal to the child started above.
+        None => assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0),
+    }
+    let mut report = String::new();
+    stdout.read_to_string(&mut report).expect("read stdout");
     let status = child.wait().expect("wait for stealth-cli");
     while let Ok(chunk) = shown.recv_timeout(Duration::from_millis(200)) {
         printed.extend(chunk);
@@ -150,6 +181,7 @@ fn interrupt_at_the_prompt(node: &Node, input: &[String], flags: &[&str]) -> (St
     assert_eq!(status.signal(), None, "killed by a signal: {status:?}");
     (
         String::from_utf8_lossy(&printed).into_owned(),
+        report,
         status.code(),
     )
 }
@@ -264,5 +296,23 @@ fn a_utxo_scan_asks_about_the_pasted_outputs_addresses_and_ctrl_c_is_a_no() {
         printed.contains("The history of the pasted outputs' addresses holds 5 transactions"),
         "{printed}"
     );
+    assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_yes_typed_after_the_node_closed_the_idle_connection_still_finishes_the_scan() {
+    let (node, aa) = node_with_an_address_paid_five_times_and(&["-rpcservertimeout=1"]);
+    let (printed, report, code) = answer_at_the_prompt(
+        &node,
+        &descriptor_input(&aa),
+        &["--max-txs", "3"],
+        Some((std::time::Duration::from_secs(3), "y\n")),
+    );
+    assert!(
+        report.contains("Scanned 5 transactions"),
+        "{printed}{report}"
+    );
+    assert!(matches!(code, Some(0 | 1)), "{code:?}: {printed}");
     assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
 }
