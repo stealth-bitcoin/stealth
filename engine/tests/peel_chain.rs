@@ -420,10 +420,17 @@ fn a_cycle_in_bad_data_does_not_hang_the_scan() {
     assert!(!truncated(f));
 }
 
+fn bound_of_six() -> DetectorThresholds {
+    DetectorThresholds {
+        peel_chain_max_hops: 6,
+        ..DetectorThresholds::default()
+    }
+}
+
 #[test]
 fn a_cycle_longer_than_the_hop_limit_lists_each_hop_once() {
-    // 0x72 to 0x78 spend each other in a loop longer than the limit, so the
-    // loop is only met while joining traces.
+    // 0x72 to 0x78 spend each other in a loop longer than the bound of 6; the
+    // walk from 0x71 stops at the bound before it comes back round.
     let mut txs = vec![
         funding(0x70, 100_000_000),
         peel(0x71, &[(0x70, 0)], 1_000_000, 90_000_000),
@@ -432,13 +439,103 @@ fn a_cycle_longer_than_the_hop_limit_lists_each_hop_once() {
     for id in 0x73..=0x78 {
         txs.push(peel(id, &[(id - 1, 1)], 1_000_000, 90_000_000));
     }
-    let findings = peel_findings(txs);
+    let findings = peel_findings_with(txs, &bound_of_six());
     assert_eq!(findings.len(), 1, "{findings:#?}");
     let f = &findings[0];
-    let all: Vec<u8> = (0x71..=0x78).collect();
-    assert_eq!(chain_txids(f), ids(&all));
-    assert_eq!(hops(f), 8);
-    assert!(!truncated(f));
+    let listed: Vec<u8> = (0x71..=0x77).collect();
+    assert_eq!(chain_txids(f), ids(&listed));
+    assert_eq!(hops(f), 7);
+    assert!(truncated(f));
+}
+
+#[test]
+fn a_loop_with_no_way_in_longer_than_the_hop_limit_is_one_finding() {
+    let mut txs = vec![peel(0x61, &[(0x68, 1)], 1_000_000, 90_000_000)];
+    for id in 0x62..=0x68 {
+        txs.push(peel(id, &[(id - 1, 1)], 1_000_000, 90_000_000));
+    }
+    let findings = peel_findings_with(txs, &bound_of_six());
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    let listed: Vec<u8> = (0x61..=0x67).collect();
+    assert_eq!(chain_txids(f), ids(&listed));
+    assert!(truncated(f));
+}
+
+#[test]
+fn a_very_long_chain_is_scanned_in_linear_time() {
+    // 8,000 hops: tracing every tail takes tens of seconds in a debug build,
+    // one walk per chain well under a second.
+    const HOPS: u32 = 8_000;
+    let id = |n: u32| -> Txid { format!("{n:064x}").parse().expect("valid txid hex") };
+    let us = ours(1);
+    let them = external(1);
+    let mut transactions = HashMap::new();
+    let mut wallet_txs = Vec::new();
+    let mut prev = (id(0), 0);
+    transactions.insert(
+        id(0),
+        DecodedTransaction {
+            txid: id(0),
+            vin: Vec::new(),
+            vout: vec![out(0, us.clone(), 21_000_000_000)],
+            version: 2,
+            locktime: 0,
+            vsize: 141,
+            confirmations: 3,
+        },
+    );
+    for n in 1..=HOPS {
+        let t = DecodedTransaction {
+            txid: id(n),
+            vin: vec![TxInputRef {
+                previous_txid: prev.0,
+                previous_vout: prev.1,
+                sequence: 0xffff_fffd,
+                coinbase: false,
+            }],
+            vout: vec![
+                out(0, them.clone(), 10_000),
+                out(1, us.clone(), 21_000_000_000 - u64::from(n) * 20_000),
+            ],
+            version: 2,
+            locktime: 0,
+            vsize: 141,
+            confirmations: 3,
+        };
+        wallet_txs.push(WalletTxEntry {
+            txid: id(n),
+            address: None,
+            category: WalletTxCategory::Send,
+            amount: Amount::from_sat(0),
+            confirmations: 3,
+            blockheight: 100,
+        });
+        transactions.insert(id(n), t);
+        prev = (id(n), 1);
+    }
+    let history = WalletHistory {
+        wallet_txs,
+        utxos: Vec::new(),
+        transactions,
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::from([us]),
+        ranged_addresses: HashSet::new(),
+    };
+    let graph = TxGraph::from_wallet_history(history);
+    let started = std::time::Instant::now();
+    let report = graph.detect_all(&DetectorThresholds::default(), None, None);
+    let elapsed = started.elapsed();
+    let peels: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.vulnerability_type == VulnerabilityType::PeelChain)
+        .collect();
+    assert_eq!(peels.len(), 1);
+    assert_eq!(hops(peels[0]), 1_001);
+    assert!(truncated(peels[0]));
+    eprintln!("detect_all on {HOPS} hops took {elapsed:?}");
+    assert!(elapsed.as_secs() < 10, "detect_all took {elapsed:?}");
 }
 
 #[test]
@@ -514,4 +611,18 @@ fn a_chain_that_ends_right_after_the_hop_limit_is_not_truncated() {
     assert_eq!(chain_txids(&findings[0]), ids(&hop_ids));
     assert!(!truncated(&findings[0]));
     assert!(!findings[0].description.contains("at least"));
+}
+
+#[test]
+fn a_spend_that_is_not_a_peel_ends_the_chain() {
+    // 0x14 sends the change of 0x13 on in one output, so the chain ends at 0x13.
+    let mut txs = chain(0x10, &[0x11, 0x12, 0x13]);
+    txs.push(tx(
+        0x14,
+        &[(0x13, 1)],
+        vec![out(0, external(0x14), 90_000_000)],
+    ));
+    let findings = peel_findings(txs);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!(chain_txids(&findings[0]), ids(&[0x11, 0x12, 0x13]));
 }
