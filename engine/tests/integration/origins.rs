@@ -59,32 +59,15 @@ fn detect_consolidation() {
 
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
-    assert!(has_finding(&report, VulnerabilityType::Consolidation));
-}
-
-fn consolidation_warning(report: &stealth_engine::Report) -> &stealth_engine::Finding {
-    report
-        .warnings
-        .iter()
-        .find(|w| w.vulnerability_type == VulnerabilityType::Consolidation)
-        .expect("expected a consolidation warning")
-}
-
-fn assert_neutral(warning: &stealth_engine::Finding) {
-    assert!(
-        warning.description.contains("does not recognise as yours"),
-        "{}",
-        warning.description
-    );
-    let correction = warning.correction.as_deref().unwrap_or_default();
-    assert!(
-        correction.starts_with("If those inputs were yours"),
-        "{correction}"
-    );
+    let details = consolidation_finding(&report)
+        .details
+        .clone()
+        .expect("details");
+    assert_eq!(details["our_inputs_in_consolidation"], 4);
 }
 
 // Bob sweeps four of his own coins into a single payment to alice.
-fn receive_from_a_sweep(node: &Node) {
+fn receive_from_a_sweep(node: &Node) -> corepc_node::Client {
     let da = node.client.new_address().unwrap();
     mine(node, 110, &da);
     let alice = node.create_wallet("alice").unwrap();
@@ -97,21 +80,59 @@ fn receive_from_a_sweep(node: &Node) {
         alice.new_address().unwrap(),
         1_200_000,
     );
+    alice
+}
+
+// Bob pays alice from three of his coins, keeping change.
+fn receive_an_ordinary_payment(node: &Node) -> corepc_node::Client {
+    let da = node.client.new_address().unwrap();
+    mine(node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let inputs = fund_coins(node, &bob, 3, 300_000);
+    let outputs = [
+        Output::new(alice.new_address().unwrap(), Amount::from_sat(500_000)),
+        Output::new(bob.new_address().unwrap(), Amount::from_sat(390_000)),
+    ];
+    spend(node, &[&bob], &inputs, &outputs);
+    alice
 }
 
 #[test]
-fn consolidation_made_by_someone_else_is_only_a_warning() {
+fn wallet_scan_of_a_payment_from_someone_elses_coins_is_silent() {
     let node = node();
-    receive_from_a_sweep(&node);
+    receive_an_ordinary_payment(&node);
 
     let gateway = gateway_for(&node);
-    let report = scan_wallet(&gateway, "alice");
-    assert!(!has_finding(&report, VulnerabilityType::Consolidation));
-    let warning = consolidation_warning(&report);
-    assert_neutral(warning);
-    let details = warning.details.as_ref().expect("details");
-    assert_eq!(details["foreign_inputs"], 4);
-    assert_eq!(details["unresolved_inputs"], 0);
+    assert_no_consolidation(&scan_wallet(&gateway, "alice"));
+}
+
+#[test]
+fn descriptor_scan_of_a_sweep_by_someone_else_is_silent() {
+    let node = node();
+    let alice = receive_from_a_sweep(&node);
+
+    let gateway = gateway_for(&node);
+    let engine = AnalysisEngine::new(&gateway, EngineSettings::default());
+    let report = engine
+        .analyze(ScanTarget::Descriptors(wallet_descriptors(&alice)))
+        .expect("descriptor scan failed");
+    assert_no_consolidation(&report);
+}
+
+#[test]
+fn single_address_scan_of_a_sweep_by_someone_else_warns() {
+    let node = node();
+    let alice = receive_from_a_sweep(&node);
+    let utxos = alice.list_unspent().unwrap();
+    let address = &utxos.0[0].address;
+
+    let gateway = gateway_for(&node);
+    let engine = AnalysisEngine::new(&gateway, EngineSettings::default());
+    let report = engine
+        .analyze(ScanTarget::Descriptor(format!("addr({address})")))
+        .expect("address scan failed");
+    assert_consolidation_warning(&report, 0, 4, 0);
 }
 
 #[test]
@@ -121,13 +142,7 @@ fn consolidation_with_unresolved_inputs_counts_them_as_unknown() {
 
     // Depth 0 leaves the sweep's funding transactions unfetched.
     let gateway = gateway_for(&node).with_max_ancestor_depth(0);
-    let report = scan_wallet(&gateway, "alice");
-    assert!(!has_finding(&report, VulnerabilityType::Consolidation));
-    let warning = consolidation_warning(&report);
-    assert_neutral(warning);
-    let details = warning.details.as_ref().expect("details");
-    assert_eq!(details["foreign_inputs"], 0);
-    assert_eq!(details["unresolved_inputs"], 4);
+    assert_consolidation_warning(&scan_wallet(&gateway, "alice"), 0, 0, 4);
 }
 
 #[test]
@@ -149,7 +164,11 @@ fn consolidation_of_coins_at_one_reused_address_fires() {
 
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
-    assert!(has_finding(&report, VulnerabilityType::Consolidation));
+    let details = consolidation_finding(&report)
+        .details
+        .clone()
+        .expect("details");
+    assert_eq!(details["our_inputs_in_consolidation"], 4);
 }
 
 #[test]
@@ -174,34 +193,48 @@ fn consolidation_with_two_of_our_coins_among_others_fires() {
 
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
-    assert!(has_finding(&report, VulnerabilityType::Consolidation));
+    let details = consolidation_finding(&report)
+        .details
+        .clone()
+        .expect("details");
+    assert_eq!(details["our_inputs_in_consolidation"], 2);
     assert!(!has_warning(&report, VulnerabilityType::Consolidation));
 }
 
-#[test]
-fn consolidation_with_a_single_coin_of_ours_does_not_fire() {
-    let node = node();
+// Alice adds one coin to bob's three, as a Payjoin receiver would.
+fn add_one_coin_to_someone_elses(node: &Node) {
     let da = node.client.new_address().unwrap();
-    mine(&node, 110, &da);
-
+    mine(node, 110, &da);
     let alice = node.create_wallet("alice").unwrap();
     let bob = node.create_wallet("bob").unwrap();
-
-    // Alice adds one coin to bob's three, as a Payjoin receiver would.
-    let mut inputs = fund_coins(&node, &bob, 3, 300_000);
-    inputs.extend(fund_coins(&node, &alice, 1, 300_000));
+    let mut inputs = fund_coins(node, &bob, 3, 300_000);
+    inputs.extend(fund_coins(node, &alice, 1, 300_000));
     merge_into(
-        &node,
+        node,
         &[&bob, &alice],
         &inputs,
         alice.new_address().unwrap(),
         1_200_000,
     );
+}
+
+#[test]
+fn consolidation_with_a_single_coin_of_ours_does_not_fire() {
+    let node = node();
+    add_one_coin_to_someone_elses(&node);
 
     let gateway = gateway_for(&node);
-    let report = scan_wallet(&gateway, "alice");
-    assert!(!has_finding(&report, VulnerabilityType::Consolidation));
-    assert!(!has_warning(&report, VulnerabilityType::Consolidation));
+    assert_no_consolidation(&scan_wallet(&gateway, "alice"));
+}
+
+#[test]
+fn single_coin_of_ours_among_unresolved_inputs_warns() {
+    let node = node();
+    add_one_coin_to_someone_elses(&node);
+
+    // Depth 0 leaves bob's funding transactions unfetched; alice's own is a wallet tx.
+    let gateway = gateway_for(&node).with_max_ancestor_depth(0);
+    assert_consolidation_warning(&scan_wallet(&gateway, "alice"), 1, 0, 3);
 }
 
 // ─── 10. Exchange Origin ───────────────────────────────────────────────────

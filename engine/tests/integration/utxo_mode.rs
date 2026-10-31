@@ -372,34 +372,82 @@ fn utxo_scan_with_an_address_of_another_network_is_a_descriptor_error() {
     );
 }
 
-#[test]
-fn utxo_scan_of_own_consolidation_change_warns() {
-    let node = node();
+// Alice consolidates three of her coins; only the merged coin is left to paste.
+fn own_consolidation_pasted_alone(node: &Node) -> (corepc_node::Client, Vec<UtxoInput>) {
     let da = node.client.new_address().unwrap();
-    mine(&node, 110, &da);
-
+    mine(node, 110, &da);
     let alice = node.create_wallet("alice").unwrap();
-    let inputs = fund_coins(&node, &alice, 3, 300_000);
+    let inputs = fund_coins(node, &alice, 3, 300_000);
     merge_into(
-        &node,
+        node,
         &[&alice],
         &inputs,
         alice.new_address().unwrap(),
         900_000,
     );
-
-    // Only the merged coin is pasted; its three inputs sit at addresses the scan never saw.
     let utxos = utxo_inputs_for(&alice);
     assert_eq!(utxos.len(), 1);
+    (alice, utxos)
+}
+
+#[test]
+fn utxo_scan_of_own_consolidation_change_warns() {
+    let node = node();
+    let (_alice, utxos) = own_consolidation_pasted_alone(&node);
+
     let gateway = gateway_for(&node);
     let engine = AnalysisEngine::new(&gateway, EngineSettings::default());
     let report = engine
         .analyze(ScanTarget::Utxos(utxos))
         .expect("utxo scan failed");
+    assert_consolidation_warning(&report, 0, 3, 0);
+}
 
-    assert!(!has_finding(&report, VulnerabilityType::Consolidation));
-    assert!(
-        has_warning(&report, VulnerabilityType::Consolidation),
-        "a pasted consolidation output must still be surfaced"
+#[test]
+fn utxo_scan_with_ownership_descriptors_reports_own_consolidation() {
+    let node = node();
+    let (alice, utxos) = own_consolidation_pasted_alone(&node);
+
+    let gateway = gateway_for(&node);
+    let settings = EngineSettings {
+        ownership_descriptors: wallet_descriptors(&alice),
+        ..EngineSettings::default()
+    };
+    let engine = AnalysisEngine::new(&gateway, settings);
+    let report = engine
+        .analyze(ScanTarget::Utxos(utxos))
+        .expect("utxo scan failed");
+    let finding = consolidation_finding(&report);
+    let details = finding.details.as_ref().expect("finding details");
+    assert_eq!(details["our_inputs_in_consolidation"], 3);
+    assert!(!has_warning(&report, VulnerabilityType::Consolidation));
+}
+
+#[test]
+fn utxo_scan_with_ownership_descriptors_is_silent_on_someone_elses_sweep() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let inputs = fund_coins(&node, &bob, 4, 300_000);
+    merge_into(
+        &node,
+        &[&bob],
+        &inputs,
+        alice.new_address().unwrap(),
+        1_200_000,
     );
+
+    let gateway = gateway_for(&node);
+    let settings = EngineSettings {
+        ownership_descriptors: wallet_descriptors(&alice),
+        ..EngineSettings::default()
+    };
+    let engine = AnalysisEngine::new(&gateway, settings);
+    let report = engine
+        .analyze(ScanTarget::Utxos(utxo_inputs_for(&alice)))
+        .expect("utxo scan failed");
+    assert_no_consolidation(&report);
 }

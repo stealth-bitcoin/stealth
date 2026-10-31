@@ -241,12 +241,13 @@ pub fn merge_into(
     dest: Address,
     total_sats: u64,
 ) {
-    let raw = signers[0]
-        .create_raw_transaction(
-            inputs,
-            &[Output::new(dest, Amount::from_sat(total_sats - 10_000))],
-        )
-        .unwrap();
+    let outputs = [Output::new(dest, Amount::from_sat(total_sats - 10_000))];
+    spend(node, signers, inputs, &outputs);
+}
+
+// Spends `inputs` into `outputs`, each signer signing its own inputs, and mines it.
+pub fn spend(node: &Node, signers: &[&corepc_node::Client], inputs: &[Input], outputs: &[Output]) {
+    let raw = signers[0].create_raw_transaction(inputs, outputs).unwrap();
     let mut tx = raw.transaction().unwrap();
     for signer in signers {
         tx = signer
@@ -259,6 +260,50 @@ pub fn merge_into(
     node.client.send_raw_transaction(&tx).unwrap();
     let da = node.client.new_address().unwrap();
     mine(node, 1, &da);
+}
+
+pub fn consolidation_finding(report: &stealth_engine::Report) -> &stealth_engine::Finding {
+    report
+        .findings
+        .iter()
+        .find(|f| f.vulnerability_type == VulnerabilityType::Consolidation)
+        .expect("expected a consolidation finding")
+}
+
+// The neutral, low-severity warning, with its (ours, unrecognised, unresolved) input counts.
+pub fn assert_consolidation_warning(
+    report: &stealth_engine::Report,
+    ours: u64,
+    unrecognised: u64,
+    unresolved: u64,
+) {
+    assert!(!has_finding(report, VulnerabilityType::Consolidation));
+    let warning = report
+        .warnings
+        .iter()
+        .find(|w| w.vulnerability_type == VulnerabilityType::Consolidation)
+        .expect("expected a consolidation warning");
+    assert_eq!(warning.severity, stealth_engine::Severity::Low);
+    assert!(
+        warning.description.contains("cannot tell whose"),
+        "{}",
+        warning.description
+    );
+    let correction = warning.correction.as_deref().unwrap_or_default();
+    assert!(
+        correction.starts_with("If these inputs were yours: avoid merging"),
+        "{correction}"
+    );
+    assert!(!correction.contains("nothing to do"), "{correction}");
+    let details = warning.details.as_ref().expect("warning details");
+    assert_eq!(details["our_inputs_in_consolidation"], ours);
+    assert_eq!(details["unrecognised_inputs"], unrecognised);
+    assert_eq!(details["unresolved_inputs"], unresolved);
+}
+
+pub fn assert_no_consolidation(report: &stealth_engine::Report) {
+    assert!(!has_finding(report, VulnerabilityType::Consolidation));
+    assert!(!has_warning(report, VulnerabilityType::Consolidation));
 }
 
 pub fn has_warning(report: &stealth_engine::Report, vtype: VulnerabilityType) -> bool {

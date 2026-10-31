@@ -39,7 +39,7 @@ impl TxGraph {
                 .iter()
                 .filter(|ia| self.is_ours(&ia.address))
                 .count();
-            let foreign = resolved.len() - ours;
+            let unrecognised = resolved.len() - ours;
             // Inputs whose funding tx was not fetched are unknown, not foreign.
             let unresolved = parent
                 .vin
@@ -54,13 +54,12 @@ impl TxGraph {
                 "consolidation_inputs": n_in,
                 "consolidation_outputs": n_out,
                 "our_inputs_in_consolidation": ours,
-                "foreign_inputs": foreign,
+                "unrecognised_inputs": unrecognised,
                 "unresolved_inputs": unresolved,
             });
 
-            match ours {
-                // Only a merge of at least two of our own coins is our consolidation.
-                2.. => findings.push(Finding {
+            if ours >= 2 {
+                findings.push(Finding {
                     vulnerability_type: VulnerabilityType::Consolidation,
                     severity: Severity::Medium,
                     description: format!(
@@ -78,30 +77,29 @@ impl TxGraph {
                          so the merge looks like an ordinary spend."
                             .into(),
                     ),
-                }),
-                // One coin of ours among others is a Payjoin-like contribution.
-                1 => {}
-                // The scan may not know the inputs (UTXO mode), so say so neutrally.
-                0 => warnings.push(Finding {
+                });
+            } else if self.partial_ownership || unresolved > 0 {
+                // The scan cannot vouch for the other inputs, so it neither blames nor clears.
+                warnings.push(Finding {
                     vulnerability_type: VulnerabilityType::Consolidation,
                     severity: Severity::Low,
                     description: format!(
-                        "UTXO {}:{} ({:.8} BTC) came from a {}-input consolidation \
-                         whose inputs this scan does not recognise as yours",
+                        "UTXO {}:{} ({:.8} BTC) came from a {}-input consolidation; this scan \
+                         recognises {} of its inputs as yours and cannot tell whose the others are",
                         utxo.txid,
                         utxo.vout,
                         utxo.amount.to_btc(),
-                        n_in
+                        n_in,
+                        ours
                     ),
                     details: Some(details),
                     correction: Some(
-                        "If those inputs were yours, that transaction links them to each \
-                         other and to this coin; next time consolidate through a CoinJoin \
-                         or inside a Payjoin (BIP-78) payment. If they belonged to the \
-                         sender, there is nothing to do."
+                        "If these inputs were yours: avoid merging many coins in one \
+                         transaction; consolidate through a CoinJoin, or inside a Payjoin \
+                         (BIP-78) payment so the merge looks like an ordinary spend."
                             .into(),
                     ),
-                }),
+                });
             }
         }
     }

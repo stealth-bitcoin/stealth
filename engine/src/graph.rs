@@ -35,6 +35,10 @@ pub struct TxGraph {
     /// that spends that output. Built once from `input_cache` so child
     /// lookups during detection are O(1) instead of O(N·M).
     pub spending_index: HashMap<(Txid, u32), Txid>,
+    /// True when the scan knows only some of the user's addresses (a UTXO
+    /// scan without ownership descriptors, or `addr()` descriptors only), so
+    /// an input it does not recognise may still be the user's.
+    pub partial_ownership: bool,
 }
 
 /// A UTXO entry from `listunspent`.
@@ -234,7 +238,14 @@ impl TxGraph {
             input_cache,
             output_cache,
             spending_index,
+            partial_ownership: false,
         }
+    }
+
+    /// Mark whether the scan knows only some of the user's addresses.
+    pub fn with_partial_ownership(mut self, partial: bool) -> Self {
+        self.partial_ownership = partial;
+        self
     }
 }
 

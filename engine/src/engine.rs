@@ -81,7 +81,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .gateway
             .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let graph = TxGraph::from_wallet_history(history);
+        let addresses_only = expanded.iter().all(|d| is_address_descriptor(d));
+        let graph = TxGraph::from_wallet_history(history).with_partial_ownership(addresses_only);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -96,7 +97,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let mut history = self.resolve_utxo_history(&utxos)?;
         let addresses_without_history = self.merge_address_history(&mut history)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let graph = TxGraph::from_wallet_history(history);
+        let partial = self.settings.ownership_descriptors.is_empty();
+        let graph = TxGraph::from_wallet_history(history).with_partial_ownership(partial);
         let mut report = graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -300,6 +302,12 @@ fn name_pasted_output(error: AnalysisError, utxo: &UtxoInput) -> AnalysisError {
         }
         other => other,
     }
+}
+
+/// An `addr()` or `raw()` descriptor names one script, not a wallet.
+fn is_address_descriptor(descriptor: &str) -> bool {
+    let d = descriptor.trim_start();
+    d.starts_with("addr(") || d.starts_with("raw(")
 }
 
 /// The node's entries replace the ones built from the pasted outputs for the
