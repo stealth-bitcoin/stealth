@@ -46,8 +46,9 @@ pub struct DetectorThresholds {
     /// Lower bound (inclusive) on values considered "toxic change".
     pub toxic_change_lower: Amount,
     pub toxic_change_upper: Amount,
-    /// Maximum hops to trace forward when looking for a peel chain. A safety
-    /// bound well above real chains; a chain cut by it is marked truncated.
+    /// Bound on a peel chain's reported length. A chain of more than
+    /// `peel_chain_max_hops + 1` hops is reported with that many hops, as
+    /// "at least", and marked truncated.
     pub peel_chain_max_hops: u32,
     /// Minimum hop count required to emit a peel-chain finding.
     pub peel_chain_min_hops: u32,

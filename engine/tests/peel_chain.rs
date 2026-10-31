@@ -311,17 +311,29 @@ fn two_chains_that_merge_into_one_tail_are_both_reported() {
         peel(0x72, &[(0x71, 1), (0x81, 1)], 2_000_000, 143_000_000),
         peel(0x73, &[(0x72, 1)], 2_000_000, 140_000_000),
     ];
+    // Both count the shared tail; 0x71, the smaller start, lists it and
+    // 0x81 stops where it joins.
     let findings = peel_findings(txs);
     assert_eq!(findings.len(), 2, "{findings:#?}");
     assert_eq!(starts(&findings), ids(&[0x71, 0x81]));
     for f in &findings {
-        let head = if start(f) == txid(0x71).to_string() {
-            0x71
+        assert_eq!(hops(f), 3);
+        if start(f) == txid(0x71).to_string() {
+            assert_eq!(chain_txids(f), ids(&[0x71, 0x72, 0x73]));
+            assert_eq!(joins(f), None);
         } else {
-            0x81
-        };
-        assert_eq!(chain_txids(f), ids(&[head, 0x72, 0x73]));
+            assert_eq!(chain_txids(f), ids(&[0x81]));
+            assert_eq!(joins(f), Some(txid(0x72).to_string()));
+        }
     }
+}
+
+fn joins(f: &Finding) -> Option<String> {
+    f.details
+        .as_ref()
+        .expect("details")
+        .get("joins")
+        .map(|v| v.as_str().expect("joins is a txid string").to_string())
 }
 
 // `truncated` is only in the details when it is true.
@@ -418,6 +430,7 @@ fn a_cycle_in_bad_data_does_not_hang_the_scan() {
     assert_eq!(hops(f), 3);
     assert_eq!(f.severity, Severity::High);
     assert!(!truncated(f));
+    assert_eq!(joins(f), None);
 }
 
 fn bound_of_six() -> DetectorThresholds {
@@ -446,6 +459,7 @@ fn a_cycle_longer_than_the_hop_limit_lists_each_hop_once() {
     assert_eq!(chain_txids(f), ids(&listed));
     assert_eq!(hops(f), 7);
     assert!(truncated(f));
+    assert_eq!(joins(f), None);
 }
 
 #[test]
@@ -596,6 +610,7 @@ fn a_loop_with_no_way_in_is_one_finding_from_its_smallest_txid() {
         assert_eq!(chain_txids(f), ids(&expected));
         assert_eq!(hops(f), 3);
         assert!(!truncated(f));
+        assert_eq!(joins(f), None);
     }
 }
 
@@ -625,4 +640,121 @@ fn a_spend_that_is_not_a_peel_ends_the_chain() {
     let findings = peel_findings(txs);
     assert_eq!(findings.len(), 1, "{findings:#?}");
     assert_eq!(chain_txids(&findings[0]), ids(&[0x11, 0x12, 0x13]));
+}
+
+fn big_id(n: u32) -> Txid {
+    format!("{n:064x}").parse().expect("valid txid hex")
+}
+
+fn big_tx(id: u32, vins: &[(u32, u32)], vouts: Vec<TxOutput>) -> DecodedTransaction {
+    DecodedTransaction {
+        txid: big_id(id),
+        vin: vins
+            .iter()
+            .map(|&(prev, vout)| TxInputRef {
+                previous_txid: big_id(prev),
+                previous_vout: vout,
+                sequence: 0xffff_fffd,
+                coinbase: false,
+            })
+            .collect(),
+        vout: vouts,
+        version: 2,
+        locktime: 0,
+        vsize: 141,
+        confirmations: 3,
+    }
+}
+
+#[test]
+fn many_chains_merging_into_one_tail_list_each_tx_once() {
+    // T1 to T900 form one chain; each T(i) from T2 on also spends the change
+    // of its own one-input peel S(i), so 900 chains share T(i).. as a tail.
+    const N: u32 = 900;
+    let (t, s, g) = (|i: u32| i, |i: u32| 100_000 + i, |i: u32| 200_000 + i);
+    let us = ours(1);
+    let them = external(1);
+    let mut txs = vec![big_tx(
+        0,
+        &[(300_000, 0)],
+        vec![out(0, us.clone(), 1 << 40)],
+    )];
+    txs.push(big_tx(
+        t(1),
+        &[(0, 0)],
+        vec![out(0, them.clone(), 10_000), out(1, us.clone(), 1 << 39)],
+    ));
+    for i in 2..=N {
+        txs.push(big_tx(
+            g(i),
+            &[(300_000, i)],
+            vec![out(0, us.clone(), 1_000_000)],
+        ));
+        txs.push(big_tx(
+            s(i),
+            &[(g(i), 0)],
+            vec![out(0, them.clone(), 10_000), out(1, us.clone(), 900_000)],
+        ));
+        txs.push(big_tx(
+            t(i),
+            &[(t(i - 1), 1), (s(i), 1)],
+            vec![out(0, them.clone(), 10_000), out(1, us.clone(), 1 << 39)],
+        ));
+    }
+    let wallet_txs = txs
+        .iter()
+        .map(|tx| WalletTxEntry {
+            txid: tx.txid,
+            address: None,
+            category: WalletTxCategory::Send,
+            amount: Amount::from_sat(0),
+            confirmations: 3,
+            blockheight: 100,
+        })
+        .collect();
+    let history = WalletHistory {
+        wallet_txs,
+        utxos: Vec::new(),
+        transactions: txs.into_iter().map(|tx| (tx.txid, tx)).collect(),
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::from([us]),
+        ranged_addresses: HashSet::new(),
+    };
+    let graph = TxGraph::from_wallet_history(history);
+    let started = std::time::Instant::now();
+    let report = graph.detect_all(&DetectorThresholds::default(), None, None);
+    let elapsed = started.elapsed();
+    let peels: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.vulnerability_type == VulnerabilityType::PeelChain)
+        .collect();
+    assert_eq!(peels.len(), N as usize);
+    // Every finding counts the whole shared tail.
+    for f in &peels {
+        let head = start(f);
+        let expected = if head == big_id(t(1)).to_string() {
+            N
+        } else {
+            let i = (2..=N)
+                .find(|&i| big_id(s(i)).to_string() == head)
+                .expect("every other finding starts at a side peel");
+            N - i + 2
+        };
+        assert_eq!(hops(f), u64::from(expected));
+    }
+    // Each tx is listed once, and a finding that stops early names a tx
+    // another finding lists.
+    let listed: Vec<String> = peels.iter().flat_map(|f| chain_txids(f)).collect();
+    let unique: HashSet<&String> = listed.iter().collect();
+    assert_eq!(listed.len(), 2 * N as usize - 1);
+    assert_eq!(unique.len(), listed.len());
+    for f in &peels {
+        if let Some(merge) = joins(f) {
+            assert!(unique.contains(&merge));
+            assert!(!chain_txids(f).contains(&merge));
+        }
+    }
+    eprintln!("detect_all on {N} merge points took {elapsed:?}");
+    assert!(elapsed.as_secs() < 10, "detect_all took {elapsed:?}");
 }

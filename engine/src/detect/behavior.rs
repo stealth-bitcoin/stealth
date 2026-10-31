@@ -399,8 +399,43 @@ impl TxGraph {
             }
         }
 
-        // Walk each head, and each loop once from its smallest start.
-        let mut chains: Vec<(Vec<Txid>, bool, f64)> = Vec::new();
+        // Hops from each peel to its chain's end, counting a loop's txs once.
+        let mut remaining: HashMap<Txid, usize> = HashMap::with_capacity(next.len());
+        for &first in &txids {
+            if !next.contains_key(&first) || remaining.contains_key(&first) {
+                continue;
+            }
+            let mut path: Vec<Txid> = Vec::new();
+            let mut on_path: HashMap<Txid, usize> = HashMap::new();
+            let mut beyond = 0;
+            let mut cur = Some(first);
+            while let Some(t) = cur {
+                if let Some(&known) = remaining.get(&t) {
+                    beyond = known;
+                    break;
+                }
+                if let Some(&pos) = on_path.get(&t) {
+                    beyond = path.len() - pos;
+                    for &member in &path[pos..] {
+                        remaining.insert(member, beyond);
+                    }
+                    path.truncate(pos);
+                    break;
+                }
+                on_path.insert(t, path.len());
+                path.push(t);
+                cur = step(&t);
+            }
+            for &t in path.iter().rev() {
+                beyond += 1;
+                remaining.insert(t, beyond);
+            }
+        }
+
+        // Each head, and each loop once from its smallest start. A tx is listed
+        // by the first finding to reach it; later ones stop there and name it.
+        let cap = max_hops.saturating_add(1);
+        let mut listed_by: HashMap<Txid, Txid> = HashMap::new();
         let mut loop_done: HashSet<Txid> = HashSet::new();
         for &(start, ratio) in &starts {
             if covered.contains(&start) {
@@ -415,29 +450,27 @@ impl TxGraph {
                     cur = step(&t);
                 }
             }
-            let mut chain = vec![start];
-            let mut seen = HashSet::from([start]);
-            let mut truncated = false;
-            let mut cur = step(&start);
-            // Spends cannot form a cycle; the revisit check stops bad data.
-            while let Some(t) = cur.filter(|t| seen.insert(*t)) {
-                chain.push(t);
-                cur = step(&t);
-                if chain.len() > max_hops {
-                    truncated = cur.is_some_and(|t| !seen.contains(&t));
+            let total = remaining.get(&start).copied().unwrap_or(1);
+            if total.min(cap) < min_hops {
+                continue; // At least `min_hops` to qualify
+            }
+            let truncated = total > cap;
+            let hops = u32::try_from(total.min(cap)).unwrap_or(u32::MAX);
+            let txid = start;
+
+            let mut chain = Vec::new();
+            let mut joins = None;
+            let mut cur = Some(start);
+            while let Some(t) = cur.filter(|_| chain.len() < cap) {
+                if let Some(&owner) = listed_by.get(&t) {
+                    // Spends cannot form a cycle; reaching our own tx again ends bad data.
+                    joins = (owner != start).then_some(t);
                     break;
                 }
+                listed_by.insert(t, start);
+                chain.push(t);
+                cur = step(&t);
             }
-            if chain.len() >= min_hops {
-                chains.push((chain, truncated, ratio));
-            }
-        }
-
-        for (chain, truncated, ratio) in chains {
-            let Some(&txid) = chain.first() else {
-                continue;
-            };
-            let hops = u32::try_from(chain.len()).unwrap_or(u32::MAX);
 
             let mut details = json!({
                 "start_txid": txid.to_string(),
@@ -447,6 +480,9 @@ impl TxGraph {
             });
             if truncated {
                 details["truncated"] = json!(true); // Only shown when the chain was cut.
+            }
+            if let Some(merge) = joins {
+                details["joins"] = json!(merge.to_string());
             }
 
             let severity = if hops >= critical_hops {
