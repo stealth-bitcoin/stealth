@@ -16,7 +16,6 @@ export default function App() {
   const [report, setReport] = useState(null)
   const [error, setError] = useState(null)
   const [limitExceeded, setLimitExceeded] = useState(null)
-  const [attempt, setAttempt] = useState(0)
   const pollFailures = useRef(0)
   const cancelSent = useRef(false)
 
@@ -75,7 +74,6 @@ export default function App() {
     setError(null)
     setLimitExceeded(null)
     cancelSent.current = false
-    setAttempt((n) => n + 1)
     setScreen('loading')
     try {
       setScanId(await startScan(nextScan.body))
@@ -113,7 +111,6 @@ export default function App() {
     if (screen === 'loading') {
       return (
         <LoadingScreen
-          key={attempt}
           text={scan?.text}
           kind={scan?.kind}
           state={job?.state}
