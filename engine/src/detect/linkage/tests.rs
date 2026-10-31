@@ -134,3 +134,19 @@ fn a_strangers_input_does_not_make_one_address_unnecessary() {
     );
     assert!(findings.is_empty(), "{findings:?}");
 }
+
+#[test]
+fn a_second_input_at_the_sufficient_inputs_address_is_not_counted_as_unnecessary() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let findings = unnecessary(&[(&a, 1_000_000), (&a, 600), (&b, 50_000)], &a, &[&a, &b]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert!(
+        f.description.contains("has 1 unnecessary input(s)"),
+        "{}",
+        f.description
+    );
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(details["unnecessary_count"], 1);
+    assert_eq!(details["total_inputs_used"], 3);
+}

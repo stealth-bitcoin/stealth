@@ -375,7 +375,9 @@ impl TxGraph {
             }
 
             if !oversized_inputs.is_empty() && our_in.len() > 1 {
-                let extra_count = our_in.len() - 1;
+                // Inputs at the sufficient input's own address link nothing new.
+                let sufficient = &oversized_inputs[0].address;
+                let extra_count = our_in.iter().filter(|ia| &ia.address != sufficient).count();
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::UnnecessaryInput,
                     severity: Severity::Medium,
