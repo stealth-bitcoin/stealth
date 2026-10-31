@@ -175,7 +175,7 @@ fn ctrl_c_at_the_prompt_is_a_no_and_leaves_no_wallet_loaded() {
 
 #[cfg(unix)]
 #[test]
-fn ctrl_c_outside_the_question_exits_at_once_with_130() {
+fn ctrl_c_outside_the_question_dies_by_sigint_at_once() {
     use std::net::TcpListener;
     use std::time::Duration;
 
@@ -223,7 +223,9 @@ fn ctrl_c_outside_the_question_exits_at_once_with_130() {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    assert_eq!(status.code(), Some(130), "{status:?}");
+    // Shells stop a loop only for a child killed by the signal, as it was before.
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
 }
 
 #[cfg(unix)]

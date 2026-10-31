@@ -18,6 +18,10 @@ serde_json = { workspace = true }
 stealth-bitcoincore = { path = "../bitcoincore" }
 stealth-engine = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# Already in the tree through ctrlc; used to die by SIGINT like before.
+nix = { version = "0.31.3", default-features = false, features = ["signal"] }
+
 [dev-dependencies]
 corepc-node = { workspace = true }
 

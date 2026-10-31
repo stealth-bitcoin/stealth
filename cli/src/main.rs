@@ -53,7 +53,7 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     let handler = Arc::clone(&interrupts);
     let _ = ctrlc::set_handler(move || {
         if handler.interrupt() {
-            std::process::exit(130);
+            die_by_interrupt();
         }
     });
 
@@ -88,6 +88,19 @@ fn scan_error(error: AnalysisError) -> String {
         }
         other => other.to_string(),
     }
+}
+
+/// Ends the process by SIGINT, as an unhandled Ctrl-C would, so a shell sees
+/// the signal (bash stops a loop only then); elsewhere it exits with 130.
+fn die_by_interrupt() -> ! {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{raise, signal, SigHandler, Signal};
+        // SAFETY: SIG_DFL installs no handler code, so nothing runs in signal context.
+        let _ = unsafe { signal(Signal::SIGINT, SigHandler::SigDfl) };
+        let _ = raise(Signal::SIGINT);
+    }
+    std::process::exit(130)
 }
 
 /// The question is asked only where someone can both read it and answer it.
