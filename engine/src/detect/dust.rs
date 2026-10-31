@@ -35,14 +35,14 @@ impl TxGraph {
             }
         }
 
-        // Own dust outside the UTXO list: spent when the history shows the
-        // spend, otherwise whatever the node said, or unknown without an answer.
+        // Own dust outside the UTXO list: what the node said when asked,
+        // else spent when the history shows the spend, else unknown.
         for (txid, out) in self.dust_outside_utxos(dust) {
             let key = (txid, out.index);
-            let unspent = if self.spending_index.contains_key(&key) {
-                Some(false)
-            } else {
-                self.chain_unspent.get(&key).copied()
+            let unspent = match self.chain_unspent.get(&key) {
+                Some(&unspent) => Some(unspent),
+                None if self.spending_index.contains_key(&key) => Some(false),
+                None => None,
             };
             let finding = match unspent {
                 Some(true) => Self::unspent_dust_finding,
@@ -82,14 +82,19 @@ impl TxGraph {
     }
 
     /// Outpoints of own dust outside the UTXO list whose spend the history
-    /// does not show; only the node can say whether they are unspent.
+    /// does not show, or shows only in an unconfirmed (replaceable) tx.
     pub(crate) fn dust_needing_chain_status(
         &self,
         thresholds: &DetectorThresholds,
     ) -> Vec<OutPoint> {
         self.dust_outside_utxos(thresholds.dust)
             .into_iter()
-            .filter(|(txid, out)| !self.spending_index.contains_key(&(*txid, out.index)))
+            .filter(|(txid, out)| {
+                self.spending_index
+                    .get(&(*txid, out.index))
+                    .and_then(|child| self.tx_cache.get(child))
+                    .is_none_or(|child| child.confirmations == 0)
+            })
             .map(|(txid, out)| OutPoint::new(txid, out.index))
             .collect()
     }

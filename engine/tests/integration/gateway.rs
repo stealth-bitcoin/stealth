@@ -233,7 +233,7 @@ fn cookie_gateway_survives_node_restart() {
 // ─── Output spend status ───────────────────────────────────────────────────
 
 #[test]
-fn outputs_unspent_follows_the_chain_and_the_mempool() {
+fn outputs_in_utxo_set_follows_the_chain_and_the_mempool() {
     let node = node();
     let da = node.client.new_address().expect("default address");
     mine(&node, 110, &da);
@@ -251,14 +251,18 @@ fn outputs_unspent_follows_the_chain_and_the_mempool() {
 
     let gateway = gateway_for(&node);
     let status = |op| {
-        let answers = gateway.outputs_unspent(&[op]).expect("gettxout");
+        let answers = gateway.outputs_in_utxo_set(&[op]).expect("gettxout");
         answers
             .into_iter()
             .next()
             .and_then(|(_, unspent)| unspent.ok())
     };
     assert_eq!(status(funded), Some(true));
-    assert_eq!(status(missing), Some(false));
+    assert_eq!(
+        status(missing),
+        Some(false),
+        "an output that never existed is absent too; the engine decides what absence means"
+    );
 
     alice
         .send_to_address(&da, Amount::from_sat(50_000_000))

@@ -108,19 +108,37 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         Ok(report)
     }
 
-    /// Own dust outside the UTXO list whose spend the history does not show
-    /// is looked up on the node; an output it cannot answer for stays unknown.
+    /// Own dust outside the UTXO list whose spend the history does not settle
+    /// is looked up on the node. Absent from the UTXO set means spent only
+    /// while the creating tx still exists; any other output stays unknown.
     fn ask_dust_status(&self, graph: &mut TxGraph) {
         let outpoints = graph.dust_needing_chain_status(&self.settings.config.thresholds);
         if outpoints.is_empty() {
             return;
         }
-        if let Ok(answers) = self.gateway.outputs_unspent(&outpoints) {
-            for (op, unspent) in answers {
-                if let Ok(unspent) = unspent {
-                    graph.chain_unspent.insert((op.txid, op.vout), unspent);
+        let Ok(answers) = self.gateway.outputs_in_utxo_set(&outpoints) else {
+            return;
+        };
+        let mut creating_tx_exists: HashMap<Txid, bool> = HashMap::new();
+        for (op, answer) in answers {
+            let unspent = match answer {
+                Ok(true) => true,
+                Ok(false) => {
+                    let exists = *creating_tx_exists.entry(op.txid).or_insert_with(|| {
+                        graph
+                            .tx_cache
+                            .get(&op.txid)
+                            .is_some_and(|tx| tx.confirmations > 0)
+                            || self.gateway.get_transaction(op.txid).is_ok()
+                    });
+                    if !exists {
+                        continue;
+                    }
+                    false
                 }
-            }
+                Err(_) => continue,
+            };
+            graph.chain_unspent.insert((op.txid, op.vout), unspent);
         }
     }
 

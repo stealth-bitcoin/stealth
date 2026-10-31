@@ -60,10 +60,11 @@ pub trait BlockchainGateway {
         Ok(false)
     }
 
-    /// Whether each output is still unspent, mempool spends included. The
-    /// outer `Result` is transport-level; per-output failures come back in
-    /// the inner `Result`s.
-    fn outputs_unspent(&self, outpoints: &[OutPoint]) -> Result<UnspentResults, AnalysisError>;
+    /// Whether each output is in the UTXO set, mempool spends included.
+    /// Absent covers spent and never created (an evicted or replaced
+    /// creating tx, or a vout it does not have). The outer `Result` is
+    /// transport-level; per-output failures come back in the inner `Result`s.
+    fn outputs_in_utxo_set(&self, outpoints: &[OutPoint]) -> Result<UtxoSetResults, AnalysisError>;
 
     /// Install a progress sink for scans started on the current thread.
     /// Default: no-op for gateways without progress reporting.
@@ -87,8 +88,8 @@ where
 
 // ── Gateway model types ─────────────────────────────────────────────────────
 
-/// Per-output unspent answers paired with their outpoints.
-pub type UnspentResults = Vec<(OutPoint, Result<bool, AnalysisError>)>;
+/// Per-output UTXO-set answers paired with their outpoints.
+pub type UtxoSetResults = Vec<(OutPoint, Result<bool, AnalysisError>)>;
 
 /// Per-transaction fetch results paired with their txids.
 pub type TxFetchResults = Vec<(Txid, Result<DecodedTransaction, AnalysisError>)>;
