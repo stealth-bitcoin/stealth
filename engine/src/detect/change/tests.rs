@@ -545,7 +545,19 @@ fn toxic_findings_of(
     extra: Vec<Coin>,
     also_ours: &[&Address<NetworkUnchecked>],
 ) -> Vec<Finding> {
-    let mut coins = vec![coin(a, change_sats), coin(big, 50_000)];
+    toxic_findings_with(change_sats, 50_000, a, big, extra, also_ours)
+}
+
+/// As [`toxic_findings_of`], with `big_sats` at `big` instead of 50,000.
+fn toxic_findings_with(
+    change_sats: u64,
+    big_sats: u64,
+    a: &Address<NetworkUnchecked>,
+    big: &Address<NetworkUnchecked>,
+    extra: Vec<Coin>,
+    also_ours: &[&Address<NetworkUnchecked>],
+) -> Vec<Finding> {
+    let mut coins = vec![coin(a, change_sats), coin(big, big_sats)];
     coins.extend(extra);
     let mut ours = vec![a, big];
     ours.extend_from_slice(also_ours);
@@ -593,9 +605,57 @@ fn a_strangers_input_does_not_make_one_address_toxic() {
 }
 
 #[test]
-fn a_small_own_coin_elsewhere_does_not_make_a_same_address_merge_toxic() {
+fn a_small_own_coin_elsewhere_ties_its_address_to_the_change() {
     let (a, b) = (wpkh(1), wpkh(2));
     let findings = toxic_findings(&a, &a, vec![coin(&b, 3_000)], &[&b]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_ties(&findings[0], &a, &[&b]);
+}
+
+/// The finding names `change` as the change's address and `tied` as the addresses tied to it,
+/// and does not claim two transactions were newly linked.
+fn assert_ties(
+    finding: &Finding,
+    change: &Address<NetworkUnchecked>,
+    tied: &[&Address<NetworkUnchecked>],
+) {
+    let text = |a: &Address<NetworkUnchecked>| a.assume_checked_ref().to_string();
+    let tied_list = tied.iter().map(|a| text(a)).collect::<Vec<_>>().join(", ");
+    assert!(
+        finding.description.contains(&format!(
+            "ties {tied_list} to the change's address {}",
+            text(change)
+        )),
+        "{}",
+        finding.description
+    );
+    assert!(
+        !finding.description.contains("linking both transactions"),
+        "{}",
+        finding.description
+    );
+    let details = finding.details.as_ref().expect("details");
+    let listed: Vec<String> = details["tied_addresses"]
+        .as_array()
+        .expect("tied addresses")
+        .iter()
+        .filter_map(|a| a.as_str().map(String::from))
+        .collect();
+    assert_eq!(listed, tied.iter().map(|a| text(a)).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_larger_coin_at_another_address_is_named_as_tied() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let findings = toxic_findings(&a, &b, vec![], &[]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_ties(&findings[0], &a, &[&b]);
+}
+
+#[test]
+fn small_own_coins_elsewhere_with_no_larger_coin_are_not_toxic() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let findings = toxic_findings_with(600, 3_000, &a, &b, vec![], &[]);
     assert!(findings.is_empty(), "{findings:?}");
 }
 

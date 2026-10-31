@@ -229,11 +229,22 @@ impl TxGraph {
                 if child_inputs.len() < 2 {
                     continue;
                 }
-                // A larger coin at the change's own address was linked to it already.
-                let has_larger = child_inputs.iter().any(|ci| {
-                    ci.value > toxic_upper && self.is_ours(&ci.address) && ci.address != out.address
-                });
-                if !has_larger {
+                let own: Vec<_> = child_inputs
+                    .iter()
+                    .filter(|ci| self.is_ours(&ci.address))
+                    .collect();
+                if !own.iter().any(|ci| ci.value > toxic_upper) {
+                    continue;
+                }
+                // Only own addresses other than the change's are newly tied to it.
+                let mut tied: Vec<String> = Vec::new();
+                for ci in own.iter().filter(|ci| ci.address != out.address) {
+                    let address = ci.address.assume_checked_ref().to_string();
+                    if !tied.contains(&address) {
+                        tied.push(address);
+                    }
+                }
+                if tied.is_empty() {
                     continue;
                 }
 
@@ -241,9 +252,14 @@ impl TxGraph {
                     vulnerability_type: VulnerabilityType::ToxicChange,
                     severity: Severity::High,
                     description: format!(
-                        "Toxic change ({} sats) from TX {}:{} was later merged with a larger \
-                         UTXO in TX {}, linking both transactions",
-                        sats, txid, out.index, child_txid
+                        "Toxic change ({} sats) from TX {}:{} was later spent with a larger \
+                         coin in TX {}, which ties {} to the change's address {}",
+                        sats,
+                        txid,
+                        out.index,
+                        child_txid,
+                        tied.join(", "),
+                        out.address.assume_checked_ref(),
                     ),
                     details: Some(json!({
                         "source_txid": txid.to_string(),
@@ -252,10 +268,11 @@ impl TxGraph {
                         "change_sats": sats,
                         "spending_txid": child_txid.to_string(),
                         "total_inputs_in_child": child_inputs.len(),
+                        "tied_addresses": tied,
                     })),
                     correction: Some(format!(
                         "Freeze small change like this in your wallet from now on and never \
-                         merge it with your other coins: that links the two transactions.{}",
+                         merge it with your other coins: that ties their addresses together.{}",
                         if sats >= WABISABI_MIN_SATS && wabisabi_script(&out.address) {
                             " Change at or above a CoinJoin coordinator's minimum can go through a \
                              WabiSabi CoinJoin instead."
