@@ -7,7 +7,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, Network, ScriptBuf, Txid, WPubkeyHash};
 
 use crate::config::DetectorThresholds;
-use crate::detect::DUST_OPTIONS;
 use crate::gateway::{
     DecodedTransaction, DescriptorType, TxInputRef, TxOutput, Utxo, WalletHistory,
     WalletTxCategory, WalletTxEntry,
@@ -134,16 +133,22 @@ fn a_strangers_input_does_not_make_one_address_dust_spending() {
 }
 
 #[test]
-fn dust_spending_advice_freezes_first_with_the_shared_options() {
+fn dust_spending_advice_is_for_next_time_and_offers_no_way_to_spend_a_spent_coin() {
     let (a, b) = (wpkh(1), wpkh(2));
     let findings = dust_spending(spend_of(&[(&a, 600), (&b, 50_000)], &[&a, &b]));
     let correction = findings[0].correction.as_deref().expect("a correction");
-    assert!(correction.starts_with("Freeze"), "{correction}");
-    assert!(correction.contains(DUST_OPTIONS), "{correction}");
+    assert!(
+        correction.starts_with("Freeze dust like this"),
+        "{correction}"
+    );
+    assert!(correction.contains("from now on"), "{correction}");
+    for absent in ["spend it alone", "OP_RETURN", "WabiSabi", "CoinJoin"] {
+        assert!(!correction.contains(absent), "{absent}: {correction}");
+    }
 }
 
 #[test]
-fn unspent_dust_advice_freezes_first_with_the_shared_options() {
+fn unspent_dust_advice_freezes_first_then_offers_a_standard_fee_only_spend() {
     let a = wpkh(1);
     let fund = txid(1);
     let history = WalletHistory {
@@ -166,25 +171,29 @@ fn unspent_dust_advice_freezes_first_with_the_shared_options() {
         .detect_dust(&DetectorThresholds::default(), &mut findings);
     assert_eq!(findings.len(), 1, "{findings:?}");
     let correction = findings[0].correction.as_deref().expect("a correction");
-    assert!(correction.starts_with("Freeze"), "{correction}");
-    assert!(correction.contains(DUST_OPTIONS), "{correction}");
-}
-
-#[test]
-fn the_shared_options_warn_that_an_inscription_spent_as_fee_is_lost() {
+    assert!(correction.starts_with("Freeze it"), "{correction}");
     for needle in [
-        "alone as fee",
+        "spend it alone as fee",
         "one coin per transaction",
-        "0-value OP_RETURN",
-        "low fee rate",
+        // A bare 0-value OP_RETURN makes a 61-byte tx, under Core's 65-byte minimum.
+        "one 0-value OP_RETURN output carrying 4 bytes of data",
+        "mempool fee rates are low enough for it to confirm",
+        "a 546-sat coin pays about 6 sat/vB",
         "ordinals inscription or runes",
-        "lost",
-        "WabiSabi",
-        "coordinator's minimum",
+        "hands them to the miner and they are lost",
     ] {
-        assert!(DUST_OPTIONS.contains(needle), "{needle}: {DUST_OPTIONS}");
+        assert!(correction.contains(needle), "{needle}: {correction}");
     }
-    for banned in ["PayJoin", "Payjoin", "Lightning", "tx0", "Whirlpool"] {
-        assert!(!DUST_OPTIONS.contains(banned), "{banned}: {DUST_OPTIONS}");
+    // A coin of 1,000 sats or less is under any CoinJoin coordinator's minimum.
+    for banned in [
+        "low fee rate",
+        "WabiSabi",
+        "CoinJoin",
+        "PayJoin",
+        "Payjoin",
+        "Lightning",
+        "tx0",
+    ] {
+        assert!(!correction.contains(banned), "{banned}: {correction}");
     }
 }

@@ -4,7 +4,6 @@ use std::collections::HashSet;
 
 use serde_json::json;
 
-use super::DUST_OPTIONS;
 use crate::config::DetectorThresholds;
 use crate::graph::TxGraph;
 use crate::types::*;
@@ -242,10 +241,13 @@ impl TxGraph {
                         "spending_txid": child_txid.to_string(),
                         "total_inputs_in_child": child_inputs.len(),
                     })),
-                    correction: Some(format!(
-                        "Freeze small change like this in your wallet: spending it with a \
-                         larger coin links the two transactions. {DUST_OPTIONS}"
-                    )),
+                    correction: Some(
+                        "Freeze small change like this in your wallet from now on and never \
+                         merge it with your other coins: that links the two transactions. \
+                         Change above a CoinJoin coordinator's minimum can go through a \
+                         WabiSabi CoinJoin instead."
+                            .into(),
+                    ),
                 });
             }
         }

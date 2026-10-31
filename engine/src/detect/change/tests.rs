@@ -582,13 +582,26 @@ fn a_larger_own_coin_elsewhere_still_makes_the_merge_toxic() {
 }
 
 #[test]
-fn toxic_change_advice_freezes_first_and_never_says_absorb_into_the_fee() {
+fn toxic_change_advice_is_for_next_time_and_offers_wabisabi_only_above_the_minimum() {
     let findings = toxic_findings(&wpkh(1), &wpkh(2), vec![], &[]);
     let correction = findings[0].correction.as_deref().expect("a correction");
-    assert!(correction.starts_with("Freeze"), "{correction}");
     assert!(
-        correction.contains(crate::detect::DUST_OPTIONS),
+        correction.starts_with("Freeze small change like this"),
         "{correction}"
     );
-    assert!(!correction.contains("bump fee"), "{correction}");
+    assert!(correction.contains("from now on"), "{correction}");
+    assert!(
+        correction.contains("above a CoinJoin coordinator's minimum"),
+        "{correction}"
+    );
+    assert!(correction.contains("WabiSabi"), "{correction}");
+    for absent in [
+        "spend it alone",
+        "OP_RETURN",
+        "bump fee",
+        "PayJoin",
+        "Lightning",
+    ] {
+        assert!(!correction.contains(absent), "{absent}: {correction}");
+    }
 }

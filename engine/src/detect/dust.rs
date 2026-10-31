@@ -6,10 +6,16 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, OutPoint, Txid};
 use serde_json::json;
 
-use super::DUST_OPTIONS;
 use crate::config::DetectorThresholds;
 use crate::graph::TxGraph;
 use crate::types::*;
+
+/// How to get rid of a live dust coin without linking it, given after "freeze it".
+const FEE_ONLY_SPEND: &str = "To get rid of it, spend it alone as fee: one coin per transaction, \
+     with a single input and one 0-value OP_RETURN output carrying 4 bytes of data, sent when \
+     mempool fee rates are low enough for it to confirm (a 546-sat coin pays about 6 sat/vB). \
+     If the coin holds an ordinals inscription or runes, spending it as fee hands them to the \
+     miner and they are lost.";
 
 impl TxGraph {
     // ── 3. Dust UTXO Detection ─────────────────────────────────────────────
@@ -196,7 +202,7 @@ impl TxGraph {
         };
         let correction = format!(
             "Freeze it in your wallet: spending it with your other coins links your \
-             other addresses to this one. {DUST_OPTIONS}"
+             other addresses to this one. {FEE_ONLY_SPEND}"
         );
         Finding {
             vulnerability_type: VulnerabilityType::Dust,
@@ -427,10 +433,11 @@ impl TxGraph {
                             json!({"address": n.address.assume_checked_ref().to_string(), "sats": n.value.to_sat()})
                         }).collect::<Vec<_>>(),
                     })),
-                    correction: Some(format!(
-                        "Freeze each dust coin in your wallet so it is never picked as an \
-                         input with your other coins. {DUST_OPTIONS}"
-                    )),
+                    correction: Some(
+                        "Freeze dust like this in your wallet from now on, so it is never \
+                         spent with your other coins again."
+                            .into(),
+                    ),
                 });
             }
         }

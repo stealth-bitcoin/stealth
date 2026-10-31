@@ -51,7 +51,11 @@ fn detect_dust() {
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
     assert!(has_finding(&report, VulnerabilityType::Dust));
-    assert_dust_advice(&report, VulnerabilityType::Dust);
+    assert_dust_advice(
+        &report,
+        VulnerabilityType::Dust,
+        "OP_RETURN output carrying 4 bytes of data",
+    );
 }
 
 // ─── 4. Dust Spending with Normal Inputs ────────────────────────────────────
@@ -152,7 +156,7 @@ fn detect_dust_spending() {
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
     assert!(has_finding(&report, VulnerabilityType::DustSpending));
-    assert_dust_advice(&report, VulnerabilityType::DustSpending);
+    assert_dust_advice(&report, VulnerabilityType::DustSpending, "from now on");
 }
 
 /// Signs and broadcasts a raw spend of `inputs` from `wallet`, then mines it.
@@ -243,6 +247,62 @@ fn coins_of_one_address_spent_together_link_nothing_new() {
             report.findings
         );
     }
+}
+
+/// Mempool verdict on `coin` spent alone as fee to one 0-value OP_RETURN carrying `data`,
+/// with the fee rate it pays in sat/vB.
+fn fee_only_spend(
+    wallet: &corepc_node::Client,
+    coin: &Input,
+    sats: u64,
+    data: &[u8; 4],
+    len: usize,
+) -> (serde_json::Value, f64) {
+    let raw = wallet
+        .create_raw_transaction(
+            std::slice::from_ref(coin),
+            &[Output::new(
+                wallet.new_address().unwrap(),
+                Amount::from_sat(1),
+            )],
+        )
+        .unwrap();
+    let mut tx = raw.transaction().unwrap();
+    let push =
+        corepc_node::client::bitcoin::script::PushBytesBuf::try_from(data[..len].to_vec()).unwrap();
+    tx.output = vec![TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::new_op_return(push),
+    }];
+    let stx = wallet
+        .sign_raw_transaction_with_wallet(&tx)
+        .unwrap()
+        .into_model()
+        .unwrap()
+        .tx;
+    let hex = corepc_node::client::bitcoin::consensus::encode::serialize_hex(&stx);
+    let verdict: serde_json::Value = wallet
+        .call("testmempoolaccept", &[serde_json::json!([hex])])
+        .unwrap();
+    (verdict[0].clone(), sats as f64 / stx.vsize() as f64)
+}
+
+#[test]
+fn the_fee_only_spend_in_the_dust_advice_is_standard() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let coin = fund_coins(&node, &alice, 1, 546).remove(0);
+
+    // Without data the tx is 61 non-witness bytes, under Core's 65-byte minimum.
+    let (bare, _) = fee_only_spend(&alice, &coin, 546, b"ash!", 0);
+    assert_eq!(bare["allowed"], false, "{bare}");
+    assert_eq!(bare["reject-reason"], "tx-size-small", "{bare}");
+
+    let (with_data, rate) = fee_only_spend(&alice, &coin, 546, b"ash!", 4);
+    assert_eq!(with_data["allowed"], true, "{with_data}");
+    assert!((5.5..6.5).contains(&rate), "about 6 sat/vB: {rate}");
 }
 
 // ─── 13. Dust Attack Detection ─────────────────────────────────────────────

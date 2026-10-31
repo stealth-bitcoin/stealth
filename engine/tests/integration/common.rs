@@ -56,9 +56,9 @@ pub fn has_finding(report: &stealth_engine::Report, vtype: VulnerabilityType) ->
         .any(|f| f.vulnerability_type == vtype)
 }
 
-/// The correction of the first finding of `vtype`, which must say freeze first and warn that
-/// an inscription or runes spent as fee are lost.
-pub fn assert_dust_advice(report: &stealth_engine::Report, vtype: VulnerabilityType) {
+/// The correction of the first finding of `vtype` says freeze first, contains `needle`
+/// and never says to bump the fee to consume the coin.
+pub fn assert_dust_advice(report: &stealth_engine::Report, vtype: VulnerabilityType, needle: &str) {
     let correction = report
         .findings
         .iter()
@@ -66,10 +66,7 @@ pub fn assert_dust_advice(report: &stealth_engine::Report, vtype: VulnerabilityT
         .and_then(|f| f.correction.as_deref())
         .unwrap_or_default();
     assert!(correction.starts_with("Freeze"), "{correction}");
-    assert!(
-        correction.contains("ordinals inscription or runes"),
-        "{correction}"
-    );
+    assert!(correction.contains(needle), "{needle}: {correction}");
     assert!(!correction.contains("bump fee"), "{correction}");
 }
 

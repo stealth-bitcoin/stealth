@@ -177,5 +177,5 @@ fn detect_toxic_change() {
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
     assert!(has_finding(&report, VulnerabilityType::ToxicChange));
-    assert_dust_advice(&report, VulnerabilityType::ToxicChange);
+    assert_dust_advice(&report, VulnerabilityType::ToxicChange, "WabiSabi");
 }
