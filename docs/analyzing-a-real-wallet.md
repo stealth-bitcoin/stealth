@@ -20,6 +20,11 @@ Your Bitcoin Core node needs:
   index is a one-time cost (a few gigabytes, one pass); the node stays usable
   while it builds.
 
+Bitcoin Core 28 or later is recommended. From 28.0 on, `listtransactions`
+reports `mempoolconflicts`; on an older node, a transaction replaced in the
+mempool but not yet mined (an unmined fee bump, a double spend) is listed as
+unavailable rather than as in conflict with the mempool.
+
 Example `bitcoin.conf` additions:
 
 ```

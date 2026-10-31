@@ -103,7 +103,11 @@ was double-spent, in which case they can never confirm). The abandoned list fill
 when someone abandons a transaction in Stealth's cache wallet; one abandoned in
 the user's own wallet lands in `unavailable_txids`. A wallet transaction the
 node cannot serve still fails the scan when it is confirmed, or when the node
-answers with any error other than not found. A fresh scan wallet
+answers with any error other than not found. `mempoolconflicts`,
+which `mempool_conflicted_txids` relies on, appeared in Bitcoin Core 28.0; on
+an older node an unmined fee bump's original lands in `unavailable_txids`. A
+scan that hits an unconfirmed transaction the node does not have while the
+node is still loading its mempool fails, asking to scan again later. A fresh scan wallet
 only sees the active chain and the mempool, so through this API the lists can
 be non-empty only for a scan with `cache_wallet`, whose wallet was watching
 when these transactions were in the mempool.
