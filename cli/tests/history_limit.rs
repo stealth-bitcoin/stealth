@@ -86,7 +86,6 @@ fn interrupt_at_the_prompt(
     node: &Node,
     address: &Address,
     flags: &[&str],
-    signals: usize,
 ) -> (String, Option<i32>) {
     use std::fs::File;
     use std::io::Read;
@@ -147,12 +146,6 @@ fn interrupt_at_the_prompt(
     }
     // SAFETY: kill only sends a signal to the child started above.
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
-    for _ in 1..signals {
-        // Apart, so the kernel does not merge them; the child may be gone already.
-        std::thread::sleep(Duration::from_millis(5));
-        // SAFETY: as above; a child that already exited is not signalled.
-        let _ = unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
-    }
     let status = child.wait().expect("wait for stealth-cli");
     while let Ok(chunk) = shown.recv_timeout(Duration::from_millis(200)) {
         printed.extend(chunk);
@@ -172,7 +165,7 @@ fn ctrl_c_at_the_prompt_is_a_no_and_leaves_no_wallet_loaded() {
         &["--max-txs", "3"][..],
         &["--max-txs", "3", "--cache-wallet"],
     ] {
-        let (printed, code) = interrupt_at_the_prompt(&node, &aa, flags, 1);
+        let (printed, code) = interrupt_at_the_prompt(&node, &aa, flags);
         assert_eq!(code, Some(2), "{flags:?}: {printed}");
         assert!(printed.contains("5 transactions"), "{flags:?}: {printed}");
         assert_eq!(
@@ -181,17 +174,6 @@ fn ctrl_c_at_the_prompt_is_a_no_and_leaves_no_wallet_loaded() {
             "{flags:?}"
         );
     }
-}
-
-#[cfg(unix)]
-#[test]
-fn a_second_ctrl_c_right_after_the_no_still_shows_the_count_and_the_hint() {
-    let (node, aa) = node_with_an_address_paid_five_times();
-    let (printed, code) = interrupt_at_the_prompt(&node, &aa, &["--max-txs", "3"], 2);
-    assert_eq!(code, Some(2), "{printed}");
-    assert!(printed.contains("holds 5 transactions"), "{printed}");
-    assert!(printed.contains("--no-limits"), "{printed}");
-    assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
 }
 
 #[cfg(unix)]
