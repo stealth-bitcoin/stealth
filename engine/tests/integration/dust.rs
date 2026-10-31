@@ -612,6 +612,43 @@ fn a_descriptor_scan_without_a_ranged_descriptor_is_partial() {
     }
 }
 
+#[test]
+fn a_descriptor_scan_of_a_bare_extended_key_is_full() {
+    let (node, _, _, _) = dust_merged_with_a_third_coin(false);
+    // The bare key has no `*`; it is expanded to a ranged receive chain before the scan.
+    let tpub = wallet_descriptors(&node_wallet(&node, "alice"))
+        .into_iter()
+        .find(|d| d.starts_with("wpkh(") && d.contains("/0/*"))
+        .and_then(|d| {
+            let start = d.find("tpub")?;
+            let rest = &d[start..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric())
+                .unwrap_or(rest.len());
+            Some(rest[..end].to_owned())
+        })
+        .expect("a wpkh receive descriptor with a tpub");
+    let gateway = gateway_for(&node);
+    let report = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Descriptor(tpub))
+        .unwrap();
+    assert!(
+        has_finding(&report, VulnerabilityType::Dust),
+        "{:?}",
+        report.findings
+    );
+    for kind in [
+        VulnerabilityType::DustSpending,
+        VulnerabilityType::ToxicChange,
+    ] {
+        assert!(
+            !has_finding(&report, kind),
+            "{kind:?}: {:?}",
+            report.findings
+        );
+    }
+}
+
 /// A UTXO scan of the pasted coin, with `ownership` as the ownership descriptors.
 fn utxo_scan_owned_by(
     node: &Node,

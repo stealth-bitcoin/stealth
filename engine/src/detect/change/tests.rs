@@ -910,3 +910,28 @@ fn a_full_scan_with_only_non_ranged_descriptors_does_not_count_strangers() {
     let findings = toxic_run(toxic_with_strangers(&a, 1, None));
     assert!(findings.is_empty(), "{findings:?}");
 }
+
+#[test]
+fn each_list_of_tied_addresses_is_capped_on_its_own() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let own: Vec<_> = (3..8).map(wpkh).collect();
+    let mut extra: Vec<Coin> = own.iter().map(|o| coin(o, 3_000)).collect();
+    extra.extend((0..6).map(|i| coin(&wpkh(150 + i), 30_000)));
+    let also_ours: Vec<_> = own.iter().collect();
+    let findings = toxic_findings(&a, &b, extra, &also_ours);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    // Six known and six possible ties: five of each named, one of each counted.
+    assert_eq!(
+        f.description.matches(" and 1 more").count(),
+        2,
+        "{}",
+        f.description
+    );
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(details["tied_addresses"].as_array().map(Vec::len), Some(6));
+    assert_eq!(
+        details["possibly_tied_addresses"].as_array().map(Vec::len),
+        Some(6)
+    );
+}
