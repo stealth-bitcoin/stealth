@@ -102,6 +102,8 @@ struct FakeGateway {
     failing: HashSet<OutPoint>,
     asked: RefCell<Vec<OutPoint>>,
     batches: RefCell<Vec<Vec<Txid>>>,
+    vanished: HashSet<Txid>,
+    calls: RefCell<Vec<&'static str>>,
 }
 
 impl FakeGateway {
@@ -118,6 +120,8 @@ impl FakeGateway {
             failing: HashSet::new(),
             asked: RefCell::new(Vec::new()),
             batches: RefCell::new(Vec::new()),
+            vanished: HashSet::new(),
+            calls: RefCell::new(Vec::new()),
         }
     }
 }
@@ -169,6 +173,11 @@ impl BlockchainGateway for FakeGateway {
         if self.broken.contains(&txid) {
             return Err(AnalysisError::EnvironmentUnavailable(format!("bad {txid}")));
         }
+        if self.vanished.contains(&txid) {
+            return Err(AnalysisError::EnvironmentUnavailable(format!(
+                "gone {txid}"
+            )));
+        }
         self.transactions
             .get(&txid)
             .cloned()
@@ -177,6 +186,7 @@ impl BlockchainGateway for FakeGateway {
 
     fn get_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
         self.batches.borrow_mut().push(txids.to_vec());
+        self.calls.borrow_mut().push("getrawtransaction");
         // As the trait's default: only a tx the node cannot find stays per tx.
         txids
             .iter()
@@ -189,6 +199,7 @@ impl BlockchainGateway for FakeGateway {
 
     fn outputs_in_utxo_set(&self, outpoints: &[OutPoint]) -> Result<UtxoSetResults, AnalysisError> {
         self.asked.borrow_mut().extend_from_slice(outpoints);
+        self.calls.borrow_mut().push("gettxout");
         let unspent = self
             .unspent
             .clone()
@@ -633,13 +644,15 @@ fn dust_descriptor_scan(
     parent_confirmations: u32,
     child_confirmations: Option<u32>,
 ) -> crate::types::Report {
-    let mut transactions = HashMap::from([(
-        txid(DUST_PARENT),
-        DecodedTransaction {
-            confirmations: parent_confirmations,
-            ..dust_parent()
-        },
-    )]);
+    let parent = DecodedTransaction {
+        confirmations: parent_confirmations,
+        ..dust_parent()
+    };
+    gateway
+        .transactions
+        .entry(txid(DUST_PARENT))
+        .or_insert_with(|| parent.clone());
+    let mut transactions = HashMap::from([(txid(DUST_PARENT), parent)]);
     let mut wallet_txs = vec![receive(DUST_PARENT)];
     if let Some(confirmations) = child_confirmations {
         transactions.insert(
@@ -678,6 +691,7 @@ fn dust_descriptor_scan(
 #[test]
 fn dust_absent_from_the_utxo_set_with_its_creating_tx_gone_is_unknown() {
     let mut gateway = without_history();
+    gateway.vanished.insert(txid(DUST_PARENT));
     let report = dust_descriptor_scan(&mut gateway, &[], 0, None);
     assert_eq!(dust_status(&report, 0).as_deref(), Some("unknown"));
     assert_eq!(dust_status(&report, 1).as_deref(), Some("unknown"));
@@ -812,4 +826,93 @@ fn a_descriptor_scan_does_not_look_up_wallet_listed_dust() {
         gateway.asked.borrow().as_slice(),
         [OutPoint::new(txid(DUST_PARENT), 0)]
     );
+}
+
+#[test]
+fn unconfirmed_dust_listed_by_the_address_history_is_unspent_without_asking() {
+    let parent = DecodedTransaction {
+        confirmations: 0,
+        ..dust_parent()
+    };
+    let listed = |vout| Utxo {
+        vout,
+        amount: Amount::from_sat(600),
+        confirmations: 0,
+        ..unspent(DUST_PARENT)
+    };
+    let history = WalletHistory {
+        wallet_txs: vec![receive(DUST_PARENT)],
+        utxos: vec![listed(0), listed(1)],
+        transactions: HashMap::from([(txid(DUST_PARENT), parent.clone())]),
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::from([addr()]),
+        ranged_addresses: HashSet::new(),
+    };
+    let mut gateway = FakeGateway::new(Ok(history));
+    gateway.transactions.insert(txid(DUST_PARENT), parent);
+    let report = dust_scan(&mut gateway);
+    assert_eq!(dust_status(&report, 0).as_deref(), Some("unspent"));
+    let freeze = report
+        .findings
+        .iter()
+        .find(|f| {
+            f.details
+                .as_ref()
+                .is_some_and(|d| d["vout"].as_u64() == Some(0))
+        })
+        .and_then(|f| f.correction.clone())
+        .unwrap_or_default();
+    assert!(freeze.contains("freeze"), "{freeze}");
+    assert!(gateway.asked.borrow().is_empty());
+}
+
+#[test]
+fn the_creating_tx_is_checked_before_the_utxo_set() {
+    let mut gateway = without_history();
+    let report = dust_descriptor_scan(&mut gateway, &[], 10, None);
+    assert_eq!(dust_status(&report, 0).as_deref(), Some("spent"));
+    assert_eq!(
+        gateway.calls.borrow().as_slice(),
+        ["getrawtransaction", "gettxout"]
+    );
+}
+
+#[test]
+fn dust_whose_creating_tx_left_the_chain_is_unknown() {
+    let mut reorged = without_history();
+    reorged.transactions.insert(
+        txid(DUST_PARENT),
+        DecodedTransaction {
+            confirmations: 0,
+            ..dust_parent()
+        },
+    );
+    let mut gone = without_history();
+    gone.vanished.insert(txid(DUST_PARENT));
+    for gateway in [&mut reorged, &mut gone] {
+        let report = dust_descriptor_scan(gateway, &[], 10, None);
+        assert_eq!(dust_status(&report, 0).as_deref(), Some("unknown"));
+    }
+}
+
+#[test]
+fn pasted_dust_whose_creating_tx_is_unconfirmed_is_not_called_spent() {
+    let mut gateway = without_history();
+    gateway.transactions.insert(
+        txid(DUST_PARENT),
+        DecodedTransaction {
+            confirmations: 0,
+            ..dust_parent()
+        },
+    );
+    let pasted = UtxoInput {
+        txid: txid(DUST_PARENT),
+        vout: 1,
+        value: None,
+        address: None,
+    };
+    let report = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted]))
+        .expect("utxo scan");
+    assert_eq!(dust_status(&report, 1).as_deref(), Some("unspent"));
 }
