@@ -102,6 +102,18 @@ fn answer_at_the_prompt(
     flags: &[&str],
     typed: Option<(std::time::Duration, &str)>,
 ) -> (String, String, Option<i32>) {
+    answer_at_the_prompt_typed_ahead(node, input, flags, "", typed)
+}
+
+/// Like [`answer_at_the_prompt`], typing `ahead` as soon as the scan starts.
+#[cfg(unix)]
+fn answer_at_the_prompt_typed_ahead(
+    node: &Node,
+    input: &[String],
+    flags: &[&str],
+    ahead: &str,
+    typed: Option<(std::time::Duration, &str)>,
+) -> (String, String, Option<i32>) {
     use std::fs::File;
     use std::io::{Read, Write};
     use std::os::fd::{FromRawFd, OwnedFd};
@@ -141,6 +153,7 @@ fn answer_at_the_prompt(
     let mut child = child.spawn().expect("run stealth-cli");
     let mut stdout = child.stdout.take().expect("stdout");
     let mut keyboard = File::from(master.try_clone().expect("dup master"));
+    keyboard.write_all(ahead.as_bytes()).expect("type ahead");
 
     let (sent, shown) = mpsc::channel();
     std::thread::spawn(move || {
@@ -273,7 +286,7 @@ fn descriptor_input(address: &Address) -> Vec<String> {
 
 #[cfg(unix)]
 #[test]
-fn a_utxo_scan_asks_about_the_pasted_outputs_addresses_and_ctrl_c_is_a_no() {
+fn a_utxo_scan_asks_about_the_utxo_files_addresses_and_ctrl_c_is_a_no() {
     let (node, aa) = node_with_an_address_paid_five_times();
     let alice = corepc_node::Client::new_with_auth(
         &format!("{}/wallet/alice", node.rpc_url()),
@@ -294,7 +307,9 @@ fn a_utxo_scan_asks_about_the_pasted_outputs_addresses_and_ctrl_c_is_a_no() {
     let _ = std::fs::remove_file(&utxos);
     assert_eq!(code, Some(2), "{printed}");
     assert!(
-        printed.contains("The history of the pasted outputs' addresses holds 5 transactions"),
+        printed.contains(
+            "The history of the addresses of the outputs in the UTXO file holds 5 transactions"
+        ),
         "{printed}"
     );
     assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
@@ -470,4 +485,22 @@ fn a_scan_started_with_sigint_ignored_keeps_ignoring_it() {
     let _ = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     let _ = child.wait();
     assert!(still_running, "an inherited SIG_IGN must stay in force");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_enter_typed_during_the_rescan_does_not_answer_the_question() {
+    let (node, aa) = node_with_an_address_paid_five_times();
+    let (printed, report, code) = answer_at_the_prompt_typed_ahead(
+        &node,
+        &descriptor_input(&aa),
+        &["--max-txs", "3"],
+        "\n",
+        Some((std::time::Duration::from_millis(500), "y\n")),
+    );
+    assert!(
+        report.contains("Scanned 5 transactions"),
+        "{printed}{report}"
+    );
+    assert!(matches!(code, Some(0 | 1)), "{code:?}: {printed}");
 }

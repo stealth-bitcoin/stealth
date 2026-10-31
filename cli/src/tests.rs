@@ -783,6 +783,34 @@ mod history_limit {
     }
 
     #[test]
+    fn a_utxo_stop_names_the_addresses_of_the_outputs_in_the_utxo_file() {
+        let message = scan_error(AnalysisError::HistoryTooLarge {
+            of: HistoryOf::PastedAddresses,
+            tx_count: 12_345,
+            limit: 5_000,
+        });
+        assert!(
+            message.starts_with(
+                "the history of the addresses of the outputs in the UTXO file holds 12345 \
+                 transactions, more than the limit of 5000"
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("pasted"), "{message}");
+        assert!(message.contains("--no-limits"), "{message}");
+    }
+
+    #[test]
+    fn a_wallet_stop_keeps_the_shared_wording() {
+        let error = AnalysisError::HistoryTooLarge {
+            of: HistoryOf::Wallet,
+            tx_count: 12_345,
+            limit: 5_000,
+        };
+        assert!(scan_error(error.clone()).starts_with(&error.to_string()));
+    }
+
+    #[test]
     fn any_other_error_keeps_its_message() {
         let error = AnalysisError::EnvironmentUnavailable("down".into());
         assert_eq!(scan_error(error.clone()), error.to_string());
@@ -807,7 +835,9 @@ mod history_limit {
         );
         let (_, pasted) = answer_about(HistoryOf::PastedAddresses, "n\n");
         assert!(
-            pasted.starts_with("The history of the pasted outputs' addresses holds 12345"),
+            pasted.starts_with(
+                "The history of the addresses of the outputs in the UTXO file holds 12345"
+            ),
             "{pasted}"
         );
     }
@@ -821,6 +851,7 @@ mod history_limit {
                 io::sink,
                 interrupts,
                 || true,
+                || {},
             )),
             ..HistoryLimit::at_most(3)
         }
@@ -850,6 +881,7 @@ mod history_limit {
                 io::sink,
                 Arc::clone(&interrupts),
                 || true,
+                || {},
             )),
             ..HistoryLimit::at_most(3)
         };
@@ -878,6 +910,7 @@ mod history_limit {
                 io::sink,
                 Arc::clone(&interrupts),
                 || true,
+                || {},
             )),
             ..HistoryLimit::at_most(3)
         };
@@ -924,6 +957,34 @@ mod history_limit {
     }
 
     #[test]
+    fn typed_ahead_input_is_dropped_before_the_question_shows() {
+        struct Log(Arc<std::sync::Mutex<Vec<&'static str>>>);
+        impl io::Write for Log {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().push("shown");
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (shown, dropped) = (Arc::clone(&events), Arc::clone(&events));
+        let limit = HistoryLimit {
+            ask: Some(terminal_ask(
+                || "n\n".as_bytes(),
+                move || Log(Arc::clone(&shown)),
+                Arc::new(Interrupts::default()),
+                || true,
+                move || dropped.lock().unwrap().push("dropped"),
+            )),
+            ..HistoryLimit::at_most(3)
+        };
+        let _ = limit.check(5);
+        assert_eq!(events.lock().unwrap().first(), Some(&"dropped"));
+    }
+
+    #[test]
     fn a_scan_whose_interrupt_is_ignored_is_not_asked() {
         assert!(!should_ask(true, true, false));
     }
@@ -962,6 +1023,7 @@ mod history_limit {
                 move || Shared(Arc::clone(&screen)),
                 Arc::new(Interrupts::default()),
                 move || probe.load(std::sync::atomic::Ordering::Relaxed),
+                || {},
             )),
             ..HistoryLimit::at_most(3)
         };
@@ -1035,7 +1097,9 @@ mod usage {
         let entry = entry.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(entry.contains("the wallet's history"), "{entry}");
         assert!(
-            entry.contains("in UTXO mode, the history of the pasted outputs' addresses"),
+            entry.contains(
+                "in UTXO mode, the history of the addresses of the outputs in the UTXO file"
+            ),
             "{entry}"
         );
         assert!(

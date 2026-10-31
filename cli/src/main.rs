@@ -73,6 +73,7 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
             io::stderr,
             Arc::clone(&interrupts),
             in_the_foreground,
+            discard_typed_ahead,
         )
     });
     let mut settings = opts.engine_settings()?;
@@ -93,13 +94,26 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     Ok(scan_succeeded(&report.summary))
 }
 
+/// The CLI reads its outputs from a file; "pasted" is the web and API's word.
+const UTXO_FILE_HISTORY: &str = "the history of the addresses of the outputs in the UTXO file";
+
 /// A stop at the history limit says how to scan anyway.
 fn scan_error(error: AnalysisError) -> String {
     match error {
-        AnalysisError::HistoryTooLarge { tx_count, .. } => {
+        AnalysisError::HistoryTooLarge {
+            of,
+            tx_count,
+            limit,
+        } => {
+            let whose = match of {
+                HistoryOf::Wallet => "the wallet history",
+                HistoryOf::PastedAddresses => UTXO_FILE_HISTORY,
+            };
             format!(
-                "{error}; to scan it anyway, pass --no-limits, or --max-txs with at least \
-                 {tx_count}, higher if the history may grow"
+                "{whose} holds {tx_count} transactions, more than the limit of {limit}; \
+                 loading it can take long and put a heavy load on the node; to scan it \
+                 anyway, pass --no-limits, or --max-txs with at least {tx_count}, higher if \
+                 the history may grow"
             )
         }
         other => other.to_string(),
@@ -154,11 +168,23 @@ fn in_the_foreground() -> bool {
     true
 }
 
+/// Drops what was typed on the terminal and not read yet.
+#[cfg(unix)]
+fn discard_typed_ahead() {
+    use nix::sys::termios::{tcflush, FlushArg};
+    let _ = tcflush(io::stdin(), FlushArg::TCIFLUSH);
+}
+
+#[cfg(not(unix))]
+fn discard_typed_ahead() {}
+
 /// Asks on `output` whether to load a history above the limit.
 fn show_question(of: HistoryOf, tx_count: u64, limit: u64, output: &mut impl Write) {
     let whose = match of {
         HistoryOf::Wallet => "This wallet's history",
-        HistoryOf::PastedAddresses => "The history of the pasted outputs' addresses",
+        HistoryOf::PastedAddresses => {
+            "The history of the addresses of the outputs in the UTXO file"
+        }
     };
     let _ = write!(
         output,
@@ -237,6 +263,7 @@ fn terminal_ask<R: BufRead, W: Write>(
     output: impl Fn() -> W + Send + Sync + 'static,
     interrupts: Arc<Interrupts>,
     in_the_foreground: impl Fn() -> bool + Send + Sync + 'static,
+    discard_typed_ahead: impl Fn() + Send + Sync + 'static,
 ) -> AskToGoOn {
     let input = Arc::new(input);
     Arc::new(move |of, tx_count, limit| {
@@ -245,6 +272,8 @@ fn terminal_ask<R: BufRead, W: Write>(
         if !in_the_foreground() {
             return false;
         }
+        // Keys pressed during the long rescan must not answer a question not yet asked.
+        discard_typed_ahead();
         let (reply, answer) = mpsc::channel();
         interrupts.begin_asking(reply.clone());
         show_question(of, tx_count, limit, &mut output());
@@ -788,12 +817,13 @@ fn usage() -> String {
         "HISTORY LIMIT:",
         "  --max-txs <N>            Stop before loading a history of more than N",
         "                           transactions (default: 5000): the wallet's history,",
-        "                           or in UTXO mode, the history of the pasted outputs'",
-        "                           addresses. Loading a large history can take long",
-        "                           and put a heavy load on the node. The scan asks",
-        "                           whether to go on instead of stopping, but only",
-        "                           when run in the foreground with stdin and stderr",
-        "                           on a terminal; Ctrl-C there counts as no.",
+        "                           or in UTXO mode, the history of the addresses of",
+        "                           the outputs in the UTXO file. Loading a large",
+        "                           history can take long and put a heavy load on the",
+        "                           node. The scan asks whether to go on instead of",
+        "                           stopping, but only when run in the foreground",
+        "                           with stdin and stderr on a terminal; Ctrl-C there",
+        "                           counts as no.",
         "  --no-limits              Lift the limit\n",
         "RPC CONNECTION:",
         "  --rpc-url <URL>          bitcoind RPC endpoint",
