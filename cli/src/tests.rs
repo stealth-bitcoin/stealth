@@ -538,10 +538,11 @@ mod ordering {
         assert!(
             text.contains(&format!(
                 "Left out 1 transaction that is unconfirmed and that this node no longer has (it \
-                 may have expired or been evicted from the mempool, never been broadcast, or \
-                 depend on a transaction that was double-spent). Unless a transaction it depends \
-                 on was double-spent, it may still confirm; until then it is not part of the \
-                 history the wallet sees. Stealth does not analyze it.\n  {CONFLICTED}\n"
+                 may have been replaced or double-spent, expired or been evicted from the \
+                 mempool, never been broadcast, or depend on a transaction that was). It may \
+                 still confirm unless a conflicting transaction is mined; until then it is not \
+                 part of the history the wallet sees. Stealth does not analyze it.\n  \
+                 {CONFLICTED}\n"
             )),
             "{text}"
         );
@@ -553,10 +554,10 @@ mod ordering {
         assert!(
             text.contains(&format!(
                 "Left out 2 transactions that are unconfirmed and that this node no longer has \
-                 (they may have expired or been evicted from the mempool, never been broadcast, \
-                 or depend on a transaction that was double-spent). Unless a transaction they \
-                 depend on was double-spent, they may still confirm; until then they are not part \
-                 of the history the wallet sees. Stealth does not analyze them.\n  \
+                 (they may have been replaced or double-spent, expired or been evicted from the \
+                 mempool, never been broadcast, or depend on a transaction that was). They may \
+                 still confirm unless a conflicting transaction is mined; until then they are not \
+                 part of the history the wallet sees. Stealth does not analyze them.\n  \
                  {CONFLICTED}\n  {REPLACEMENT}\n"
             )),
             "{text}"

@@ -157,21 +157,18 @@ const LEFT_OUT = {
   // A tx never broadcast was not seen, so this note says nothing about the network.
   unavailable: {
     settled: false,
-    one: 'that is unconfirmed and that this node no longer has (it may have expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was double-spent)',
-    many: 'that are unconfirmed and that this node no longer has (they may have expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was double-spent)',
+    one: 'that is unconfirmed and that this node no longer has (it may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was)',
+    many: 'that are unconfirmed and that this node no longer has (they may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was)',
     beforeOne: null,
     beforeMany: null,
-    // When it would never confirm.
-    unlessOne: 'Unless a transaction it depends on was double-spent',
-    unlessMany: 'Unless a transaction they depend on was double-spent',
+    // What would stop it from confirming.
+    unless: 'a conflicting transaction is mined',
   },
 }
 
-// Who may still confirm, with the reason's condition when it has one.
-function mayConfirm(reason, one) {
-  const unless = one ? reason.unlessOne : reason.unlessMany
-  if (!unless) return one ? 'It' : 'They'
-  return `${unless}, ${one ? 'it' : 'they'}`
+// "may still confirm", with what would stop it when the reason says.
+function mayConfirm(reason) {
+  return reason.unless ? `may still confirm unless ${reason.unless}` : 'may still confirm'
 }
 
 function LeftOutNote({ items, reason }) {
@@ -184,7 +181,7 @@ function LeftOutNote({ items, reason }) {
         {one ? reason.one : reason.many}
         {reason.settled
           ? `, so ${one ? 'it is' : 'they are'} not part of the wallet's history.`
-          : `. ${mayConfirm(reason, one)} may still confirm; until then ${one ? 'it is' : 'they are'} not part of the history the wallet sees.`}{' '}
+          : `. ${one ? 'It' : 'They'} ${mayConfirm(reason)}; until then ${one ? 'it is' : 'they are'} not part of the history the wallet sees.`}{' '}
         {reason.beforeOne &&
           `${one ? 'It' : 'They'} may still have been seen by the network before ${one ? reason.beforeOne : reason.beforeMany}; `}
         Stealth does not analyze {one ? 'it' : 'them'}.

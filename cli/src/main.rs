@@ -265,8 +265,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
                    with another one",
             before_one: Some("it became conflicted"),
             before_many: Some("they became conflicted"),
-            unless_one: None,
-            unless_many: None,
+            unless: None,
         },
     );
     let in_mempool_conflict: Vec<String> = stats
@@ -288,8 +287,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
             many: "that conflict, or depend on ones that conflict, with transactions in the mempool",
             before_one: Some("the conflicting one reached the mempool"),
             before_many: Some("the conflicting ones reached the mempool"),
-            unless_one: None,
-            unless_many: None,
+            unless: None,
         },
     );
     let abandoned: Vec<String> = stats
@@ -306,8 +304,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
             many: "that were abandoned in the wallet",
             before_one: Some("it was abandoned"),
             before_many: Some("they were abandoned"),
-            unless_one: None,
-            unless_many: None,
+            unless: None,
         },
     );
 
@@ -321,16 +318,15 @@ fn text_report(report: &stealth_engine::Report) -> String {
         &unavailable,
         &LeftOutReason {
             settled: false,
-            one: "that is unconfirmed and that this node no longer has (it may have expired or \
-                  been evicted from the mempool, never been broadcast, or depend on a \
-                  transaction that was double-spent)",
-            many: "that are unconfirmed and that this node no longer has (they may have expired \
-                   or been evicted from the mempool, never been broadcast, or depend on a \
-                   transaction that was double-spent)",
+            one: "that is unconfirmed and that this node no longer has (it may have been \
+                  replaced or double-spent, expired or been evicted from the mempool, never been \
+                  broadcast, or depend on a transaction that was)",
+            many: "that are unconfirmed and that this node no longer has (they may have been \
+                   replaced or double-spent, expired or been evicted from the mempool, never been \
+                   broadcast, or depend on a transaction that was)",
             before_one: None,
             before_many: None,
-            unless_one: Some("Unless a transaction it depends on was double-spent"),
-            unless_many: Some("Unless a transaction they depend on was double-spent"),
+            unless: Some("a conflicting transaction is mined"),
         },
     );
 
@@ -381,9 +377,8 @@ struct LeftOutReason {
     /// What the network may have seen the tx before, when it was broadcast.
     before_one: Option<&'static str>,
     before_many: Option<&'static str>,
-    /// When it would never confirm, for a tx that otherwise may.
-    unless_one: Option<&'static str>,
-    unless_many: Option<&'static str>,
+    /// What would stop a tx that may still confirm from confirming.
+    unless: Option<&'static str>,
 }
 
 /// A note naming the wallet txs a scan left out, one per line, and why.
@@ -391,14 +386,13 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
     if items.is_empty() {
         return;
     }
-    let (count, why, part, may, before, unless, them) = if items.len() == 1 {
+    let (count, why, part, may, before, them) = if items.len() == 1 {
         (
             "1 transaction".to_owned(),
             reason.one,
             "it is",
             "It",
             reason.before_one,
-            reason.unless_one,
             "it",
         )
     } else {
@@ -409,19 +403,18 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
             "they are",
             "They",
             reason.before_many,
-            reason.unless_many,
             "them",
         )
     };
     let standing = if reason.settled {
         format!(", so {part} not part of the wallet's history.")
     } else {
-        let may = match unless {
-            Some(unless) => format!("{unless}, {}", may.to_lowercase()),
-            None => may.to_owned(),
-        };
+        let unless = reason
+            .unless
+            .map_or(String::new(), |unless| format!(" unless {unless}"));
         format!(
-            ". {may} may still confirm; until then {part} not part of the history the wallet sees."
+            ". {may} may still confirm{unless}; until then {part} not part of the history the \
+             wallet sees."
         )
     };
     let seen = before.map_or(String::new(), |before| {
