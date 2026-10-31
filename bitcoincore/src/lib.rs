@@ -2416,6 +2416,27 @@ mod tests {
     }
 
     #[test]
+    fn the_wallet_history_names_a_conflicted_tx_only_listunspent_shows() {
+        let rpc = answering_node(vec![
+            ("getblockcount", json!(112)),
+            ("listtransactions", json!([])),
+            (
+                "listunspent",
+                json!([{
+                    "txid": ORIGINAL, "vout": 1, "address": ADDR, "amount": 0.0089859,
+                    "confirmations": -1, "spendable": true, "solvable": true, "safe": false,
+                }]),
+            ),
+        ]);
+        let history = rpc.load_history_for_wallet("alice").unwrap();
+        assert!(history.utxos.is_empty());
+        assert_eq!(
+            history.conflicted_txids.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+    }
+
+    #[test]
     fn a_negative_getrawtransaction_depth_parses_as_unconfirmed() {
         let raw = |confirmations: i64| -> RawTransaction {
             serde_json::from_value(json!({
@@ -2789,13 +2810,51 @@ mod tests {
     /// null, a raw 200 body when it is a string) and every other call with an
     /// empty result.
     fn fake_node(failing: &'static str, error: serde_json::Value) -> BitcoinCoreRpc {
+        serve_node(move |method| {
+            if method != failing {
+                ("200 OK", json!({ "result": {}, "error": null }).to_string())
+            } else if let Some(raw) = error.as_str() {
+                // A string stands for a raw, non-JSON 200 reply.
+                ("200 OK", raw.to_string())
+            } else if error.is_null() {
+                // Null stands for Core's empty-bodied 403.
+                ("403 Forbidden", String::new())
+            } else {
+                (
+                    "500 Internal Server Error",
+                    json!({ "result": null, "error": error }).to_string(),
+                )
+            }
+        })
+    }
+
+    /// A node answering each method with its result from `results`.
+    fn answering_node(results: Vec<(&'static str, serde_json::Value)>) -> BitcoinCoreRpc {
+        serve_node(move |method| {
+            let result = results
+                .iter()
+                .find(|(name, _)| *name == method)
+                .map(|(_, result)| result.clone())
+                .unwrap_or_else(|| panic!("unexpected call {method}"));
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        })
+    }
+
+    // Serves JSON-RPC over HTTP, replying to each request by its method.
+    fn serve_node(
+        reply: impl Fn(&str) -> (&'static str, String) + Send + Sync + 'static,
+    ) -> BitcoinCoreRpc {
         use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let reply = Arc::new(reply);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
-                let error = error.clone();
+                let reply = Arc::clone(&reply);
                 std::thread::spawn(move || {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     let mut stream = stream;
@@ -2821,22 +2880,9 @@ mod tests {
                         let method = request
                             .get("method")
                             .or_else(|| request.get(0).and_then(|r| r.get("method")))
-                            .cloned()
+                            .and_then(|m| m.as_str().map(str::to_owned))
                             .unwrap_or_default();
-                        let (status, reply) = if method != failing {
-                            ("200 OK", json!({ "result": {}, "error": null }).to_string())
-                        } else if let Some(raw) = error.as_str() {
-                            // A string stands for a raw, non-JSON 200 reply.
-                            ("200 OK", raw.to_string())
-                        } else if error.is_null() {
-                            // Null stands for Core's empty-bodied 403.
-                            ("403 Forbidden", String::new())
-                        } else {
-                            (
-                                "500 Internal Server Error",
-                                json!({ "result": null, "error": error }).to_string(),
-                            )
-                        };
+                        let (status, reply) = reply(&method);
                         let _ = write!(
                             stream,
                             "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
