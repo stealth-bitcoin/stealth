@@ -18,6 +18,8 @@ export default function App() {
   const [limitExceeded, setLimitExceeded] = useState(null)
   const pollFailures = useRef(0)
   const cancelSent = useRef(false)
+  // A cancel clicked before startScan returned the id, settled once it is sent.
+  const cancelWaiting = useRef(null)
 
   useEffect(() => {
     if (!scanId) return undefined
@@ -74,19 +76,44 @@ export default function App() {
     setError(null)
     setLimitExceeded(null)
     cancelSent.current = false
+    cancelWaiting.current = null
     setScreen('loading')
+    let id
     try {
-      setScanId(await startScan(nextScan.body))
+      id = await startScan(nextScan.body)
     } catch (err) {
       console.error('Failed to start scan:', err)
       setError('Could not start the scan. Please try again.')
       setScreen('input')
+      cancelWaiting.current?.resolve()
+      cancelWaiting.current = null
+      return
+    }
+    const waiting = cancelWaiting.current
+    if (!waiting) {
+      setScanId(id)
+      return
+    }
+    cancelWaiting.current = null
+    try {
+      await cancelScan(id)
+      waiting.resolve()
+      setScreen('input')
+    } catch (err) {
+      // The job runs on; keep following it so the user can cancel again.
+      cancelSent.current = false
+      waiting.reject(err)
+      setScanId(id)
     }
   }
 
   function handleCancel() {
-    if (!scanId) return undefined
     cancelSent.current = true
+    if (!scanId) {
+      return new Promise((resolve, reject) => {
+        cancelWaiting.current = { resolve, reject }
+      })
+    }
     return cancelScan(scanId).catch((err) => {
       cancelSent.current = false
       throw err

@@ -172,6 +172,41 @@ describe('App scan flow', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('sends a cancel clicked before the scan id arrived once it does', async () => {
+    let resolveStart
+    startScan.mockReturnValue(new Promise((resolve) => { resolveStart = resolve }))
+    cancelScan.mockResolvedValue()
+    render(<App />)
+    await submitScan()
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await act(async () => {})
+    expect(cancelScan).not.toHaveBeenCalled()
+
+    await act(async () => resolveStart('scan-1'))
+    expect(cancelScan).toHaveBeenCalledWith('scan-1')
+    expect(screen.getByPlaceholderText(/paste a descriptor/i)).toBeTruthy()
+    await tick(3000)
+    expect(getScan).not.toHaveBeenCalled()
+  })
+
+  it('keeps following the scan when the early cancel cannot be sent', async () => {
+    let resolveStart
+    startScan.mockReturnValue(new Promise((resolve) => { resolveStart = resolve }))
+    cancelScan.mockRejectedValue(new Error('HTTP 500'))
+    render(<App />)
+    await submitScan()
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await act(async () => {})
+
+    await act(async () => resolveStart('scan-1'))
+    expect(screen.getByRole('button', { name: /^cancel$/i }).disabled).toBe(false)
+    queueJobs(job('done', { report: REPORT }))
+    await tick()
+    expect(getScan).toHaveBeenCalledWith('scan-1')
+    expect(screen.getByText(/no privacy issues found/i)).toBeTruthy()
+  })
+
   it('stops polling when unmounted', async () => {
     queueJobs(job('rescanning'))
     const { unmount } = render(<App />)
