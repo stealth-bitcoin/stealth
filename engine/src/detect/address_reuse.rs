@@ -35,11 +35,15 @@ impl TxGraph {
                 } else {
                     "receive"
                 };
-                // The reuse comes from change that a spend from this address sent back to it.
+                // The reuse comes from change that a payment from this address sent back to it.
                 let change_back = reuse_txids.iter().any(|t| {
                     self.get_input_addresses(t)
                         .iter()
                         .any(|ia| ia.address == *addr)
+                        && self
+                            .get_output_addresses(t)
+                            .iter()
+                            .any(|o| !self.is_ours(&o.address))
                 });
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::AddressReuse,
