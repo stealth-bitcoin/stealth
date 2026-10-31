@@ -548,6 +548,17 @@ impl BitcoinCoreRpc {
                 kept.push(Self::convert_list_transaction_entry(entry)?);
             }
         }
+        // A tx bumped twice names its first replacement; name the last one instead.
+        let firsts = left_out.replaced.clone();
+        for replaced_by in left_out.replaced.values_mut() {
+            let mut seen = BTreeSet::new();
+            while let Some(&next) = firsts.get(replaced_by) {
+                if !seen.insert(*replaced_by) {
+                    break;
+                }
+                *replaced_by = next;
+            }
+        }
         Ok((kept, left_out))
     }
 
@@ -2441,6 +2452,63 @@ mod tests {
         assert!(left_out.conflicted.is_empty());
         let kept: Vec<_> = kept.iter().map(|e| e.txid).collect();
         assert_eq!(kept, vec![txid(REPLACEMENT), txid(TXID)]);
+    }
+
+    fn unconfirmed_send(txid: &str, replaced_by: Option<&str>, abandoned: bool) -> Value {
+        json!({
+            "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 0,
+            "abandoned": abandoned, "replaced_by_txid": replaced_by, "txid": txid, "vout": 0,
+        })
+    }
+
+    #[test]
+    fn an_abandoned_entry_with_a_replacement_counts_as_abandoned() {
+        let page: Vec<ListTransactionEntry> =
+            serde_json::from_value(json!([unconfirmed_send(ORIGINAL, Some(REPLACEMENT), true)]))
+                .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert!(kept.is_empty());
+        assert!(left_out.replaced.is_empty());
+        assert_eq!(
+            left_out.abandoned.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn a_tx_bumped_twice_names_the_replacement_that_was_kept() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            unconfirmed_send(ORIGINAL, Some(REPLACEMENT), false),
+            unconfirmed_send(REPLACEMENT, Some(IN_MEMPOOL), false),
+            unconfirmed_send(IN_MEMPOOL, None, false),
+        ]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            kept.iter().map(|e| e.txid).collect::<Vec<_>>(),
+            [txid(IN_MEMPOOL)]
+        );
+        let mut replaced: Vec<_> = left_out.replaced.into_iter().collect();
+        replaced.sort();
+        let mut expected = vec![
+            (txid(ORIGINAL), txid(IN_MEMPOOL)),
+            (txid(REPLACEMENT), txid(IN_MEMPOOL)),
+        ];
+        expected.sort();
+        assert_eq!(replaced, expected);
+    }
+
+    #[test]
+    fn a_replacement_loop_ends_instead_of_hanging() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            unconfirmed_send(ORIGINAL, Some(REPLACEMENT), false),
+            unconfirmed_send(REPLACEMENT, Some(ORIGINAL), false),
+        ]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert!(kept.is_empty());
+        assert_eq!(left_out.replaced.len(), 2);
     }
 
     #[test]
