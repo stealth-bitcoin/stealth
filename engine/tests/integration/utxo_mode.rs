@@ -371,3 +371,35 @@ fn utxo_scan_with_an_address_of_another_network_is_a_descriptor_error() {
         "{error:?}"
     );
 }
+
+#[test]
+fn utxo_scan_of_own_consolidation_change_warns() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let inputs = fund_coins(&node, &alice, 3, 300_000);
+    merge_into(
+        &node,
+        &[&alice],
+        &inputs,
+        alice.new_address().unwrap(),
+        900_000,
+    );
+
+    // Only the merged coin is pasted; its three inputs sit at addresses the scan never saw.
+    let utxos = utxo_inputs_for(&alice);
+    assert_eq!(utxos.len(), 1);
+    let gateway = gateway_for(&node);
+    let engine = AnalysisEngine::new(&gateway, EngineSettings::default());
+    let report = engine
+        .analyze(ScanTarget::Utxos(utxos))
+        .expect("utxo scan failed");
+
+    assert!(!has_finding(&report, VulnerabilityType::Consolidation));
+    assert!(
+        has_warning(&report, VulnerabilityType::Consolidation),
+        "a pasted consolidation output must still be surfaced"
+    );
+}

@@ -15,6 +15,7 @@ impl TxGraph {
         &self,
         thresholds: &DetectorThresholds,
         findings: &mut Vec<Finding>,
+        warnings: &mut Vec<Finding>,
     ) {
         let min_inputs = thresholds.consolidation_min_inputs;
         let max_outputs = thresholds.consolidation_max_outputs;
@@ -29,19 +30,37 @@ impl TxGraph {
             };
             let n_in = parent.vin.len();
             let n_out = parent.vout.len();
+            if n_in < min_inputs || n_out > max_outputs {
+                continue;
+            }
 
-            if n_in >= min_inputs && n_out <= max_outputs {
-                let parent_inputs = self.get_input_addresses(&utxo.txid);
-                let our_parent_in = parent_inputs
-                    .iter()
-                    .filter(|ia| self.is_ours(&ia.address))
-                    .count();
+            let resolved = self.get_input_addresses(&utxo.txid);
+            let ours = resolved
+                .iter()
+                .filter(|ia| self.is_ours(&ia.address))
+                .count();
+            let foreign = resolved.len() - ours;
+            // Inputs whose funding tx was not fetched are unknown, not foreign.
+            let unresolved = parent
+                .vin
+                .iter()
+                .filter(|input| !input.coinbase)
+                .count()
+                .saturating_sub(resolved.len());
+            let details = json!({
+                "txid": utxo.txid,
+                "vout": utxo.vout,
+                "amount_sats": utxo.amount.to_sat(),
+                "consolidation_inputs": n_in,
+                "consolidation_outputs": n_out,
+                "our_inputs_in_consolidation": ours,
+                "foreign_inputs": foreign,
+                "unresolved_inputs": unresolved,
+            });
+
+            match ours {
                 // Only a merge of at least two of our own coins is our consolidation.
-                if our_parent_in < 2 {
-                    continue;
-                }
-
-                findings.push(Finding {
+                2.. => findings.push(Finding {
                     vulnerability_type: VulnerabilityType::Consolidation,
                     severity: Severity::Medium,
                     description: format!(
@@ -51,14 +70,7 @@ impl TxGraph {
                         utxo.amount.to_btc(),
                         n_in
                     ),
-                    details: Some(json!({
-                        "txid": utxo.txid,
-                        "vout": utxo.vout,
-                        "amount_sats": utxo.amount.to_sat(),
-                        "consolidation_inputs": n_in,
-                        "consolidation_outputs": n_out,
-                        "our_inputs_in_consolidation": our_parent_in,
-                    })),
+                    details: Some(details),
                     correction: Some(
                         "Avoid consolidating many UTXOs into one in a single transaction. \
                          If fee savings require consolidation, do it through a CoinJoin, \
@@ -66,7 +78,30 @@ impl TxGraph {
                          so the merge looks like an ordinary spend."
                             .into(),
                     ),
-                });
+                }),
+                // One coin of ours among others is a Payjoin-like contribution.
+                1 => {}
+                // The scan may not know the inputs (UTXO mode), so say so neutrally.
+                0 => warnings.push(Finding {
+                    vulnerability_type: VulnerabilityType::Consolidation,
+                    severity: Severity::Low,
+                    description: format!(
+                        "UTXO {}:{} ({:.8} BTC) came from a {}-input consolidation \
+                         whose inputs this scan does not recognise as yours",
+                        utxo.txid,
+                        utxo.vout,
+                        utxo.amount.to_btc(),
+                        n_in
+                    ),
+                    details: Some(details),
+                    correction: Some(
+                        "If those inputs were yours, that transaction links them to each \
+                         other and to this coin; next time consolidate through a CoinJoin \
+                         or inside a Payjoin (BIP-78) payment. If they belonged to the \
+                         sender, there is nothing to do."
+                            .into(),
+                    ),
+                }),
             }
         }
     }

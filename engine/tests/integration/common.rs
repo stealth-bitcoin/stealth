@@ -195,3 +195,75 @@ pub fn has_dust_attack(report: &stealth_engine::Report) -> bool {
                 .is_some()
     })
 }
+
+// Funds `n` fresh UTXOs of `sats` each in `wallet`, returning them as inputs.
+pub fn fund_coins(node: &Node, wallet: &corepc_node::Client, n: usize, sats: u64) -> Vec<Input> {
+    let addrs = (0..n).map(|_| wallet.new_address().unwrap()).collect();
+    fund_coins_at(node, wallet, addrs, sats)
+}
+
+// Funds one UTXO of `sats` at each of `addrs` (owned by `wallet`), returning them as inputs.
+pub fn fund_coins_at(
+    node: &Node,
+    wallet: &corepc_node::Client,
+    addrs: Vec<Address>,
+    sats: u64,
+) -> Vec<Input> {
+    let da = node.client.new_address().unwrap();
+    let mut txids = Vec::new();
+    for a in addrs {
+        let sent = node
+            .client
+            .send_to_address(&a, Amount::from_sat(sats))
+            .unwrap();
+        txids.push(sent.txid().unwrap());
+    }
+    mine(node, 1, &da);
+    wallet
+        .list_unspent()
+        .unwrap()
+        .0
+        .iter()
+        .filter(|u| txids.contains(&u.txid.parse().unwrap()))
+        .map(|u| Input {
+            txid: u.txid.parse().unwrap(),
+            vout: u.vout as u64,
+            sequence: None,
+        })
+        .collect()
+}
+
+// Spends `inputs` into one output at `dest`, each signer signing its own inputs.
+pub fn merge_into(
+    node: &Node,
+    signers: &[&corepc_node::Client],
+    inputs: &[Input],
+    dest: Address,
+    total_sats: u64,
+) {
+    let raw = signers[0]
+        .create_raw_transaction(
+            inputs,
+            &[Output::new(dest, Amount::from_sat(total_sats - 10_000))],
+        )
+        .unwrap();
+    let mut tx = raw.transaction().unwrap();
+    for signer in signers {
+        tx = signer
+            .sign_raw_transaction_with_wallet(&tx)
+            .unwrap()
+            .into_model()
+            .unwrap()
+            .tx;
+    }
+    node.client.send_raw_transaction(&tx).unwrap();
+    let da = node.client.new_address().unwrap();
+    mine(node, 1, &da);
+}
+
+pub fn has_warning(report: &stealth_engine::Report, vtype: VulnerabilityType) -> bool {
+    report
+        .warnings
+        .iter()
+        .any(|f| f.vulnerability_type == vtype)
+}

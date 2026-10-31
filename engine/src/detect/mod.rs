@@ -35,7 +35,7 @@ impl TxGraph {
         self.detect_dust(thresholds, &mut findings);
         self.detect_dust_spending(thresholds, &mut findings);
         self.detect_change_detection(&mut findings);
-        self.detect_consolidation_origin(thresholds, &mut findings);
+        self.detect_consolidation_origin(thresholds, &mut findings, &mut warnings);
         self.detect_script_type_mixing(&mut findings);
         self.detect_cluster_merge(&mut findings);
         self.detect_lookback_depth(thresholds, &mut findings, &mut warnings);
