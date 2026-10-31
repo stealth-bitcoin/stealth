@@ -105,8 +105,10 @@ loading them can take long and put a heavy load on the node:
 - **API:** the job fails with `limit_exceeded` set; send the scan again with
   `max_txs` or `no_limits` (see [api/README.md](../api/README.md)).
 
-Going on runs the rescan again. UTXO mode counts the history of the pasted
-outputs' addresses the same way.
+Going on from the frontend or the API runs the rescan again. UTXO mode counts
+the history of the pasted outputs' addresses the same way. The count comes
+from `getwalletinfo`; an RPC user restricted with `rpcwhitelist` needs it
+allowed, or the limit is not checked.
 
 ## 4. Fast, specific checks: UTXO mode
 

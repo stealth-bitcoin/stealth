@@ -179,7 +179,11 @@ loading a large one makes `bitcoind` grow its memory and keep it. Above
 `max_txs` the scan stops, unloads the scan wallet (a cache wallet stays on
 disk, complete, for the next scan) and fails with the count and the limit. A
 UTXO scan counts the history of the pasted outputs' addresses, which it loads
-in one wallet, the same way. To go on, send the same scan again with
+in one wallet, the same way, and its message names "the history of the
+pasted outputs' addresses" instead of "the wallet history". An RPC user the
+node refuses `getwalletinfo` (`rpcwhitelist`) gets no count, so its scans go
+on unchecked and the gateway warns once on stderr; allow `getwalletinfo` to
+have the limit checked. To go on, send the same scan again with
 `max_txs` set to at least the count, or with `no_limits: true`; the rescan
 runs again.
 
