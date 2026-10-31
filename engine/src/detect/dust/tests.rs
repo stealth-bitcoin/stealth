@@ -133,14 +133,38 @@ fn a_strangers_input_does_not_make_one_address_dust_spending() {
 }
 
 #[test]
-fn a_mid_sized_own_coin_elsewhere_does_not_make_a_same_address_merge_dust_spending() {
+fn a_mid_sized_own_coin_elsewhere_ties_its_address_to_the_dusted_one() {
     let (a, b) = (wpkh(1), wpkh(2));
     let findings = dust_spending(spend_of(&[(&a, 600), (&a, 50_000), (&b, 5_000)], &[&a, &b]));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let details = findings[0].details.as_ref().expect("details");
+    assert_eq!(details["dust_inputs"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn every_dust_input_joined_to_another_address_is_listed() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let findings = dust_spending(spend_of(&[(&a, 600), (&b, 700), (&a, 50_000)], &[&a, &b]));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let details = findings[0].details.as_ref().expect("details");
+    let dust: Vec<_> = details["dust_inputs"]
+        .as_array()
+        .expect("dust inputs")
+        .iter()
+        .map(|d| d["sats"].as_u64())
+        .collect();
+    assert_eq!(dust, vec![Some(600), Some(700)], "{details}");
+}
+
+#[test]
+fn dust_and_a_mid_sized_coin_elsewhere_with_no_normal_coin_is_not_dust_spending() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let findings = dust_spending(spend_of(&[(&a, 600), (&b, 5_000)], &[&a, &b]));
     assert!(findings.is_empty(), "{findings:?}");
 }
 
 #[test]
-fn dust_spending_lists_only_the_coins_it_links_across_addresses() {
+fn dust_spending_lists_every_normal_input() {
     let (a, b) = (wpkh(1), wpkh(2));
     let findings = dust_spending(spend_of(
         &[(&a, 600), (&a, 50_000), (&b, 40_000)],
@@ -149,13 +173,12 @@ fn dust_spending_lists_only_the_coins_it_links_across_addresses() {
     assert_eq!(findings.len(), 1, "{findings:?}");
     let details = findings[0].details.as_ref().expect("details");
     let normal = details["normal_inputs"].as_array().expect("normal inputs");
-    assert_eq!(normal.len(), 1, "{details}");
-    assert_eq!(normal[0]["sats"], 40_000);
+    assert_eq!(normal.len(), 2, "{details}");
     assert_eq!(details["dust_inputs"].as_array().map(Vec::len), Some(1));
     assert!(
         findings[0]
             .description
-            .contains("1 dust input(s) alongside 1 normal input(s)"),
+            .contains("1 dust input(s) alongside 2 normal input(s)"),
         "{}",
         findings[0].description
     );

@@ -457,9 +457,12 @@ impl TxGraph {
                 }
             }
 
-            // A dust coin and a normal coin at one address were linked already.
-            dust_inputs.retain(|d| normal_inputs.iter().any(|n| n.address != d.address));
-            normal_inputs.retain(|n| dust_inputs.iter().any(|d| d.address != n.address));
+            // Dust is newly tied only to own addresses other than its own.
+            let own: Vec<_> = input_addrs
+                .iter()
+                .filter(|ia| self.is_ours(&ia.address))
+                .collect();
+            dust_inputs.retain(|d| own.iter().any(|o| o.address != d.address));
             if !dust_inputs.is_empty() && !normal_inputs.is_empty() {
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::DustSpending,
