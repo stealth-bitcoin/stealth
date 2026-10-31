@@ -22,12 +22,12 @@ stealth-engine = { workspace = true }
 # Already in the tree through ctrlc; used to die by SIGINT like before and to
 # tell a foreground scan from a background job.
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "term"] }
+# Already in the tree through nix; reads the SIGINT disposition, which nix cannot.
+libc = "0.2.191"
 
 [dev-dependencies]
 corepc-node = { workspace = true }
 
-[target.'cfg(unix)'.dev-dependencies]
-libc = "0.2.191"
 
 [lints.rust]
 missing_debug_implementations = "deny"

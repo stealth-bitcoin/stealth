@@ -423,3 +423,51 @@ fn a_scan_started_in_the_background_stops_with_the_hint_instead_of_asking() {
     assert!(shown.contains("--no-limits"), "{shown}");
     assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_scan_started_with_sigint_ignored_keeps_ignoring_it() {
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    // A node that takes the connection and never answers keeps the scan waiting.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("port").port();
+    let mut child = Command::new("bash")
+        .args(["-c", "trap '' INT; exec \"$0\" \"$@\""])
+        .arg(env!("CARGO_BIN_EXE_stealth-cli"))
+        .args([
+            "scan",
+            "--descriptor",
+            "addr(bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080)",
+        ])
+        .args(["--rpc-url", &format!("http://127.0.0.1:{port}")])
+        .args(["--rpc-user", "user"])
+        .env("STEALTH_RPC_PASS", "pass")
+        .env_remove("STEALTH_RPC_COOKIE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("run stealth-cli");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let _held = loop {
+        match listener.accept() {
+            Ok((held, _)) => break held,
+            Err(_) if Instant::now() < deadline => {
+                assert!(child.try_wait().expect("poll").is_none(), "exited first");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("the scan never connected: {error}"),
+        }
+    };
+    // SAFETY: kill only sends signals to the child started above.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    std::thread::sleep(Duration::from_secs(1));
+    let still_running = child.try_wait().expect("poll").is_none();
+    // SAFETY: as above.
+    let _ = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let _ = child.wait();
+    assert!(still_running, "an inherited SIG_IGN must stay in force");
+}

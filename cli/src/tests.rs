@@ -816,7 +816,12 @@ mod history_limit {
     fn asked_with(typed: &'static str) -> HistoryLimit {
         let interrupts = Arc::new(Interrupts::default());
         HistoryLimit {
-            ask: Some(terminal_ask(move || typed.as_bytes(), io::sink, interrupts)),
+            ask: Some(terminal_ask(
+                move || typed.as_bytes(),
+                io::sink,
+                interrupts,
+                || true,
+            )),
             ..HistoryLimit::at_most(3)
         }
     }
@@ -844,6 +849,7 @@ mod history_limit {
                 },
                 io::sink,
                 Arc::clone(&interrupts),
+                || true,
             )),
             ..HistoryLimit::at_most(3)
         };
@@ -871,6 +877,7 @@ mod history_limit {
                 move || typed.as_bytes(),
                 io::sink,
                 Arc::clone(&interrupts),
+                || true,
             )),
             ..HistoryLimit::at_most(3)
         };
@@ -917,8 +924,55 @@ mod history_limit {
     }
 
     #[test]
-    fn a_background_job_is_not_asked() {
+    fn a_scan_whose_interrupt_is_ignored_is_not_asked() {
         assert!(!should_ask(true, true, false));
+    }
+
+    /// A terminal that records being read, and answers with an empty line.
+    struct Watched(Arc<std::sync::atomic::AtomicBool>);
+
+    impl io::Read for Watched {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn a_scan_sent_to_the_background_before_the_question_is_refused_unasked() {
+        let in_the_foreground = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let probe = Arc::clone(&in_the_foreground);
+        let shown = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let screen = Arc::clone(&shown);
+        let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let touched = Arc::clone(&read);
+        struct Shared(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl io::Write for Shared {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let limit = HistoryLimit {
+            ask: Some(terminal_ask(
+                move || io::BufReader::new(Watched(Arc::clone(&touched))),
+                move || Shared(Arc::clone(&screen)),
+                Arc::new(Interrupts::default()),
+                move || probe.load(std::sync::atomic::Ordering::Relaxed),
+            )),
+            ..HistoryLimit::at_most(3)
+        };
+        // Started in the foreground, then put in the background during the rescan.
+        in_the_foreground.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(limit.check(5).is_err());
+        assert!(shown.lock().unwrap().is_empty(), "nothing is asked");
+        assert!(
+            !read.load(std::sync::atomic::Ordering::Relaxed),
+            "the terminal is not read"
+        );
     }
 
     #[test]

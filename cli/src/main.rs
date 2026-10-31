@@ -48,21 +48,33 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     let gateway = opts.build_gateway()?;
     let target = opts.scan_target()?;
 
-    // Ctrl-C at the question must not end the process before the scan wallet is unloaded.
+    // Ctrl-C at the question must not end the process before the scan wallet is
+    // unloaded. A SIGINT ignored from the start (trap '' INT, a supervisor) stays
+    // ignored, and with nothing to answer the question it is not asked.
     let interrupts = Arc::new(Interrupts::default());
-    let handler = Arc::clone(&interrupts);
-    let _ = ctrlc::set_handler(move || {
-        if handler.interrupt() {
-            die_by_interrupt();
-        }
-    });
+    let interruptible = !sigint_ignored();
+    if interruptible {
+        let handler = Arc::clone(&interrupts);
+        let _ = ctrlc::set_handler(move || {
+            if handler.interrupt() {
+                die_by_interrupt();
+            }
+        });
+    }
 
     let ask = should_ask(
         io::stdin().is_terminal(),
         io::stderr().is_terminal(),
-        in_the_foreground(),
+        interruptible,
     )
-    .then(|| terminal_ask(|| io::stdin().lock(), io::stderr, Arc::clone(&interrupts)));
+    .then(|| {
+        terminal_ask(
+            || io::stdin().lock(),
+            io::stderr,
+            Arc::clone(&interrupts),
+            in_the_foreground,
+        )
+    });
     let mut settings = opts.engine_settings()?;
     settings.history_limit = opts.history_limit(ask);
     let engine = AnalysisEngine::new(&gateway, settings);
@@ -107,10 +119,26 @@ fn die_by_interrupt() -> ! {
     std::process::exit(130)
 }
 
-/// The question is asked only where someone can both read it and answer it.
-fn should_ask(stdin_is_terminal: bool, stderr_is_terminal: bool, in_the_foreground: bool) -> bool {
-    // A background job reading the terminal gets SIGTTIN and stops with the wallet loaded.
-    stdin_is_terminal && stderr_is_terminal && in_the_foreground
+/// The question is asked only where someone can both read it and answer it,
+/// with Ctrl-C there to answer no.
+fn should_ask(stdin_is_terminal: bool, stderr_is_terminal: bool, interruptible: bool) -> bool {
+    stdin_is_terminal && stderr_is_terminal && interruptible
+}
+
+/// Whether SIGINT was ignored when the process started.
+#[cfg(unix)]
+fn sigint_ignored() -> bool {
+    // nix only swaps a disposition; libc reads it without changing it.
+    let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+    // SAFETY: a null new action makes sigaction only write the current one.
+    let read = unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), current.as_mut_ptr()) };
+    // SAFETY: zeroed is a valid sigaction, filled in by the call when it succeeds.
+    read == 0 && unsafe { current.assume_init() }.sa_sigaction == libc::SIG_IGN
+}
+
+#[cfg(not(unix))]
+fn sigint_ignored() -> bool {
+    false
 }
 
 /// Whether this process is the terminal's foreground job; without a
@@ -208,9 +236,15 @@ fn terminal_ask<R: BufRead, W: Write>(
     input: impl Fn() -> R + Send + Sync + 'static,
     output: impl Fn() -> W + Send + Sync + 'static,
     interrupts: Arc<Interrupts>,
+    in_the_foreground: impl Fn() -> bool + Send + Sync + 'static,
 ) -> AskToGoOn {
     let input = Arc::new(input);
     Arc::new(move |of, tx_count, limit| {
+        // Checked now, after the rescan: a background job reading the terminal
+        // is stopped by SIGTTIN with the wallet loaded.
+        if !in_the_foreground() {
+            return false;
+        }
         let (reply, answer) = mpsc::channel();
         interrupts.begin_asking(reply.clone());
         show_question(of, tx_count, limit, &mut output());
