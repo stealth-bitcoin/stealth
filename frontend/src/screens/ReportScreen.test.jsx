@@ -457,11 +457,11 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
 
   it('names abandoned transactions', () => {
     show(makeReport({ txs: 2, abandoned: [original] }))
-    expect(screen.getByText(/left out 1 transaction that was abandoned in the wallet\. it may still confirm; until then it is not part of the history the wallet sees\. if it was broadcast, it may have been seen by the network before it was abandoned; stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 1 transaction that was abandoned in the wallet, by hand or by core after a reorg removed a coinbase it depends on\. it may still confirm, unless it depends on a coinbase a reorg removed; until then it is not part of the history the wallet sees\. if it was broadcast, it may have been seen by the network before it was abandoned; stealth does not analyze it\./i)).toBeTruthy()
     expect(screen.getByText(original)).toBeTruthy()
     cleanup()
     show(makeReport({ txs: 2, abandoned: [original, other] }))
-    expect(screen.getByText(/left out 2 transactions that were abandoned in the wallet\. they may still confirm; until then they are not part of the history the wallet sees\. if they were broadcast, they may have been seen by the network before they were abandoned; stealth does not analyze them\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 2 transactions that were abandoned in the wallet, by hand or by core after a reorg removed a coinbase they depend on\. they may still confirm, unless they depend on a coinbase a reorg removed; until then they are not part of the history the wallet sees\. if they were broadcast, they may have been seen by the network before they were abandoned; stealth does not analyze them\./i)).toBeTruthy()
   })
 
   it('gives no empty-scan hint when every transaction was replaced or abandoned', () => {

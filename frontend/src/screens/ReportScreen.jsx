@@ -161,11 +161,14 @@ const LEFT_OUT = {
   },
   abandoned: {
     settled: false,
-    one: 'that was abandoned in the wallet',
-    many: 'that were abandoned in the wallet',
+    // Core abandons the descendants of a coinbase a reorg removed.
+    one: 'that was abandoned in the wallet, by hand or by Core after a reorg removed a coinbase it depends on',
+    many: 'that were abandoned in the wallet, by hand or by Core after a reorg removed a coinbase they depend on',
     beforeOne: 'it was abandoned',
     beforeMany: 'they were abandoned',
     ifBroadcast: true,
+    unlessOne: 'it depends on a coinbase a reorg removed',
+    unlessMany: 'they depend on a coinbase a reorg removed',
   },
   // A tx never broadcast was not seen, so this note says nothing about the network.
   unavailable: {

@@ -326,13 +326,16 @@ fn text_report(report: &stealth_engine::Report) -> String {
         &abandoned,
         &LeftOutReason {
             settled: false,
-            one: "that was abandoned in the wallet",
-            many: "that were abandoned in the wallet",
+            // Core abandons the descendants of a coinbase a reorg removed.
+            one: "that was abandoned in the wallet, by hand or by Core after a reorg removed a \
+                  coinbase it depends on",
+            many: "that were abandoned in the wallet, by hand or by Core after a reorg removed a \
+                   coinbase they depend on",
             before_one: Some("it was abandoned"),
             if_broadcast: true,
             before_many: Some("they were abandoned"),
-            unless_one: None,
-            unless_many: None,
+            unless_one: Some("it depends on a coinbase a reorg removed"),
+            unless_many: Some("they depend on a coinbase a reorg removed"),
             comes_back_one: None,
             comes_back_many: None,
         },

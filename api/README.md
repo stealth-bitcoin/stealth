@@ -103,9 +103,10 @@ only come back if a reorg restores that block; Core also marks them abandoned,
 but they are listed here instead), and `unavailable_txids` for unconfirmed ones the node does not have (replaced or
 double-spent, expired or evicted from the mempool, never broadcast, or
 depending on a transaction that was; such a one may still confirm, unless it or a
-transaction it depends on has a conflicting transaction mined). The abandoned list fills only
-when someone abandons a transaction in Stealth's cache wallet; one abandoned in
-the user's own wallet lands in `unavailable_txids`. A wallet transaction the
+transaction it depends on has a conflicting transaction mined). The abandoned list fills
+when someone abandons a transaction in Stealth's cache wallet, or when Core
+abandons the spend of a coinbase a reorg removed; one abandoned in the user's
+own wallet lands in `unavailable_txids`. A wallet transaction the
 node cannot serve still fails the scan when it is confirmed, or when the node
 answers with any error other than not found. `mempoolconflicts`,
 which `mempool_conflicted_txids` relies on, appeared in Bitcoin Core 28.0; on

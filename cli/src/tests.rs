@@ -511,8 +511,10 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 1 transaction that was abandoned in the wallet. It may still confirm; \
-                 until then it is not part of the history the wallet sees. If it was broadcast, it \
+                "Left out 1 transaction that was abandoned in the wallet, by hand or by Core \
+                 after a reorg removed a coinbase it depends on. It may still confirm, unless it \
+                 depends on a coinbase a reorg removed; until then it is not part of the history \
+                 the wallet sees. If it was broadcast, it \
                  may have been seen by the network before it was abandoned; Stealth does not \
                  analyze it.\n  {CONFLICTED}\n"
             )),
@@ -525,8 +527,10 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 2 transactions that were abandoned in the wallet. They may still \
-                 confirm; until then they are not part of the history the wallet sees. If they \
+                "Left out 2 transactions that were abandoned in the wallet, by hand or by Core \
+                 after a reorg removed a coinbase they depend on. They may still confirm, unless \
+                 they depend on a coinbase a reorg removed; until then they are not part of the \
+                 history the wallet sees. If they \
                  were broadcast, they may have been seen by the network before they were \
                  abandoned; Stealth does not analyze them.\n  {CONFLICTED}\n  {REPLACEMENT}\n"
             )),

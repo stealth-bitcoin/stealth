@@ -721,3 +721,38 @@ fn a_coinbase_from_a_block_no_longer_in_the_chain_is_left_out_as_orphaned() {
     assert_eq!(report.stats.orphaned_txids, vec![coinbase]);
     assert!(report.stats.abandoned_txids.is_empty());
 }
+
+/// A matured coinbase is spent, then a reorg removes its block: Core shows the
+/// coinbase as an orphan and abandons the spend itself.
+#[test]
+fn a_spend_of_a_coinbase_a_reorg_removed_is_listed_as_abandoned() {
+    let node = node();
+    let alice = node.create_wallet("alice").unwrap();
+    let hashes: Vec<String> = node
+        .client
+        .call(
+            "generatetoaddress",
+            &[json!(1), json!(alice.new_address().unwrap().to_string())],
+        )
+        .unwrap();
+    let block: Value = node.client.call("getblock", &[json!(hashes[0])]).unwrap();
+    let coinbase: Txid = block["tx"][0].as_str().unwrap().parse().unwrap();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 100, &miner);
+    let spend = spend_output(&alice, (coinbase, 0), 5_000_000_000, &miner);
+    mine(&node, 1, &miner);
+    let _: Value = node
+        .client
+        .call("invalidateblock", &[json!(hashes[0])])
+        .unwrap();
+
+    let entry: Value = alice
+        .call("gettransaction", &[json!(spend.to_string())])
+        .unwrap();
+    assert_eq!(entry["confirmations"], json!(0), "{entry}");
+    assert_eq!(entry["details"][0]["abandoned"], json!(true), "{entry}");
+
+    let report = scan_wallet(&gateway_for(&node), "alice");
+    assert_eq!(report.stats.orphaned_txids, vec![coinbase]);
+    assert_eq!(report.stats.abandoned_txids, vec![spend]);
+}
