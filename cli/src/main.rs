@@ -258,6 +258,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
         &mut lines,
         &conflicted,
         &LeftOutReason {
+            settled: true,
             one: "Core reports as conflicted: it, or a transaction it depends on, conflicts \
                   with another one",
             many: "Core reports as conflicted: each, or a transaction it depends on, conflicts \
@@ -280,6 +281,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
         &mut lines,
         &replaced,
         &LeftOutReason {
+            settled: false,
             one: "the wallet replaced",
             many: "the wallet replaced",
             before_one: "it was replaced",
@@ -295,6 +297,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
         &mut lines,
         &abandoned,
         &LeftOutReason {
+            settled: false,
             one: "that was abandoned in the wallet",
             many: "that were abandoned in the wallet",
             before_one: "it was abandoned",
@@ -339,6 +342,8 @@ fn text_report(report: &stealth_engine::Report) -> String {
 /// Why a note's txs were left out, for one and for several: what follows
 /// "Left out N transaction(s)", and what they may have been seen before.
 struct LeftOutReason {
+    /// Out of the history for good; otherwise the tx may still confirm.
+    settled: bool,
     one: &'static str,
     many: &'static str,
     before_one: &'static str,
@@ -370,9 +375,16 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
             "them",
         )
     };
+    let standing = if reason.settled {
+        format!(", so {part} not part of the wallet's history.")
+    } else {
+        format!(
+            ". {may} may still confirm; until then {part} not part of the history the wallet sees."
+        )
+    };
     lines.push(format!(
-        "Left out {count} {why}, so {part} not part of the wallet's history. {may} may still \
-         have been seen by the network before {before}; Stealth does not analyze {them}."
+        "Left out {count} {why}{standing} {may} may still have been seen by the network before \
+         {before}; Stealth does not analyze {them}."
     ));
     lines.extend(items.iter().map(|item| format!("  {item}")));
     lines.push(String::new());

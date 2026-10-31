@@ -130,21 +130,25 @@ function effectiveKind(kind, descriptor) {
   return kind
 }
 
-// Why a note's transactions were left out, for one and for several.
+// Why a note's transactions were left out, for one and for several; a settled
+// one is out of the history for good, the others may still confirm.
 const LEFT_OUT = {
   conflicted: {
+    settled: true,
     one: 'Core reports as conflicted: it, or a transaction it depends on, conflicts with another one',
     many: 'Core reports as conflicted: each, or a transaction it depends on, conflicts with another one',
     beforeOne: 'it became conflicted',
     beforeMany: 'they became conflicted',
   },
   replaced: {
+    settled: false,
     one: 'the wallet replaced',
     many: 'the wallet replaced',
     beforeOne: 'it was replaced',
     beforeMany: 'they were replaced',
   },
   abandoned: {
+    settled: false,
     one: 'that was abandoned in the wallet',
     many: 'that were abandoned in the wallet',
     beforeOne: 'it was abandoned',
@@ -159,8 +163,11 @@ function LeftOutNote({ items, reason }) {
     <div className={styles.scopeNote}>
       <p className={styles.noteText}>
         Left out {items.length} {one ? 'transaction' : 'transactions'}{' '}
-        {one ? reason.one : reason.many}, so {one ? 'it is' : 'they are'} not part of the
-        wallet's history. {one ? 'It' : 'They'} may still have been seen by the network
+        {one ? reason.one : reason.many}
+        {reason.settled
+          ? `, so ${one ? 'it is' : 'they are'} not part of the wallet's history.`
+          : `. ${one ? 'It' : 'They'} may still confirm; until then ${one ? 'it is' : 'they are'} not part of the history the wallet sees.`}{' '}
+        {one ? 'It' : 'They'} may still have been seen by the network
         before {one ? reason.beforeOne : reason.beforeMany}; Stealth does not
         analyze {one ? 'it' : 'them'}.
       </p>

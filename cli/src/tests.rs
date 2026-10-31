@@ -415,8 +415,8 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 1 transaction the wallet replaced, so it is not part of the wallet's \
-                 history. It may still have been seen by the network before it was replaced; \
+                "Left out 1 transaction the wallet replaced. It may still confirm; until then \
+                 it is not part of the history the wallet sees. It may still have been seen by the network before it was replaced; \
                  Stealth does not analyze it.\n  {CONFLICTED} was replaced by {REPLACEMENT}, \
                  which is not confirmed yet\n"
             )),
@@ -438,8 +438,8 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(
-                "Left out 2 transactions the wallet replaced, so they are not part of the \
-                 wallet's history. They may still have been seen by the network before they \
+                "Left out 2 transactions the wallet replaced. They may still confirm; until \
+                 then they are not part of the history the wallet sees. They may still have been seen by the network before they \
                  were replaced; Stealth does not analyze them.\n"
             ),
             "{text}"
@@ -453,8 +453,8 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 1 transaction that was abandoned in the wallet, so it is not part of \
-                 the wallet's history. It may still have been seen by the network before it was \
+                "Left out 1 transaction that was abandoned in the wallet. It may still confirm; \
+                 until then it is not part of the history the wallet sees. It may still have been seen by the network before it was \
                  abandoned; Stealth does not analyze it.\n  {CONFLICTED}\n"
             )),
             "{text}"
@@ -466,8 +466,8 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 2 transactions that were abandoned in the wallet, so they are not part \
-                 of the wallet's history. They may still have been seen by the network before \
+                "Left out 2 transactions that were abandoned in the wallet. They may still \
+                 confirm; until then they are not part of the history the wallet sees. They may still have been seen by the network before \
                  they were abandoned; Stealth does not analyze them.\n  {CONFLICTED}\n  \
                  {REPLACEMENT}\n"
             )),
