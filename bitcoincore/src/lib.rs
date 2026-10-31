@@ -1081,8 +1081,7 @@ impl BitcoinCoreRpc {
         Ok(history)
     }
 
-    // Fetching a large history makes Core's memory grow far past what
-    // unloadwallet gives back, so the wallet's count is checked first.
+    // A large history fetched grows Core's memory past what unloadwallet returns.
     fn check_history_size(
         &self,
         wallet_name: &str,

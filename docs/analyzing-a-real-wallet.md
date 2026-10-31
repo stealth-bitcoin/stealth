@@ -36,9 +36,11 @@ blockfilterindex=1
 Loading a large wallet history makes `bitcoind` grow its memory, and it does
 not give that memory back when Stealth unloads the scan wallet. On a node you
 use for scanning, start `bitcoind` with `MALLOC_ARENA_MAX=1` in its
-environment, which keeps glibc from holding on to freed memory in many
-arenas, and give it a smaller `dbcache` (for example `dbcache=300`) once it
-has finished syncing:
+environment: it keeps glibc from holding freed memory in many arenas, and is
+what helps that memory go back to the system. A smaller `dbcache` (for
+example `dbcache=300`, once the node has finished syncing) shrinks the cache
+of the UTXO set, not the wallet's own use; it leaves the machine more memory
+for the wallet load:
 
 ```bash
 MALLOC_ARENA_MAX=1 bitcoind -dbcache=300
@@ -98,9 +100,8 @@ After the rescan, Stealth counts the transactions in the scan wallet before
 it loads any of them. Above 5,000 it stops and says how many there are, since
 loading them can take long and put a heavy load on the node:
 
-- **CLI:** in a terminal (stdin and stderr both, and not a background job) it
-  asks whether to go on;
-  Ctrl-C there counts as no. Elsewhere it stops with an error; scan again
+- **CLI:** in a terminal (stdin and stderr both, not a background job, and
+  Ctrl-C not ignored) it asks whether to go on; Ctrl-C there counts as no. Elsewhere it stops with an error; scan again
   with `--no-limits`, or with `--max-txs` set to at least the count, higher
   if the history may grow.
 - **Frontend:** the scan screen shows the count with "Scan anyway" and
