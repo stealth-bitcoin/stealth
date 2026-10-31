@@ -264,11 +264,14 @@ fn text_report(report: &stealth_engine::Report) -> String {
             many: "Core reports as conflicted: each, or a transaction it depends on, conflicts \
                    with another one",
             before_one: Some("it became conflicted"),
+            if_broadcast: true,
             before_many: Some("they became conflicted"),
             unless_one: None,
             unless_many: None,
-            comes_back_one: None,
-            comes_back_many: None,
+            comes_back_one: Some("It can only come back if a reorg removes the conflicting block"),
+            comes_back_many: Some(
+                "They can only come back if a reorg removes the conflicting blocks",
+            ),
         },
     );
     let in_mempool_conflict: Vec<String> = stats
@@ -301,6 +304,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
                 "that conflict, or depend on ones that conflict, with transactions in the mempool"
             },
             before_one: Some("the conflicting one reached the mempool"),
+            if_broadcast: false,
             before_many: Some(if one_conflict {
                 "the conflicting one reached the mempool"
             } else {
@@ -325,6 +329,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
             one: "that was abandoned in the wallet",
             many: "that were abandoned in the wallet",
             before_one: Some("it was abandoned"),
+            if_broadcast: true,
             before_many: Some("they were abandoned"),
             unless_one: None,
             unless_many: None,
@@ -350,6 +355,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
                    replaced or double-spent, expired or been evicted from the mempool, never been \
                    broadcast, or depend on a transaction that was)",
             before_one: None,
+            if_broadcast: false,
             before_many: None,
             unless_one: Some(
                 "it or a transaction it depends on has a conflicting transaction mined",
@@ -375,6 +381,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
             one: "that is a coinbase from a block no longer in the chain",
             many: "that are coinbases from blocks no longer in the chain",
             before_one: None,
+            if_broadcast: false,
             before_many: None,
             unless_one: None,
             unless_many: None,
@@ -430,6 +437,8 @@ struct LeftOutReason {
     many: &'static str,
     /// What the network may have seen the tx before, when it was broadcast.
     before_one: Option<&'static str>,
+    /// The tx may never have been broadcast, so its being seen is conditional.
+    if_broadcast: bool,
     before_many: Option<&'static str>,
     /// What would stop a tx that may still confirm from confirming.
     unless_one: Option<&'static str>,
@@ -468,10 +477,11 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
             "them",
         )
     };
-    let standing = if let Some(comes_back) = comes_back {
+    let standing = if reason.settled {
+        let comes_back = comes_back.map_or(String::new(), |c| format!(" {c}."));
+        format!(", so {part} not part of the wallet's history.{comes_back}")
+    } else if let Some(comes_back) = comes_back {
         format!(". {comes_back}; until then {part} not part of the history the wallet sees.")
-    } else if reason.settled {
-        format!(", so {part} not part of the wallet's history.")
     } else {
         let unless = unless.map_or(String::new(), |unless| format!(", unless {unless}"));
         format!(
@@ -480,7 +490,18 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
         )
     };
     let seen = before.map_or(String::new(), |before| {
-        format!(" {may} may still have been seen by the network before {before};")
+        if reason.if_broadcast {
+            let (it, was) = if items.len() == 1 {
+                ("it", "was")
+            } else {
+                ("they", "were")
+            };
+            format!(
+                " If {it} {was} broadcast, {it} may have been seen by the network before {before};"
+            )
+        } else {
+            format!(" {may} may still have been seen by the network before {before};")
+        }
     });
     lines.push(format!(
         "Left out {count} {why}{standing}{seen} Stealth does not analyze {them}."

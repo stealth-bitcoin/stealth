@@ -91,7 +91,8 @@ serve the history, the scan completes on the pasted outputs alone and
 **Transactions left out:** a scan leaves some wallet transactions out of the
 analysis and lists them in `stats`, as hex txids:
 `conflicted_txids` for those Core reports at negative confirmations (it, or a
-transaction it depends on, conflicts with another one), `mempool_conflicted_txids`
+transaction it depends on, conflicts with another one; they can only come
+back if a reorg removes the conflicting block), `mempool_conflicted_txids`
 for unconfirmed ones a transaction in the mempool conflicts with, such as the
 original of a fee bump or a payment double-spent by a raw transaction (each an
 object with `txid` and `conflicts_with`; the conflicting transaction is

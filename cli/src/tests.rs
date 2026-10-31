@@ -356,8 +356,9 @@ mod ordering {
             text.contains(&format!(
                 "Left out 1 transaction Core reports as conflicted: it, or a transaction \
                  it depends on, conflicts with another one, so it is not part of the wallet's \
-                 history. It may still have been seen by the network before it became conflicted; \
-                 Stealth does not analyze it.\n  {CONFLICTED}\n"
+                 history. It can only come back if a reorg removes the conflicting block. If it \
+                 was broadcast, it may have been seen by the network before it became \
+                 conflicted; Stealth does not analyze it.\n  {CONFLICTED}\n"
             )),
             "{text}"
         );
@@ -377,7 +378,8 @@ mod ordering {
             text.contains(&format!(
                 "Left out 2 transactions Core reports as conflicted: each, or a transaction \
                  it depends on, conflicts with another one, so they are not part of the wallet's \
-                 history. They may still have been seen by the network before they became \
+                 history. They can only come back if a reorg removes the conflicting blocks. If \
+                 they were broadcast, they may have been seen by the network before they became \
                  conflicted; Stealth does not analyze them.\n  {CONFLICTED}\n  {other}\n"
             )),
             "{text}"
@@ -510,8 +512,9 @@ mod ordering {
         assert!(
             text.contains(&format!(
                 "Left out 1 transaction that was abandoned in the wallet. It may still confirm; \
-                 until then it is not part of the history the wallet sees. It may still have been seen by the network before it was \
-                 abandoned; Stealth does not analyze it.\n  {CONFLICTED}\n"
+                 until then it is not part of the history the wallet sees. If it was broadcast, it \
+                 may have been seen by the network before it was abandoned; Stealth does not \
+                 analyze it.\n  {CONFLICTED}\n"
             )),
             "{text}"
         );
@@ -523,9 +526,9 @@ mod ordering {
         assert!(
             text.contains(&format!(
                 "Left out 2 transactions that were abandoned in the wallet. They may still \
-                 confirm; until then they are not part of the history the wallet sees. They may still have been seen by the network before \
-                 they were abandoned; Stealth does not analyze them.\n  {CONFLICTED}\n  \
-                 {REPLACEMENT}\n"
+                 confirm; until then they are not part of the history the wallet sees. If they \
+                 were broadcast, they may have been seen by the network before they were \
+                 abandoned; Stealth does not analyze them.\n  {CONFLICTED}\n  {REPLACEMENT}\n"
             )),
             "{text}"
         );

@@ -396,13 +396,13 @@ describe('ReportScreen — conflicted transactions left out', () => {
 
   it('names the conflicted transaction and says why it was left out', () => {
     render(<ReportScreen report={makeReport({ txs: 2, conflicted: [original] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
-    expect(screen.getByText(/left out 1 transaction core reports as conflicted: it, or a transaction it depends on, conflicts with another one, so it is not part of the wallet's history\. it may still have been seen by the network before it became conflicted; stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 1 transaction core reports as conflicted: it, or a transaction it depends on, conflicts with another one, so it is not part of the wallet's history\. it can only come back if a reorg removes the conflicting block\. if it was broadcast, it may have been seen by the network before it became conflicted; stealth does not analyze it\./i)).toBeTruthy()
     expect(screen.getByText(original)).toBeTruthy()
   })
 
   it('names every one of several', () => {
     render(<ReportScreen report={makeReport({ txs: 2, conflicted: [original, other] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
-    expect(screen.getByText(/left out 2 transactions core reports as conflicted: each, or a transaction it depends on, conflicts with another one, so they are not part of the wallet's history\. they may still have been seen by the network before they became conflicted; stealth does not analyze them\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 2 transactions core reports as conflicted: each, or a transaction it depends on, conflicts with another one, so they are not part of the wallet's history\. they can only come back if a reorg removes the conflicting blocks\. if they were broadcast, they may have been seen by the network before they became conflicted; stealth does not analyze them\./i)).toBeTruthy()
     expect(screen.getByText(original)).toBeTruthy()
     expect(screen.getByText(other)).toBeTruthy()
   })
@@ -457,11 +457,11 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
 
   it('names abandoned transactions', () => {
     show(makeReport({ txs: 2, abandoned: [original] }))
-    expect(screen.getByText(/left out 1 transaction that was abandoned in the wallet\. it may still confirm; until then it is not part of the history the wallet sees\. it may still have been seen by the network before it was abandoned; stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 1 transaction that was abandoned in the wallet\. it may still confirm; until then it is not part of the history the wallet sees\. if it was broadcast, it may have been seen by the network before it was abandoned; stealth does not analyze it\./i)).toBeTruthy()
     expect(screen.getByText(original)).toBeTruthy()
     cleanup()
     show(makeReport({ txs: 2, abandoned: [original, other] }))
-    expect(screen.getByText(/left out 2 transactions that were abandoned in the wallet\. they may still confirm; until then they are not part of the history the wallet sees\. they may still have been seen by the network before they were abandoned; stealth does not analyze them\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 2 transactions that were abandoned in the wallet\. they may still confirm; until then they are not part of the history the wallet sees\. if they were broadcast, they may have been seen by the network before they were abandoned; stealth does not analyze them\./i)).toBeTruthy()
   })
 
   it('gives no empty-scan hint when every transaction was replaced or abandoned', () => {

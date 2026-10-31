@@ -139,6 +139,10 @@ const LEFT_OUT = {
     many: 'Core reports as conflicted: each, or a transaction it depends on, conflicts with another one',
     beforeOne: 'it became conflicted',
     beforeMany: 'they became conflicted',
+    // It may never have been broadcast.
+    ifBroadcast: true,
+    comesBackOne: 'It can only come back if a reorg removes the conflicting block',
+    comesBackMany: 'They can only come back if a reorg removes the conflicting blocks',
   },
   mempoolConflicted: {
     settled: false,
@@ -161,6 +165,7 @@ const LEFT_OUT = {
     many: 'that were abandoned in the wallet',
     beforeOne: 'it was abandoned',
     beforeMany: 'they were abandoned',
+    ifBroadcast: true,
   },
   // A tx never broadcast was not seen, so this note says nothing about the network.
   unavailable: {
@@ -194,11 +199,22 @@ function mayConfirm(reason, one) {
 // Whether the transactions are out for good, may still confirm, or could come back.
 function standing(reason, one) {
   const part = one ? 'it is' : 'they are'
-  if (reason.comesBackOne) {
-    return `. ${one ? reason.comesBackOne : reason.comesBackMany}; until then ${part} not part of the history the wallet sees.`
+  const comesBack = one ? reason.comesBackOne : reason.comesBackMany
+  if (reason.settled) {
+    return `, so ${part} not part of the wallet's history.${comesBack ? ` ${comesBack}.` : ''}`
   }
-  if (reason.settled) return `, so ${part} not part of the wallet's history.`
+  if (comesBack) return `. ${comesBack}; until then ${part} not part of the history the wallet sees.`
   return `. ${one ? 'It' : 'They'} ${mayConfirm(reason, one)}; until then ${part} not part of the history the wallet sees.`
+}
+
+// What the network may have seen, hedged when the tx may never have been broadcast.
+function seenBefore(reason, one) {
+  const before = one ? reason.beforeOne : reason.beforeMany
+  if (reason.ifBroadcast) {
+    const [it, was] = one ? ['it', 'was'] : ['they', 'were']
+    return `If ${it} ${was} broadcast, ${it} may have been seen by the network before ${before}; `
+  }
+  return `${one ? 'It' : 'They'} may still have been seen by the network before ${before}; `
 }
 
 function LeftOutNote({ items, reason }) {
@@ -210,8 +226,7 @@ function LeftOutNote({ items, reason }) {
         Left out {items.length} {one ? 'transaction' : 'transactions'}{' '}
         {one ? reason.one : reason.many}
         {standing(reason, one)}{' '}
-        {reason.beforeOne &&
-          `${one ? 'It' : 'They'} may still have been seen by the network before ${one ? reason.beforeOne : reason.beforeMany}; `}
+        {reason.beforeOne && seenBefore(reason, one)}
         Stealth does not analyze {one ? 'it' : 'them'}.
       </p>
       <ul className={styles.txidList}>
