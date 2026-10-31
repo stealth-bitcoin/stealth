@@ -317,10 +317,15 @@ fn two_chains_that_merge_into_one_tail_are_both_reported() {
     }
 }
 
+// `truncated` is only in the details when it is true.
 fn truncated(f: &Finding) -> bool {
-    f.details.as_ref().expect("details")["truncated"]
-        .as_bool()
-        .expect("truncated is a bool")
+    match f.details.as_ref().expect("details").get("truncated") {
+        None => false,
+        Some(v) => {
+            assert_eq!(v.as_bool(), Some(true), "truncated is only emitted as true");
+            true
+        }
+    }
 }
 
 fn assert_whole_chain(txs: Vec<DecodedTransaction>, hop_ids: &[u8]) {
@@ -360,17 +365,18 @@ fn a_long_chain_is_whole_when_the_hop_after_the_limit_cannot_start_a_chain() {
 
 #[test]
 fn a_chain_cut_by_the_hop_limit_says_it_has_at_least_that_many_hops() {
-    // No hop after 0x11 can start a chain, so nothing traces past the limit.
+    // No hop after 0x11 can start a chain, so nothing traces past the limit;
+    // 0x17, the peel the trace was cut before, still counts.
     let hops_ids = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18];
     let findings = peel_findings(wide_chain(0x10, &hops_ids, &hops_ids[1..]));
     assert_eq!(findings.len(), 1, "{findings:#?}");
     let f = &findings[0];
-    let max = DetectorThresholds::default().peel_chain_max_hops;
-    assert_eq!(hops(f), u64::from(max));
-    assert_eq!(chain_txids(f), ids(&hops_ids[..max as usize]));
+    let seen = DetectorThresholds::default().peel_chain_max_hops + 1;
+    assert_eq!(hops(f), u64::from(seen));
+    assert_eq!(chain_txids(f), ids(&hops_ids[..seen as usize]));
     assert!(truncated(f));
     assert!(
-        f.description.contains(&format!("at least {max} hops")),
+        f.description.contains(&format!("at least {seen} hops")),
         "{}",
         f.description
     );
@@ -397,7 +403,32 @@ fn a_cycle_in_bad_data_does_not_hang_the_scan() {
     ];
     let findings = peel_findings(txs);
     assert_eq!(findings.len(), 1, "{findings:#?}");
-    assert_eq!(start(&findings[0]), txid(0x61).to_string());
+    let f = &findings[0];
+    assert_eq!(chain_txids(f), ids(&[0x61, 0x62, 0x63]));
+    assert_eq!(hops(f), 3);
+    assert_eq!(f.severity, Severity::High);
+    assert!(!truncated(f));
+}
+
+#[test]
+fn a_cycle_longer_than_the_hop_limit_lists_each_hop_once() {
+    // 0x72 to 0x78 spend each other in a loop longer than the limit, so the
+    // loop is only met while joining traces.
+    let mut txs = vec![
+        funding(0x70, 100_000_000),
+        peel(0x71, &[(0x70, 0)], 1_000_000, 90_000_000),
+        peel(0x72, &[(0x71, 1), (0x78, 1)], 1_000_000, 90_000_000),
+    ];
+    for id in 0x73..=0x78 {
+        txs.push(peel(id, &[(id - 1, 1)], 1_000_000, 90_000_000));
+    }
+    let findings = peel_findings(txs);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    let all: Vec<u8> = (0x71..=0x78).collect();
+    assert_eq!(chain_txids(f), ids(&all));
+    assert_eq!(hops(f), 8);
+    assert!(!truncated(f));
 }
 
 #[test]

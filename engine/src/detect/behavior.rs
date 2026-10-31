@@ -399,6 +399,9 @@ impl TxGraph {
             let mut cut = None;
             let mut trace = (txid, outputs[large_idx].index);
             while let Some(next) = next_hop(trace.0, trace.1) {
+                if chain.contains(&next.0) {
+                    break; // Spends cannot form a cycle; stop rather than loop on bad data.
+                }
                 if chain.len() >= max_hops as usize {
                     cut = Some(next.0);
                     break;
@@ -447,14 +450,33 @@ impl TxGraph {
                 let (tail, tail_cut, _) = &traces[j];
                 let seen: HashSet<Txid> = chain.iter().copied().collect();
                 let extra: Vec<Txid> = tail.iter().skip(len - pos).copied().collect();
-                if extra.iter().any(|t| seen.contains(t)) {
-                    break; // Spends cannot form a cycle; stop rather than loop on bad data.
-                }
-                chain.extend(extra);
-                cut = *tail_cut;
+                let fresh = extra.iter().take_while(|t| !seen.contains(*t)).count();
+                chain.extend(extra.iter().take(fresh));
+                cut = if fresh == extra.len() {
+                    *tail_cut
+                } else {
+                    None
+                };
             }
-            let truncated = cut.is_some();
+            // The hop a trace was cut before is a confirmed peel, unless it loops back.
+            let truncated = match cut {
+                Some(next) if !chain.contains(&next) => {
+                    chain.push(next);
+                    true
+                }
+                _ => false,
+            };
             let hops = u32::try_from(chain.len()).unwrap_or(u32::MAX);
+
+            let mut details = json!({
+                "start_txid": txid.to_string(),
+                "hops": hops,
+                "txids": chain.iter().map(Txid::to_string).collect::<Vec<_>>(),
+                "initial_ratio": (ratio * 100.0).round() as u32,
+            });
+            if truncated {
+                details["truncated"] = json!(true); // Only shown when the chain was cut.
+            }
 
             let severity = if hops >= critical_hops {
                 Severity::Critical
@@ -471,13 +493,7 @@ impl TxGraph {
                     if truncated { "at least " } else { "" },
                     hops
                 ),
-                details: Some(json!({
-                    "start_txid": txid.to_string(),
-                    "hops": hops,
-                    "txids": chain.iter().map(Txid::to_string).collect::<Vec<_>>(),
-                    "truncated": truncated,
-                    "initial_ratio": (ratio * 100.0).round() as u32,
-                })),
+                details: Some(details),
                 correction: Some(
                     "Avoid sending sequential transactions from the change output. \
                      Use PayJoin or CoinJoin between sends. Send the exact UTXO \
