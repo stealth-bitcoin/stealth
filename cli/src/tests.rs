@@ -571,6 +571,42 @@ mod ordering {
     }
 
     #[test]
+    fn the_text_report_names_orphaned_coinbases() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.orphaned_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction that is a coinbase from a block no longer in the chain. \
+                 It can only come back if a reorg restores that block; until then it is not \
+                 part of the history the wallet sees. Stealth does not analyze it.\n  \
+                 {CONFLICTED}\n"
+            )),
+            "{text}"
+        );
+        clean
+            .stats
+            .orphaned_txids
+            .push(REPLACEMENT.parse().unwrap());
+        let text = text_report(&clean);
+        assert!(
+            text.contains(
+                "Left out 2 transactions that are coinbases from blocks no longer in the chain. \
+                 They can only come back if a reorg restores those blocks; until then they are \
+                 not part of the history the wallet sees. Stealth does not analyze them.\n"
+            ),
+            "{text}"
+        );
+        let mut empty = clean.stats.clone();
+        empty.transactions_analyzed = 0;
+        let text = text_report(&stealth_engine::Report::new(empty, Vec::new(), Vec::new()));
+        assert!(
+            text.ends_with("\n\nNothing else was left to analyze.\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_scan_whose_every_tx_was_unavailable_gives_no_empty_scan_hint() {
         let mut stats = report(Vec::new(), Vec::new()).stats;
         stats.transactions_analyzed = 0;

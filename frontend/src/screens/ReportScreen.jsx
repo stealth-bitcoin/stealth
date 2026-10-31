@@ -164,11 +164,31 @@ const LEFT_OUT = {
     // What would stop it from confirming.
     unless: 'a conflicting transaction is mined',
   },
+  orphaned: {
+    settled: false,
+    one: 'that is a coinbase from a block no longer in the chain',
+    many: 'that are coinbases from blocks no longer in the chain',
+    beforeOne: null,
+    beforeMany: null,
+    // It cannot confirm as it stands; this is how it could come back.
+    comesBackOne: 'It can only come back if a reorg restores that block',
+    comesBackMany: 'They can only come back if a reorg restores those blocks',
+  },
 }
 
 // "may still confirm", with what would stop it when the reason says.
 function mayConfirm(reason) {
   return reason.unless ? `may still confirm unless ${reason.unless}` : 'may still confirm'
+}
+
+// Whether the transactions are out for good, may still confirm, or could come back.
+function standing(reason, one) {
+  const part = one ? 'it is' : 'they are'
+  if (reason.comesBackOne) {
+    return `. ${one ? reason.comesBackOne : reason.comesBackMany}; until then ${part} not part of the history the wallet sees.`
+  }
+  if (reason.settled) return `, so ${part} not part of the wallet's history.`
+  return `. ${one ? 'It' : 'They'} ${mayConfirm(reason)}; until then ${part} not part of the history the wallet sees.`
 }
 
 function LeftOutNote({ items, reason }) {
@@ -179,9 +199,7 @@ function LeftOutNote({ items, reason }) {
       <p className={styles.noteText}>
         Left out {items.length} {one ? 'transaction' : 'transactions'}{' '}
         {one ? reason.one : reason.many}
-        {reason.settled
-          ? `, so ${one ? 'it is' : 'they are'} not part of the wallet's history.`
-          : `. ${one ? 'It' : 'They'} ${mayConfirm(reason)}; until then ${one ? 'it is' : 'they are'} not part of the history the wallet sees.`}{' '}
+        {standing(reason, one)}{' '}
         {reason.beforeOne &&
           `${one ? 'It' : 'They'} may still have been seen by the network before ${one ? reason.beforeOne : reason.beforeMany}; `}
         Stealth does not analyze {one ? 'it' : 'them'}.
@@ -204,8 +222,14 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
   )
   const abandoned = stats.abandoned_txids ?? []
   const unavailable = stats.unavailable_txids ?? []
+  const orphaned = stats.orphaned_txids ?? []
   const anyLeftOut =
-    conflicted.length + inMempoolConflict.length + abandoned.length + unavailable.length > 0
+    conflicted.length +
+      inMempoolConflict.length +
+      abandoned.length +
+      unavailable.length +
+      orphaned.length >
+    0
   const emptyScan = summary.analyzed_nothing && findings.length === 0 && warnings.length === 0
 
   return (
@@ -272,6 +296,7 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
         <LeftOutNote items={inMempoolConflict} reason={LEFT_OUT.mempoolConflicted} />
         <LeftOutNote items={abandoned} reason={LEFT_OUT.abandoned} />
         <LeftOutNote items={unavailable} reason={LEFT_OUT.unavailable} />
+        <LeftOutNote items={orphaned} reason={LEFT_OUT.orphaned} />
 
         {/* Nothing-analyzed banner; the notes above already say why, when they are shown */}
         {emptyScan && anyLeftOut && (

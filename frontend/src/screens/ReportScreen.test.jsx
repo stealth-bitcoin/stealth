@@ -7,10 +7,10 @@ afterEach(cleanup)
 
 // Mirrors Report::new in model/src/types.rs: a scan is clean only when it
 // analyzed something and found nothing.
-function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0, conflicted = [], replaced = [], abandoned = [], unavailable = [] } = {}) {
+function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0, conflicted = [], replaced = [], abandoned = [], unavailable = [], orphaned = [] } = {}) {
   const analyzedNothing = txs === 0
   return {
-    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved, conflicted_txids: conflicted, mempool_conflicted_txids: replaced, abandoned_txids: abandoned, unavailable_txids: unavailable },
+    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved, conflicted_txids: conflicted, mempool_conflicted_txids: replaced, abandoned_txids: abandoned, unavailable_txids: unavailable, orphaned_txids: orphaned },
     findings,
     warnings,
     summary: {
@@ -476,9 +476,10 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
     delete report.stats.mempool_conflicted_txids
     delete report.stats.abandoned_txids
     delete report.stats.unavailable_txids
+    delete report.stats.orphaned_txids
     show(report)
-    // Words from each of the four notes.
-    expect(screen.queryByText(/left out|conflict|in the mempool|abandoned|no longer has/i)).toBeNull()
+    // Words from each of the five notes.
+    expect(screen.queryByText(/left out|conflict|in the mempool|abandoned|no longer has|coinbase/i)).toBeNull()
   })
 })
 
@@ -510,5 +511,27 @@ describe('ReportScreen — unconfirmed transactions the node no longer has', () 
     delete report.stats.unavailable_txids
     show(report)
     expect(screen.queryByText(/no longer has/i)).toBeNull()
+  })
+})
+
+describe('ReportScreen — coinbases from blocks no longer in the chain', () => {
+  const original = '515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb'
+  const other = 'a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab'
+  const show = (report) => render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+
+  it('names one and says how it could come back', () => {
+    show(makeReport({ txs: 2, orphaned: [original] }))
+    expect(screen.getByText(/left out 1 transaction that is a coinbase from a block no longer in the chain\. it can only come back if a reorg restores that block; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+  })
+
+  it('counts several', () => {
+    show(makeReport({ txs: 2, orphaned: [original, other] }))
+    expect(screen.getByText(/left out 2 transactions that are coinbases from blocks no longer in the chain\. they can only come back if a reorg restores those blocks; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
+  })
+
+  it('gives no empty-scan hint when every transaction was left out this way', () => {
+    show(makeReport({ txs: 0, orphaned: [original] }))
+    expect(screen.getByText(/nothing else was left to analyze/i)).toBeTruthy()
   })
 })
