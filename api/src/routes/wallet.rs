@@ -5,7 +5,10 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use stealth_engine::engine::{AnalysisEngine, EngineSettings, ScanTarget, UtxoInput};
+use stealth_engine::engine::{
+    AnalysisEngine, EngineSettings, HistoryLimit, ScanTarget, UtxoInput, DEFAULT_MAX_WALLET_TXS,
+};
+use stealth_engine::error::AnalysisError;
 use stealth_engine::progress::{ScanPhase, ScanProgress};
 use stealth_engine::Report;
 
@@ -36,6 +39,13 @@ struct ScanRequestBody {
     /// against a trusted node.
     #[serde(default)]
     cache_wallet: bool,
+    /// The most transactions of the user's own history the scan loads
+    /// (default 5,000); above it the scan stops before loading any.
+    #[serde(default)]
+    max_txs: Option<u64>,
+    /// Lifts the limit.
+    #[serde(default)]
+    no_limits: bool,
 }
 
 async fn scan_post(
@@ -43,6 +53,7 @@ async fn scan_post(
     Json(body): Json<ScanRequestBody>,
 ) -> Result<Json<Report>, ApiError> {
     let persist_scan_wallet = body.cache_wallet;
+    let history_limit = body.history_limit()?;
     let (target, ownership_descriptors) = body.into_scan_request()?;
 
     let gw = state.gateway.ok_or(ApiError::ScannerNotConfigured)?;
@@ -50,6 +61,7 @@ async fn scan_post(
         let settings = EngineSettings {
             ownership_descriptors,
             persist_scan_wallet,
+            history_limit,
             ..EngineSettings::default()
         };
         let engine = AnalysisEngine::new(gw.as_ref(), settings);
@@ -75,6 +87,14 @@ struct ScanJobStatus {
     progress: Option<f32>,
     report: Option<Report>,
     error: Option<String>,
+    /// Set when the scan stopped at the history limit.
+    limit_exceeded: Option<LimitExceeded>,
+}
+
+#[derive(Debug, Serialize)]
+struct LimitExceeded {
+    tx_count: u64,
+    limit: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +107,7 @@ async fn scans_create(
     Json(body): Json<ScanRequestBody>,
 ) -> Result<(StatusCode, Json<ScanJobCreated>), ApiError> {
     let persist_scan_wallet = body.cache_wallet;
+    let history_limit = body.history_limit()?;
     let (target, ownership_descriptors) = body.into_scan_request()?;
 
     let sink = ScanProgress::new();
@@ -109,6 +130,7 @@ async fn scans_create(
                 let settings = EngineSettings {
                     ownership_descriptors,
                     persist_scan_wallet,
+                    history_limit,
                     progress: Some(sink.clone()),
                     ..EngineSettings::default()
                 };
@@ -118,6 +140,9 @@ async fn scans_create(
                 } else {
                     match result {
                         Ok(report) => JobOutcome::Done(report),
+                        Err(AnalysisError::HistoryTooLarge { tx_count, limit }) => {
+                            JobOutcome::HistoryTooLarge { tx_count, limit }
+                        }
                         Err(error) => JobOutcome::Failed(ApiError::Analysis(error).to_string()),
                     }
                 };
@@ -144,18 +169,30 @@ async fn scans_get(
             progress: None,
             report: Some(report),
             error: None,
+            limit_exceeded: None,
         },
         Some(JobOutcome::Failed(message)) => ScanJobStatus {
             state: "failed",
             progress: None,
             report: None,
             error: Some(message),
+            limit_exceeded: None,
+        },
+        Some(JobOutcome::HistoryTooLarge { tx_count, limit }) => ScanJobStatus {
+            state: "failed",
+            progress: None,
+            report: None,
+            error: Some(
+                ApiError::Analysis(AnalysisError::HistoryTooLarge { tx_count, limit }).to_string(),
+            ),
+            limit_exceeded: Some(LimitExceeded { tx_count, limit }),
         },
         Some(JobOutcome::Cancelled) => ScanJobStatus {
             state: "cancelled",
             progress: None,
             report: None,
             error: None,
+            limit_exceeded: None,
         },
         None => {
             let snapshot = view.progress.snapshot();
@@ -168,6 +205,7 @@ async fn scans_get(
                     .flatten(),
                 report: None,
                 error: None,
+                limit_exceeded: None,
             }
         }
     };
@@ -186,7 +224,7 @@ async fn scans_delete(
     if let Some(outcome) = view.outcome {
         let state_name = match outcome {
             JobOutcome::Done(_) => "done",
-            JobOutcome::Failed(_) => "failed",
+            JobOutcome::Failed(_) | JobOutcome::HistoryTooLarge { .. } => "failed",
             JobOutcome::Cancelled => "cancelled",
         };
         return Ok((StatusCode::OK, Json(ScanJobStateOnly { state: state_name })));
@@ -222,6 +260,18 @@ fn phase_state_name(phase: ScanPhase) -> &'static str {
 }
 
 impl ScanRequestBody {
+    fn history_limit(&self) -> Result<HistoryLimit, ApiError> {
+        match (self.max_txs, self.no_limits) {
+            (Some(_), true) => Err(ApiError::bad_request(
+                "`max_txs` and `no_limits` cannot be combined",
+            )),
+            (_, true) => Ok(HistoryLimit::unlimited()),
+            (max_txs, false) => Ok(HistoryLimit::at_most(
+                max_txs.unwrap_or(DEFAULT_MAX_WALLET_TXS),
+            )),
+        }
+    }
+
     fn into_scan_request(self) -> Result<(ScanTarget, Vec<String>), ApiError> {
         match (self.descriptor, self.descriptors, self.utxos) {
             (Some(d), None, None) => Ok((ScanTarget::Descriptor(d), Vec::new())),
@@ -382,6 +432,213 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = read_json(response).await;
         assert_eq!(body["error"]["code"], "scanner_not_configured");
+    }
+
+    mod history_limit {
+        use std::collections::{HashMap, HashSet};
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+            Router,
+        };
+        use bitcoin::address::NetworkUnchecked;
+        use bitcoin::{Address, OutPoint, Txid};
+        use serde_json::{json, Value};
+        use stealth_engine::engine::HistoryLimit;
+        use stealth_engine::error::AnalysisError;
+        use stealth_engine::gateway::{
+            BlockchainGateway, DecodedTransaction, LeftOut, ResolvedDescriptor, UtxoSetResults,
+            WalletHistory,
+        };
+        use tower::ServiceExt;
+
+        use super::read_json;
+        use crate::app_with_gateway;
+
+        const TX_COUNT: u64 = 6_000;
+
+        /// A node whose scan wallet holds [`TX_COUNT`] transactions.
+        #[derive(Default)]
+        struct LargeHistory {
+            limits: Mutex<Vec<Option<u64>>>,
+        }
+
+        impl BlockchainGateway for LargeHistory {
+            fn normalize_descriptor(&self, descriptor: &str) -> Result<String, AnalysisError> {
+                Ok(descriptor.to_owned())
+            }
+
+            fn derive_addresses(
+                &self,
+                _: &ResolvedDescriptor,
+            ) -> Result<Vec<Address<NetworkUnchecked>>, AnalysisError> {
+                Ok(Vec::new())
+            }
+
+            fn scan_descriptors(
+                &self,
+                _: &[ResolvedDescriptor],
+                _: bool,
+                limit: &HistoryLimit,
+            ) -> Result<WalletHistory, AnalysisError> {
+                self.limits.lock().unwrap().push(limit.max_txs);
+                limit.check(TX_COUNT)?;
+                Ok(WalletHistory {
+                    wallet_txs: Vec::new(),
+                    utxos: Vec::new(),
+                    transactions: HashMap::new(),
+                    internal_addresses: HashSet::new(),
+                    derived_addresses: HashSet::new(),
+                    ranged_addresses: HashSet::new(),
+                    left_out: LeftOut::default(),
+                })
+            }
+
+            fn list_wallet_descriptors(
+                &self,
+                _: &str,
+            ) -> Result<Vec<ResolvedDescriptor>, AnalysisError> {
+                Ok(Vec::new())
+            }
+
+            fn scan_wallet(&self, _: &str) -> Result<WalletHistory, AnalysisError> {
+                Err(AnalysisError::EnvironmentUnavailable("not used".into()))
+            }
+
+            fn known_wallet_txids(&self, _: &[String]) -> Result<HashSet<Txid>, AnalysisError> {
+                Ok(HashSet::new())
+            }
+
+            fn get_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
+                Err(AnalysisError::TransactionNotFound(txid.to_string()))
+            }
+
+            fn outputs_in_utxo_set(&self, _: &[OutPoint]) -> Result<UtxoSetResults, AnalysisError> {
+                Ok(Vec::new())
+            }
+        }
+
+        fn app() -> (Router, Arc<LargeHistory>) {
+            let gateway = Arc::new(LargeHistory::default());
+            (app_with_gateway(Some(gateway.clone())), gateway)
+        }
+
+        async fn post(app: &Router, path: &str, body: Value) -> axum::response::Response {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .method("POST")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+
+        /// Starts a scan job and polls it until it ends.
+        async fn finished_job(app: &Router, body: Value) -> Value {
+            let created = post(app, "/api/wallet/scans", body).await;
+            assert_eq!(created.status(), StatusCode::ACCEPTED);
+            let id = read_json(created).await["scan_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            for _ in 0..200 {
+                let polled = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/api/wallet/scans/{id}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let job = read_json(polled).await;
+                if ["done", "failed", "cancelled"].contains(&job["state"].as_str().unwrap()) {
+                    return job;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("the scan job never finished");
+        }
+
+        fn scan(extra: Value) -> Value {
+            let mut body =
+                json!({ "descriptor": "addr(bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080)" });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            body
+        }
+
+        #[tokio::test]
+        async fn a_job_above_the_limit_fails_with_the_count_and_the_limit() {
+            let (app, _) = app();
+            let job = finished_job(&app, scan(json!({}))).await;
+            assert_eq!(job["state"], "failed");
+            assert_eq!(
+                job["limit_exceeded"],
+                json!({ "tx_count": TX_COUNT, "limit": 5_000 })
+            );
+            let error = job["error"].as_str().unwrap();
+            assert!(error.contains("6000 transactions"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn a_job_sent_again_with_max_txs_or_no_limits_goes_on() {
+            let (app, gateway) = app();
+            for extra in [json!({ "max_txs": TX_COUNT }), json!({ "no_limits": true })] {
+                let job = finished_job(&app, scan(extra.clone())).await;
+                assert_eq!(job["state"], "done", "{extra}: {job}");
+                assert_eq!(job["limit_exceeded"], Value::Null);
+            }
+            assert_eq!(*gateway.limits.lock().unwrap(), vec![Some(TX_COUNT), None]);
+        }
+
+        #[tokio::test]
+        async fn a_lower_max_txs_is_the_limit_the_job_names() {
+            let (app, _) = app();
+            let job = finished_job(&app, scan(json!({ "max_txs": 10 }))).await;
+            assert_eq!(job["limit_exceeded"]["limit"], 10);
+        }
+
+        #[tokio::test]
+        async fn any_other_failure_carries_no_limit() {
+            let (app, _) = app();
+            let job = finished_job(&app, json!({ "descriptor": "" })).await;
+            assert_eq!(job["state"], "failed", "{job}");
+            let status = job.as_object().unwrap();
+            assert_eq!(status.get("limit_exceeded"), Some(&Value::Null), "{job}");
+        }
+
+        #[tokio::test]
+        async fn max_txs_and_no_limits_do_not_go_together() {
+            let (app, _) = app();
+            for path in ["/api/wallet/scan", "/api/wallet/scans"] {
+                let body = scan(json!({ "max_txs": 10, "no_limits": true }));
+                let response = post(&app, path, body).await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_direct_scan_above_the_limit_answers_422_with_the_count_and_the_limit() {
+            let (app, _) = app();
+            let response = post(&app, "/api/wallet/scan", scan(json!({}))).await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "history_too_large");
+            assert_eq!(body["error"]["tx_count"], TX_COUNT);
+            assert_eq!(body["error"]["limit"], 5_000);
+
+            let response = post(&app, "/api/wallet/scan", scan(json!({ "no_limits": true }))).await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
     }
 
     async fn read_json(response: axum::response::Response) -> Value {

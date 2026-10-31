@@ -125,6 +125,8 @@ Accepts one mutually-exclusive source:
 | `descriptors` | `string[]` | Multiple descriptors |
 | `utxos` | `UtxoInput[]` | Raw UTXO set |
 | `cache_wallet` | `bool` | Optional, default `false`. Keep a watch-only wallet named after the descriptors on the node so repeat scans only pay Core's incremental catch-up. The viewing key stays in the node's wallet directory until removed by hand. |
+| `max_txs` | `number` | Optional, default `5000`. The most transactions of the wallet's history the scan loads; see below. |
+| `no_limits` | `bool` | Optional, default `false`. Lifts `max_txs`. Cannot be combined with it. |
 
 **Descriptor scan flow:** creates a blank watch-only wallet, imports the
 descriptor(s) with a full blockchain rescan, builds a `TxGraph`, runs all
@@ -171,6 +173,42 @@ only sees the active chain and the mempool, so through this API the lists can
 be non-empty only for a scan with `cache_wallet`, whose wallet was watching
 when these transactions were in the mempool.
 
+**History limit:** after the rescan, the scan reads the scan wallet's
+transaction count (`getwalletinfo`) before it loads any of the history, since
+loading a large one makes `bitcoind` grow its memory and keep it. Above
+`max_txs` the scan stops, unloads the scan wallet (a cache wallet stays on
+disk, complete, for the next scan) and fails with the count and the limit. A
+UTXO scan counts the history of the pasted outputs' addresses, which it loads
+in one wallet, the same way. To go on, send the same scan again with
+`max_txs` set to at least the count, or with `no_limits: true`; the rescan
+runs again.
+
+`POST /api/wallet/scan` answers `422`:
+
+```json
+{
+  "error": {
+    "code": "history_too_large",
+    "message": "analysis failed: the wallet history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
+    "tx_count": 12345,
+    "limit": 5000
+  }
+}
+```
+
+A job from `POST /api/wallet/scans` (same body) ends as `failed`, with
+`limit_exceeded` set (it is `null` on every other status):
+
+```json
+{
+  "state": "failed",
+  "progress": null,
+  "report": null,
+  "error": "analysis failed: the wallet history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
+  "limit_exceeded": { "tx_count": 12345, "limit": 5000 }
+}
+```
+
 #### Example (real descriptor from Bitcoin Core)
 
 ```bash
@@ -192,6 +230,7 @@ curl 'http://localhost:20899/api/wallet/scan' \
 |--------|---------|
 | `200` | Scan completed — body is a `Report` |
 | `400` | Invalid input (bad descriptor shape, empty UTXOs, …) |
+| `422` | The wallet history is above `max_txs` (`history_too_large`) |
 | `502` | bitcoind RPC unavailable/auth failed/connection failed |
 
 ## Environment variables

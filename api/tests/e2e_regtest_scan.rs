@@ -215,6 +215,89 @@ async fn cache_wallet_flag_keeps_the_scan_wallet_on_the_node() {
     server.stop().await;
 }
 
+#[tokio::test]
+async fn a_job_above_max_txs_stops_and_goes_on_when_sent_again_with_the_count() {
+    let node = start_node();
+    let mining_addr = node.client.new_address().unwrap();
+    mine(&node, 110, &mining_addr);
+    let alice = node.create_wallet("alice").unwrap();
+    let addr = alice.new_address().unwrap();
+    for _ in 0..5 {
+        node.client
+            .send_to_address(&addr, Amount::from_sat(100_000))
+            .unwrap();
+        mine(&node, 1, &mining_addr);
+    }
+
+    let rpc_url = node.rpc_url();
+    let cookie_path = node.params.cookie_file.clone();
+    let gateway = tokio::task::spawn_blocking(move || {
+        let (user, pass) = read_cookie_file(&cookie_path).expect("failed to read cookie file");
+        BitcoinCoreRpc::from_url(&rpc_url, Some(user), Some(pass)).expect("failed to build gateway")
+    })
+    .await
+    .unwrap();
+    let server = ApiServer::spawn(gateway).await;
+    let client = reqwest::Client::new();
+    let descriptor = format!("addr({addr})");
+
+    let stopped = finished_job(
+        &client,
+        &server,
+        json!({ "descriptor": descriptor, "max_txs": 3 }),
+    )
+    .await;
+    assert_eq!(stopped["state"], "failed", "{stopped}");
+    assert_eq!(
+        stopped["limit_exceeded"],
+        json!({ "tx_count": 5, "limit": 3 })
+    );
+    let loaded: Vec<String> = node.client.call("listwallets", &[]).unwrap();
+    assert!(
+        !loaded.iter().any(|w| w.starts_with("_stealth")),
+        "the scan wallet must be unloaded: {loaded:?}"
+    );
+
+    let tx_count = stopped["limit_exceeded"]["tx_count"].clone();
+    let done = finished_job(
+        &client,
+        &server,
+        json!({ "descriptor": descriptor, "max_txs": tx_count }),
+    )
+    .await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(done["report"]["stats"]["transactions_analyzed"], 5);
+    server.stop().await;
+}
+
+async fn finished_job(client: &reqwest::Client, server: &ApiServer, body: Value) -> Value {
+    let created: Value = client
+        .post(server.url("/api/wallet/scans"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let scan_id = created["scan_id"].as_str().expect("scan_id string");
+    for _ in 0..300 {
+        let job: Value = client
+            .get(server.url(&format!("/api/wallet/scans/{scan_id}")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if matches!(job["state"].as_str(), Some("done" | "failed" | "cancelled")) {
+            return job;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the scan job never finished");
+}
+
 async fn scan_descriptor(
     client: &reqwest::Client,
     server: &ApiServer,

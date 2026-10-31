@@ -19,6 +19,11 @@ const FINISHED_JOB_RETENTION: Duration = Duration::from_secs(15 * 60);
 pub enum JobOutcome {
     Done(Report),
     Failed(String),
+    /// Stopped before loading a history above the limit.
+    HistoryTooLarge {
+        tx_count: u64,
+        limit: u64,
+    },
     Cancelled,
 }
 
