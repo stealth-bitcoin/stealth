@@ -515,3 +515,12 @@ fn a_same_address_merge_with_an_op_return_stays_low() {
     let f = spent_finding(&findings).expect("a spent dust finding");
     assert_eq!(f.severity, Severity::Low, "{f:?}");
 }
+
+#[test]
+fn attack_dust_paid_to_an_output_with_no_address_but_a_value_keeps_critical() {
+    let a = wpkh(1);
+    let mut p2pk = op_return(1);
+    p2pk.value = Amount::from_sat(20_000);
+    let findings = spent_dust(9, &[(&a, 50_000)], vec![out(0, &a, 29_000), p2pk]);
+    assert_moved_elsewhere(&findings, 9);
+}

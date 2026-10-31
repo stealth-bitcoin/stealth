@@ -125,7 +125,8 @@ impl TxGraph {
     }
 
     /// Every input of the confirmed tx spending this output is at `address`, and every output
-    /// stays there or has no address, so the spend tied no other address to it.
+    /// stays there or is a 0-value output with no address (OP_RETURN), so the spend tied no
+    /// other address to it.
     fn spent_from_its_address_only(
         &self,
         key: &(Txid, u32),
@@ -135,10 +136,10 @@ impl TxGraph {
             let inputs = self.get_input_addresses(&child.txid);
             inputs.len() == child.vin.len()
                 && inputs.iter().all(|i| i.address == *address)
-                && child
-                    .vout
-                    .iter()
-                    .all(|o| o.address.as_ref().is_none_or(|a| a == address))
+                && child.vout.iter().all(|o| match &o.address {
+                    Some(a) => a == address,
+                    None => o.value == Amount::ZERO,
+                })
         })
     }
 
