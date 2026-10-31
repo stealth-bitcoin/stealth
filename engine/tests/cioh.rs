@@ -326,3 +326,36 @@ fn unresolved_input_counts_toward_the_total() {
     assert_eq!(details["total_inputs"], 3);
     assert_eq!(details["ownership_pct"], 67);
 }
+
+#[test]
+fn own_input_without_address_counts_as_unknown() {
+    let a = wpkh(1);
+    let b = wpkh(2);
+    let (mut history, spend) = spend_history(&[&a, &b], &[a.clone(), b.clone()]);
+    // The wallet's own P2PK-like coin: its output has no address.
+    let own_p2pk = txid(0x30);
+    let mut p2pk_out = out(0, &a, 1_000_000);
+    p2pk_out.address = None;
+    history.transactions.insert(
+        own_p2pk,
+        tx(own_p2pk, vec![vin(txid(0xA9), 0)], vec![p2pk_out]),
+    );
+    history
+        .wallet_txs
+        .push(entry(own_p2pk, None, WalletTxCategory::Receive));
+    history
+        .transactions
+        .get_mut(&spend)
+        .expect("spend tx is in the history")
+        .vin
+        .push(vin(own_p2pk, 0));
+    let findings = cioh_findings(history);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert!(
+        f.description.contains("2 of its 3 inputs are yours"),
+        "{}",
+        f.description
+    );
+    assert_eq!(f.severity, Severity::High);
+}
