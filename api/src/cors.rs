@@ -189,6 +189,11 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
         ));
     }
     let port = match port {
+        Some("") => {
+            return Err(invalid(
+                "empty port is not allowed; remove the trailing colon",
+            ))
+        }
         Some(port) => {
             Some(parse_port(port).ok_or_else(|| invalid("port must be a number from 0 to 65535"))?)
         }

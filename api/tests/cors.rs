@@ -347,3 +347,33 @@ fn ipv4_mapped_ipv6_origins_are_refused_as_unsupported() {
         );
     }
 }
+
+#[test]
+fn malformed_authority_gets_a_specific_reason() {
+    for (raw, reason) in [
+        ("http://[::1]x", "unexpected text after the IPv6 address"),
+        (
+            "http://[::1]x:5173",
+            "unexpected text after the IPv6 address",
+        ),
+        ("http://[::1", "unclosed IPv6 bracket"),
+        ("http://[::1:5173", "unclosed IPv6 bracket"),
+        (
+            "http://example.com:",
+            "empty port is not allowed; remove the trailing colon",
+        ),
+        (
+            "http://[::1]:",
+            "empty port is not allowed; remove the trailing colon",
+        ),
+    ] {
+        let result = stealth_api::AllowedOrigins::localhost().with_extra([raw]);
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("{raw:?} was accepted"));
+        assert!(
+            error.to_string().contains(reason),
+            "error for {raw:?}: {error}"
+        );
+    }
+}

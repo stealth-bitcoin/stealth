@@ -25,6 +25,11 @@ Environment:
   STEALTH_RPC_USER           RPC username
   STEALTH_RPC_PASS           RPC password
   STEALTH_RPC_COOKIE         Path to the RPC .cookie file
+  RUST_LOG                   Log filter (default info)
+  HOME                       Used to find the node's cookie under ~/.bitcoin
+
+Without RPC credentials in the environment, the API reads ./bitcoin.conf and
+then looks for a cookie file under ~/.bitcoin.
 
 Loopback origins (localhost, 127.0.0.1, [::1]) are always allowed.
 ";
@@ -91,7 +96,7 @@ fn read_allowed_origins() -> Result<Option<AllowedOrigins>, String> {
                 .map_err(|arg| format!("argument is not valid UTF-8: {}", arg.to_string_lossy()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+    if wants_help(&args) {
         return Ok(None);
     }
     let env = std::env::var_os("STEALTH_API_ALLOW_ORIGINS")
@@ -105,6 +110,21 @@ fn read_allowed_origins() -> Result<Option<AllowedOrigins>, String> {
         })
         .transpose()?;
     allowed_origins_from(args.into_iter(), env).map(Some)
+}
+
+// A flag in the value position of --allow-origin is a missing value, not a request for help.
+fn wants_help(args: &[String]) -> bool {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return true,
+            "--allow-origin" => {
+                args.next();
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn allowed_origins_from(
@@ -125,7 +145,7 @@ fn allowed_origins_from(
     let mut flagged = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--allow-origin" {
-            let value = args.next().ok_or(
+            let value = args.next().filter(|value| !value.starts_with('-')).ok_or(
                 "--allow-origin needs a value, e.g. --allow-origin https://wallet.example.org",
             )?;
             flagged.push(value);

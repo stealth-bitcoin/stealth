@@ -220,6 +220,8 @@ fn help_prints_usage_and_exits_successfully() {
             "STEALTH_RPC_USER",
             "STEALTH_RPC_PASS",
             "STEALTH_RPC_COOKIE",
+            "RUST_LOG",
+            "HOME",
         ] {
             assert!(
                 stdout.contains(expected),
@@ -246,4 +248,17 @@ fn startup_errors_print_the_plain_message() {
         stderr.starts_with("Error: invalid --allow-origin value: invalid origin \"https://wallet.example.org/app\""),
         "stderr: {stderr}"
     );
+}
+
+#[test]
+fn help_in_the_value_position_is_a_missing_value() {
+    for flag in ["--help", "-h"] {
+        let output = run_api(&["--allow-origin", flag], None);
+        assert!(!output.status.success(), "{flag} printed usage instead");
+        let stderr = stderr(&output);
+        assert!(
+            stderr.contains("--allow-origin needs a value"),
+            "stderr: {stderr}"
+        );
+    }
 }
