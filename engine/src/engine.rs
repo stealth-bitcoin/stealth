@@ -82,11 +82,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
         self.mark_phase(ScanPhase::Analyzing);
         let mut graph = TxGraph::from_wallet_history(history);
-        // Addresses alone say nothing of the wallet's other addresses.
-        graph.partial_scan = expanded.iter().all(|d| {
-            let d = d.trim_start();
-            d.starts_with("addr(") || d.starts_with("raw(")
-        });
+        // Without a ranged descriptor the scan knows only the scripts it was given.
+        graph.partial_scan = !expanded.iter().any(|d| is_ranged(d));
         self.ask_dust_status(&mut graph, false);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
@@ -103,7 +100,12 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let (addresses_without_history, listed) = self.merge_address_history(&mut history)?;
         self.mark_phase(ScanPhase::Analyzing);
         let mut graph = TxGraph::from_wallet_history(history);
-        graph.partial_scan = self.settings.ownership_descriptors.is_empty();
+        graph.partial_scan = !self
+            .settings
+            .ownership_descriptors
+            .iter()
+            .flat_map(|raw| expand_input(raw).unwrap_or_default())
+            .any(|d| is_ranged(&d));
         graph
             .chain_unspent
             .extend(listed.into_iter().map(|op| ((op.txid, op.vout), true)));

@@ -568,18 +568,38 @@ fn a_wallet_scan_does_not_count_a_strangers_coin_in_the_merge() {
 }
 
 #[test]
-fn a_descriptor_scan_of_a_single_key_does_not_count_a_strangers_coin() {
-    let (node, a, _, _) = dust_merged_with_a_third_coin(false);
+fn a_descriptor_scan_without_a_ranged_descriptor_is_partial() {
+    let (node, a, bobs, _) = dust_merged_with_a_third_coin(false);
     let info: serde_json::Value = node_wallet(&node, "alice")
         .call("getaddressinfo", &[serde_json::json!(a.to_string())])
         .unwrap();
-    // A non-ranged descriptor of the key behind `a`: the user gave the scan their key.
+    // A single key, like a single address, says nothing of the wallet's other addresses.
     let single_key = info["desc"].as_str().expect("descriptor").to_owned();
     assert!(!single_key.contains('*'), "{single_key}");
     let gateway = gateway_for(&node);
     let engine = AnalysisEngine::new(&gateway, EngineSettings::default());
-
-    let report = engine.analyze(ScanTarget::Descriptor(single_key)).unwrap();
+    for descriptor in [single_key, format!("addr({a})")] {
+        let report = engine
+            .analyze(ScanTarget::Descriptor(descriptor.clone()))
+            .unwrap();
+        let dust = finding_of(&report, VulnerabilityType::DustSpending);
+        assert_eq!(
+            dust.severity,
+            stealth_engine::Severity::Medium,
+            "{descriptor}"
+        );
+        assert!(
+            dust.description.contains(&bobs.to_string()),
+            "{}",
+            dust.description
+        );
+    }
+    // The wallet's ranged descriptors make the scan full: Bob's coin is a stranger's.
+    let ranged: Vec<String> = wallet_descriptors(&node_wallet(&node, "alice"))
+        .into_iter()
+        .filter(|d| d.contains('*'))
+        .collect();
+    let report = engine.analyze(ScanTarget::Descriptors(ranged)).unwrap();
     for kind in [
         VulnerabilityType::DustSpending,
         VulnerabilityType::ToxicChange,
@@ -590,11 +610,49 @@ fn a_descriptor_scan_of_a_single_key_does_not_count_a_strangers_coin() {
             report.findings
         );
     }
+}
 
-    // The address alone says nothing of the wallet's other addresses.
-    let report = engine
-        .analyze(ScanTarget::Descriptor(format!("addr({a})")))
-        .unwrap();
+/// A UTXO scan of the pasted coin, with `ownership` as the ownership descriptors.
+fn utxo_scan_owned_by(
+    node: &Node,
+    pasted: &stealth_engine::engine::UtxoInput,
+    ownership: Vec<String>,
+) -> stealth_engine::Report {
+    let gateway = gateway_for(node);
+    let settings = EngineSettings {
+        ownership_descriptors: ownership,
+        ..EngineSettings::default()
+    };
+    AnalysisEngine::new(&gateway, settings)
+        .analyze(ScanTarget::Utxos(vec![pasted.clone()]))
+        .unwrap()
+}
+
+#[test]
+fn a_utxo_scan_with_a_ranged_ownership_descriptor_does_not_count_a_strangers_coin() {
+    let (node, _, _, pasted) = dust_merged_with_a_third_coin(false);
+    let ranged: Vec<String> = wallet_descriptors(&node_wallet(&node, "alice"))
+        .into_iter()
+        .filter(|d| d.contains('*'))
+        .collect();
+    assert!(!ranged.is_empty());
+    let report = utxo_scan_owned_by(&node, &pasted, ranged);
+    for kind in [
+        VulnerabilityType::DustSpending,
+        VulnerabilityType::ToxicChange,
+    ] {
+        assert!(
+            !has_finding(&report, kind),
+            "{kind:?}: {:?}",
+            report.findings
+        );
+    }
+}
+
+#[test]
+fn a_utxo_scan_owned_only_by_addresses_is_partial() {
+    let (node, a, _, pasted) = dust_merged_with_a_third_coin(false);
+    let report = utxo_scan_owned_by(&node, &pasted, vec![format!("addr({a})")]);
     assert_eq!(
         finding_of(&report, VulnerabilityType::DustSpending).severity,
         stealth_engine::Severity::Medium
