@@ -107,9 +107,11 @@ loading them can take long and put a heavy load on the node:
 - **API:** the job fails with `limit_exceeded` set; send the scan again with
   `no_limits` or `max_txs` (see [api/README.md](../api/README.md)).
 
-Going on from the frontend or the API runs the full rescan again, unless the
-scan uses a cache wallet, which is loaded again with only the catch-up
-rescan. UTXO mode counts
+"Scan anyway" in the frontend, or sending the scan again through the API, runs
+the whole rescan again unless the scan uses a cache wallet (which is loaded
+again with only the catch-up rescan), so on a heavy history the rescan time
+is paid twice. The CLI question avoids that: it asks in the middle of the
+scan and goes on from where it stopped. UTXO mode counts
 the history of the pasted outputs' addresses the same way. The count comes
 from `getwalletinfo`; an RPC user restricted with `rpcwhitelist` needs it
 allowed, or the limit is not checked.

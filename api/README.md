@@ -125,7 +125,7 @@ Accepts one mutually-exclusive source:
 | `descriptors` | `string[]` | Multiple descriptors |
 | `utxos` | `UtxoInput[]` | Raw UTXO set |
 | `cache_wallet` | `bool` | Optional, default `false`. Keep a watch-only wallet named after the descriptors on the node so repeat scans only pay Core's incremental catch-up. The viewing key stays in the node's wallet directory until removed by hand. |
-| `max_txs` | `number` | Optional, default `5000`. The most transactions of the wallet's history the scan loads; see below. |
+| `max_txs` | `number` | Optional, default `5000`. The most transactions the scan loads: of the wallet's history, or for a `utxos` body of the history of the pasted outputs' addresses; see below. |
 | `no_limits` | `bool` | Optional, default `false`. Lifts `max_txs`. Cannot be combined with it. |
 
 **Descriptor scan flow:** creates a blank watch-only wallet, imports the
@@ -185,9 +185,10 @@ node refuses `getwalletinfo` (`rpcwhitelist`) gets no count, so its scans go
 on unchecked and the gateway warns once on stderr; allow `getwalletinfo` to
 have the limit checked. To go on, send the same scan again with
 `no_limits: true`, or with `max_txs` set to at least the count, higher if the
-history may grow before the scan reaches it. Without `cache_wallet` the full
-rescan runs again; with it, the cache wallet left on disk is loaded with only
-the catch-up rescan.
+history may grow before the scan reaches it. Without `cache_wallet` the whole
+rescan runs again, so on a heavy history the scan pays the rescan time twice;
+with it, the cache wallet left on disk is loaded with only the catch-up
+rescan. The CLI avoids the second rescan by asking in the middle of the scan.
 
 `POST /api/wallet/scan` answers `422`. axum also answers `422`, as plain
 text, to a body whose field has the wrong type, so tell the two apart by
