@@ -25,4 +25,44 @@ fn detect_address_reuse() {
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
     assert!(has_finding(&report, VulnerabilityType::AddressReuse));
+    let reuse = reuse_correction(&report, &reused);
+    assert!(
+        reuse.starts_with("Generate a fresh address for every payment received."),
+        "{reuse}"
+    );
+}
+
+fn reuse_correction(report: &stealth_engine::Report, address: &Address) -> String {
+    let address = address.to_string();
+    let found: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.vulnerability_type == VulnerabilityType::AddressReuse)
+        .filter(|f| f.details.as_ref().unwrap()["address"] == address.as_str())
+        .collect();
+    assert_eq!(found.len(), 1, "{:?}", report.findings);
+    found[0].correction.clone().unwrap()
+}
+
+#[test]
+fn reuse_from_change_back_to_the_input_address_says_so() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let reused = pay_with_change_back_to_input(&node, &alice);
+
+    let report = scan_wallet(&gateway_for(&node), "alice");
+    let reuse = reuse_correction(&report, &reused);
+    assert!(
+        reuse.starts_with(
+            "This address got change back from its own spends: send change to a fresh \
+             change address instead, as wallets do by default."
+        ),
+        "{reuse}"
+    );
+    assert!(
+        reuse.contains("Generate a fresh address for every payment received."),
+        "{reuse}"
+    );
 }

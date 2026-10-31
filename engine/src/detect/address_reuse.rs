@@ -35,6 +35,12 @@ impl TxGraph {
                 } else {
                     "receive"
                 };
+                // The reuse comes from change that a spend from this address sent back to it.
+                let change_back = reuse_txids.iter().any(|t| {
+                    self.get_input_addresses(t)
+                        .iter()
+                        .any(|ia| ia.address == *addr)
+                });
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::AddressReuse,
                     severity: Severity::High,
@@ -50,16 +56,21 @@ impl TxGraph {
                         "tx_count": reuse_txids.len(),
                         "txids": reuse_txids,
                     })),
-                    correction: Some(
-                        "Generate a fresh address for every payment received. \
+                    correction: Some(format!(
+                        "{}Generate a fresh address for every payment received. \
                          Enable HD wallet derivation (BIP-32/44/84) so your wallet \
                          produces a new address automatically. \
                          For a recurring or published receiving address, use a Silent \
                          Payments address (sp1...): the sp1 string never appears on-chain \
                          and every payment to it lands on a fresh, unrelated address, so \
-                         publishing it does not link the payments you receive."
-                            .into(),
-                    ),
+                         publishing it does not link the payments you receive.",
+                        if change_back {
+                            "This address got change back from its own spends: send change \
+                             to a fresh change address instead, as wallets do by default. "
+                        } else {
+                            ""
+                        }
+                    )),
                 });
             }
         }
