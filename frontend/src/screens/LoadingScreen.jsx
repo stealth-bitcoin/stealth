@@ -13,6 +13,15 @@ const CHAIN_SCAN_KINDS = ['descriptor', 'xpub', 'address', 'utxos']
 
 const formatCount = (n) => Number(n).toLocaleString('en-US')
 
+// Whose history the scan counted, as the API names it in limit_exceeded.of.
+const HISTORY_WORDING = {
+  wallet: { title: 'This wallet has a large history', holds: 'It holds' },
+  pasted_addresses: {
+    title: "The pasted outputs' addresses have a large history",
+    holds: 'Their history holds',
+  },
+}
+
 export default function LoadingScreen({
   text,
   kind,
@@ -30,6 +39,7 @@ export default function LoadingScreen({
   const isChainScan = CHAIN_SCAN_KINDS.includes(kind)
   const label = PHASE_LABELS[state] ?? PHASE_LABELS.pending
   const hasProgress = state === 'rescanning' && typeof progress === 'number'
+  const wording = HISTORY_WORDING[limitExceeded?.of] ?? HISTORY_WORDING.wallet
   const percent = hasProgress ? Math.round(Math.min(Math.max(progress, 0), 1) * 100) : null
 
   async function handleCancel() {
@@ -67,11 +77,11 @@ export default function LoadingScreen({
           aria-describedby="history-limit-text"
         >
           <div id="history-limit-title" className={styles.confirmTitle}>
-            This wallet has a large history
+            {wording.title}
           </div>
           <div className={styles.descriptor}>{shortText}</div>
           <p id="history-limit-text" className={styles.confirmText}>
-            It holds {formatCount(limitExceeded.tx_count)} transactions, more than the limit of{' '}
+            {wording.holds} {formatCount(limitExceeded.tx_count)} transactions, more than the limit of{' '}
             {formatCount(limitExceeded.limit)}. Loading them can take long and put a heavy load
             on your node. Scanning anyway runs the chain scan again.
           </p>

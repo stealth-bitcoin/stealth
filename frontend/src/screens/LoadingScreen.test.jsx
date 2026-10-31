@@ -96,7 +96,22 @@ describe('LoadingScreen', () => {
   })
 
   describe('when the history is above the limit', () => {
-    const LIMIT = { tx_count: 12345, limit: 5000 }
+    const LIMIT = { of: 'wallet', tx_count: 12345, limit: 5000 }
+
+    it("names the wallet's history for a descriptor scan", () => {
+      render(<LoadingScreen limitExceeded={LIMIT} />)
+      const text = screen.getByRole('alertdialog').textContent
+      expect(text).toMatch(/This wallet has a large history/)
+      expect(text).toMatch(/It holds 12,345 transactions/)
+    })
+
+    it("names the pasted outputs' addresses for a UTXO scan", () => {
+      render(<LoadingScreen limitExceeded={{ ...LIMIT, of: 'pasted_addresses' }} />)
+      const text = screen.getByRole('alertdialog').textContent
+      expect(text).toMatch(/The pasted outputs' addresses have a large history/)
+      expect(text).toMatch(/Their history holds 12,345 transactions/)
+      expect(text).not.toMatch(/wallet/i)
+    })
 
     it('shows the count, the limit and what loading them costs instead of the progress', () => {
       render(<LoadingScreen state="failed" limitExceeded={LIMIT} />)
