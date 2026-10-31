@@ -194,6 +194,7 @@ runs again.
   "error": {
     "code": "history_too_large",
     "message": "analysis failed: the wallet history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
+    "of": "wallet",
     "tx_count": 12345,
     "limit": 5000
   }
@@ -201,7 +202,8 @@ runs again.
 ```
 
 A job from `POST /api/wallet/scans` (same body) ends as `failed`, with
-`limit_exceeded` set (it is `null` on every other status):
+`limit_exceeded` set (it is `null` on every other status). In both, `of` is
+`wallet` for a descriptor scan and `pasted_addresses` for a UTXO scan:
 
 ```json
 {
@@ -209,7 +211,7 @@ A job from `POST /api/wallet/scans` (same body) ends as `failed`, with
   "progress": null,
   "report": null,
   "error": "analysis failed: the wallet history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
-  "limit_exceeded": { "tx_count": 12345, "limit": 5000 }
+  "limit_exceeded": { "of": "wallet", "tx_count": 12345, "limit": 5000 }
 }
 ```
 

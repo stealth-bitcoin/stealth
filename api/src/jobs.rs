@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use stealth_engine::error::HistoryOf;
 use stealth_engine::progress::ScanProgress;
 use stealth_engine::Report;
 
@@ -22,6 +23,7 @@ pub enum JobOutcome {
     /// Stopped before loading a history above the limit.
     HistoryTooLarge {
         message: String,
+        of: HistoryOf,
         tx_count: u64,
         limit: u64,
     },

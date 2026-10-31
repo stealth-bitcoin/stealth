@@ -6,7 +6,15 @@ use axum::{
 use serde::Serialize;
 use thiserror::Error;
 
-use stealth_engine::error::AnalysisError;
+use stealth_engine::error::{AnalysisError, HistoryOf};
+
+/// Whose history a stop at the limit counted, as the API names it.
+pub(crate) fn history_of_name(of: HistoryOf) -> &'static str {
+    match of {
+        HistoryOf::Wallet => "wallet",
+        HistoryOf::PastedAddresses => "pasted_addresses",
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -69,16 +77,19 @@ impl IntoResponse for ApiError {
         let status = self.status_code();
         let message = self.to_string();
         let code = self.error_code();
-        let (tx_count, limit) = match self {
+        let (of, tx_count, limit) = match self {
             Self::Analysis(AnalysisError::HistoryTooLarge {
-                tx_count, limit, ..
-            }) => (Some(tx_count), Some(limit)),
-            _ => (None, None),
+                of,
+                tx_count,
+                limit,
+            }) => (Some(history_of_name(of)), Some(tx_count), Some(limit)),
+            _ => (None, None, None),
         };
         let body = Json(ErrorResponse {
             error: ErrorDetails {
                 code,
                 message,
+                of,
                 tx_count,
                 limit,
             },
@@ -97,6 +108,8 @@ struct ErrorDetails {
     code: &'static str,
     message: String,
     /// Set for `history_too_large`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    of: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tx_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -250,7 +250,7 @@ async fn a_job_above_max_txs_stops_and_goes_on_when_sent_again_with_the_count() 
     assert_eq!(stopped["state"], "failed", "{stopped}");
     assert_eq!(
         stopped["limit_exceeded"],
-        json!({ "tx_count": 5, "limit": 3 })
+        json!({ "of": "wallet", "tx_count": 5, "limit": 3 })
     );
     let loaded: Vec<String> = node.client.call("listwallets", &[]).unwrap();
     assert!(

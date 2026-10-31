@@ -12,7 +12,7 @@ use stealth_engine::error::AnalysisError;
 use stealth_engine::progress::{ScanPhase, ScanProgress};
 use stealth_engine::Report;
 
-use crate::error::ApiError;
+use crate::error::{history_of_name, ApiError};
 use crate::jobs::JobOutcome;
 use crate::AppState;
 
@@ -93,6 +93,8 @@ struct ScanJobStatus {
 
 #[derive(Debug, Serialize)]
 struct LimitExceeded {
+    /// `wallet` or `pasted_addresses`.
+    of: &'static str,
     tx_count: u64,
     limit: u64,
 }
@@ -142,10 +144,13 @@ async fn scans_create(
                         Ok(report) => JobOutcome::Done(report),
                         Err(
                             error @ AnalysisError::HistoryTooLarge {
-                                tx_count, limit, ..
+                                of,
+                                tx_count,
+                                limit,
                             },
                         ) => JobOutcome::HistoryTooLarge {
                             message: ApiError::Analysis(error).to_string(),
+                            of,
                             tx_count,
                             limit,
                         },
@@ -186,6 +191,7 @@ async fn scans_get(
         },
         Some(JobOutcome::HistoryTooLarge {
             message,
+            of,
             tx_count,
             limit,
         }) => ScanJobStatus {
@@ -193,7 +199,11 @@ async fn scans_get(
             progress: None,
             report: None,
             error: Some(message),
-            limit_exceeded: Some(LimitExceeded { tx_count, limit }),
+            limit_exceeded: Some(LimitExceeded {
+                of: history_of_name(of),
+                tx_count,
+                limit,
+            }),
         },
         Some(JobOutcome::Cancelled) => ScanJobStatus {
             state: "cancelled",
@@ -452,13 +462,13 @@ mod tests {
             Router,
         };
         use bitcoin::address::NetworkUnchecked;
-        use bitcoin::{Address, OutPoint, Txid};
+        use bitcoin::{Address, Amount, OutPoint, Txid};
         use serde_json::{json, Value};
         use stealth_engine::engine::HistoryLimit;
         use stealth_engine::error::AnalysisError;
         use stealth_engine::gateway::{
-            BlockchainGateway, DecodedTransaction, LeftOut, ResolvedDescriptor, UtxoSetResults,
-            WalletHistory,
+            BlockchainGateway, DecodedTransaction, DescriptorType, LeftOut, ResolvedDescriptor,
+            TxOutput, UtxoSetResults, WalletHistory,
         };
         use tower::ServiceExt;
 
@@ -466,6 +476,7 @@ mod tests {
         use crate::app_with_gateway;
 
         const TX_COUNT: u64 = 6_000;
+        const ADDR: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
         /// A node whose scan wallet holds [`TX_COUNT`] transactions.
         #[derive(Default)]
@@ -520,7 +531,21 @@ mod tests {
             }
 
             fn get_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
-                Err(AnalysisError::TransactionNotFound(txid.to_string()))
+                // A coinbase paying the pasted output's address.
+                Ok(DecodedTransaction {
+                    txid,
+                    vin: Vec::new(),
+                    vout: vec![TxOutput {
+                        n: 0,
+                        address: Some(ADDR.parse().unwrap()),
+                        value: Amount::from_sat(50_000),
+                        script_type: DescriptorType::P2wpkh,
+                    }],
+                    version: 2,
+                    locktime: 0,
+                    vsize: 100,
+                    confirmations: 10,
+                })
             }
 
             fn outputs_in_utxo_set(&self, _: &[OutPoint]) -> Result<UtxoSetResults, AnalysisError> {
@@ -591,7 +616,7 @@ mod tests {
             assert_eq!(job["state"], "failed");
             assert_eq!(
                 job["limit_exceeded"],
-                json!({ "tx_count": TX_COUNT, "limit": 5_000 })
+                json!({ "of": "wallet", "tx_count": TX_COUNT, "limit": 5_000 })
             );
             let error = job["error"].as_str().unwrap();
             assert!(error.contains("6000 transactions"), "{error}");
@@ -606,6 +631,24 @@ mod tests {
                 assert_eq!(job["limit_exceeded"], Value::Null);
             }
             assert_eq!(*gateway.limits.lock().unwrap(), vec![Some(TX_COUNT), None]);
+        }
+
+        #[tokio::test]
+        async fn a_utxo_job_names_the_pasted_outputs_addresses() {
+            let (app, _) = app();
+            let txid = "0000000000000000000000000000000000000000000000000000000000000001";
+            let job = finished_job(&app, json!({ "utxos": [{ "txid": txid, "vout": 0 }] })).await;
+            assert_eq!(job["limit_exceeded"]["of"], "pasted_addresses", "{job}");
+            let error = job["error"].as_str().unwrap();
+            assert!(error.contains("pasted outputs' addresses"), "{error}");
+
+            let response = post(
+                &app,
+                "/api/wallet/scan",
+                json!({ "utxos": [{ "txid": txid, "vout": 0 }] }),
+            )
+            .await;
+            assert_eq!(read_json(response).await["error"]["of"], "pasted_addresses");
         }
 
         #[tokio::test]
@@ -641,6 +684,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
             let body = read_json(response).await;
             assert_eq!(body["error"]["code"], "history_too_large");
+            assert_eq!(body["error"]["of"], "wallet");
             assert_eq!(body["error"]["tx_count"], TX_COUNT);
             assert_eq!(body["error"]["limit"], 5_000);
 
