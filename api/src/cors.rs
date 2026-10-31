@@ -126,6 +126,11 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
         ));
     }
     let origin = trimmed.to_ascii_lowercase();
+    if origin.contains('*') {
+        return Err(invalid(
+            "wildcards are not supported; list each origin explicitly",
+        ));
+    }
     let (scheme, default_port, authority) = if let Some(rest) = origin.strip_prefix("http://") {
         ("http", 80, rest)
     } else if let Some(rest) = origin.strip_prefix("https://") {
@@ -138,11 +143,6 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
     }
     if authority.contains(['/', '?', '#']) {
         return Err(invalid("an origin has no path, query or trailing slash"));
-    }
-    if authority.contains('*') {
-        return Err(invalid(
-            "wildcards are not supported; list each origin explicitly",
-        ));
     }
     if authority.contains(['@', '<', '>', '^', '|'])
         || authority
