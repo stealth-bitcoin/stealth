@@ -35,9 +35,30 @@ fn change_back_to_the_input_address_is_the_named_change() {
     let da = node.client.new_address().unwrap();
     mine(&node, 110, &da);
     let alice = node.create_wallet("alice").unwrap();
-    pay_with_change_back_to_input(&node, &alice);
+    let funded = alice.new_address().unwrap();
+    pay_with_change_back_to_input(&node, &alice, funded);
+    assert_change_back_reason(&node);
+}
 
-    let report = scan_wallet(&gateway_for(&node), "alice");
+#[test]
+fn change_back_to_an_internal_change_address_is_the_named_change() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let internal = alice
+        .get_raw_change_address()
+        .unwrap()
+        .into_model()
+        .unwrap()
+        .0
+        .assume_checked();
+    pay_with_change_back_to_input(&node, &alice, internal);
+    assert_change_back_reason(&node);
+}
+
+fn assert_change_back_reason(node: &Node) {
+    let report = scan_wallet(&gateway_for(node), "alice");
     let change: Vec<_> = report
         .findings
         .iter()

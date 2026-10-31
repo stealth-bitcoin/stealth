@@ -50,7 +50,8 @@ fn reuse_from_change_back_to_the_input_address_says_so() {
     let da = node.client.new_address().unwrap();
     mine(&node, 110, &da);
     let alice = node.create_wallet("alice").unwrap();
-    let reused = pay_with_change_back_to_input(&node, &alice);
+    let funded = alice.new_address().unwrap();
+    let reused = pay_with_change_back_to_input(&node, &alice, funded);
 
     let report = scan_wallet(&gateway_for(&node), "alice");
     let reuse = reuse_correction(&report, &reused);

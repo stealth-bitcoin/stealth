@@ -369,12 +369,15 @@ pub fn assert_change_address_wording(warning: &stealth_engine::Finding) {
     );
 }
 
-/// Alice receives 1 BTC at one address, then pays bob 0.3 BTC from it with the
-/// change sent back to that same address. Returns the reused address.
-pub fn pay_with_change_back_to_input(node: &Node, alice: &corepc_node::Client) -> Address {
+/// Alice receives 1 BTC at `funded`, then pays bob 0.3 BTC from it with the
+/// change sent back to that same address. Returns `funded`.
+pub fn pay_with_change_back_to_input(
+    node: &Node,
+    alice: &corepc_node::Client,
+    funded: Address,
+) -> Address {
     let da = node.client.new_address().unwrap();
     let bob = node.create_wallet("bob").unwrap();
-    let funded = alice.new_address().unwrap();
     node.client
         .send_to_address(&funded, Amount::ONE_BTC)
         .unwrap();
