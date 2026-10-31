@@ -2948,6 +2948,49 @@ mod tests {
     }
 
     #[test]
+    fn an_ancestor_the_node_cannot_find_is_skipped_without_a_second_fetch() {
+        let fetches = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&fetches);
+        let rpc = serve_node(move |method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "getmempoolinfo" => panic!("only a missing wallet tx asks about the mempool"),
+                "listunspent" => json!([]),
+                "listtransactions" => json!([{
+                    "address": ADDR, "amount": 0.001, "category": "receive",
+                    "confirmations": 3, "blockheight": 110, "txid": ORIGINAL, "vout": 0,
+                }]),
+                "getrawtransaction" => {
+                    // The wallet tx, then its parent, which the node lacks.
+                    let answer = if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                        json!({ "id": 0, "error": null, "result": {
+                            "txid": ORIGINAL, "confirmations": 3,
+                            "vin": [{ "txid": TXID, "vout": 0 }],
+                            "vout": [{ "value": 0.001, "n": 0, "scriptPubKey": { "address": ADDR } }],
+                        }})
+                    } else {
+                        json!({ "id": 0, "result": null, "error": not_found() })
+                    };
+                    return ("200 OK", json!([answer]).to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        });
+        let history = rpc.load_history_for_wallet("bob").expect("scan");
+        assert_eq!(history.wallet_txs.len(), 1);
+        assert_eq!(history.left_out, Default::default());
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            2,
+            "no second fetch of the parent"
+        );
+    }
+
+    #[test]
     fn a_confirmed_output_the_node_cannot_find_still_fails_the_scan() {
         // Only listunspent says the tx is confirmed.
         let rpc = serve_node(|method| {

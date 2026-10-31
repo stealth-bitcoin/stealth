@@ -268,10 +268,13 @@ pub struct WalletHistory {
 pub struct LeftOut {
     /// Core reports them as conflicted (negative confirmations): each, or a
     /// tx it depends on, conflicts with another one.
+    #[serde(default)]
     pub conflicted: BTreeSet<Txid>,
     /// In conflict with a tx in the mempool, not confirmed yet, keyed to that tx.
+    #[serde(default)]
     pub mempool_conflicted: BTreeMap<Txid, Txid>,
     /// Abandoned in the wallet.
+    #[serde(default)]
     pub abandoned: BTreeSet<Txid>,
     /// Unconfirmed, unflagged, and no longer (or never) on the node: expired or
     /// evicted from the mempool, abandoned in another wallet, or never broadcast.
