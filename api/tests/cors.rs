@@ -271,3 +271,41 @@ async fn private_network_access_is_granted_to_extra_origins_only() {
     assert!(!allows_private_network(&headers));
     assert_eq!(allowed_origin(&headers), None);
 }
+
+#[test]
+fn hosts_a_browser_would_rewrite_are_refused() {
+    for (raw, hint) in [
+        ("http://192.168.010.5", "IPv4"),
+        ("http://127.1", "IPv4"),
+        ("http://0x7f000001", "IPv4"),
+        ("http://127.0.0.0x1", "IPv4"),
+        ("http://256.1.1.1", "IPv4"),
+        ("http://1.2.3.4.5", "IPv4"),
+        ("http://wallet.example.42", "IPv4"),
+        ("http://ex%61mple.com", "%"),
+        ("http://a\\b", "\\"),
+    ] {
+        let result = stealth_api::AllowedOrigins::localhost().with_extra([raw]);
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("{raw:?} was accepted"));
+        let message = error.to_string();
+        assert!(message.contains(raw), "error for {raw:?}: {message}");
+        assert!(message.contains(hint), "error for {raw:?}: {message}");
+    }
+}
+
+#[test]
+fn canonical_ipv4_and_names_with_digits_are_accepted() {
+    for raw in [
+        "http://192.168.10.5:5173",
+        "http://0.0.0.0",
+        "https://255.255.255.255",
+        "https://1password.example",
+        "https://wallet42.example",
+        "https://wallet.example.",
+    ] {
+        let result = stealth_api::AllowedOrigins::localhost().with_extra([raw]);
+        assert!(result.is_ok(), "{raw:?} was refused: {:?}", result.err());
+    }
+}

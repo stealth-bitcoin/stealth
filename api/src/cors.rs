@@ -94,6 +94,26 @@ fn parse_port(port: &str) -> Option<u16> {
     port.parse().ok()
 }
 
+// Browsers parse a host whose last label is a number as IPv4 and rewrite it, so only the canonical form can match.
+fn is_canonical_unless_ipv4(host: &str) -> bool {
+    let without_dot = host.strip_suffix('.').unwrap_or(host);
+    let last = without_dot.rsplit('.').next().unwrap_or_default();
+    let all_digits = |label: &str| !label.is_empty() && label.bytes().all(|b| b.is_ascii_digit());
+    let is_hex = last
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()));
+    if !all_digits(last) && !is_hex {
+        return true;
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    octets.len() == 4
+        && octets.iter().all(|octet| {
+            all_digits(octet)
+                && (*octet == "0" || !octet.starts_with('0'))
+                && octet.parse::<u8>().is_ok()
+        })
+}
+
 fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
     let invalid = |reason| InvalidOrigin {
         origin: raw.to_owned(),
@@ -126,6 +146,11 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
     {
         return Err(invalid("host contains characters an origin cannot have"));
     }
+    if !authority.starts_with('[') && authority.contains(['%', '\\']) {
+        return Err(invalid(
+            "host cannot contain '%' or '\\'; browsers rewrite them, so write the host as the browser shows it",
+        ));
+    }
     let (host, port) = match authority.strip_prefix('[') {
         Some(bracketed) => {
             let (address, after) = bracketed
@@ -154,6 +179,11 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
     };
     if host.is_empty() {
         return Err(invalid("host is missing"));
+    }
+    if !is_canonical_unless_ipv4(&host) {
+        return Err(invalid(
+            "an IPv4 address must be four decimal numbers from 0 to 255 without leading zeros",
+        ));
     }
     let port = match port {
         Some(port) => {

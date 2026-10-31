@@ -54,10 +54,24 @@ fn read_bind_addr() -> Result<SocketAddr, String> {
 }
 
 fn read_allowed_origins() -> Result<AllowedOrigins, String> {
-    allowed_origins_from(
-        std::env::args().skip(1),
-        std::env::var("STEALTH_API_ALLOW_ORIGINS").ok(),
-    )
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|arg| format!("argument is not valid UTF-8: {}", arg.to_string_lossy()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let env = std::env::var_os("STEALTH_API_ALLOW_ORIGINS")
+        .map(|raw| {
+            raw.into_string().map_err(|raw| {
+                format!(
+                    "STEALTH_API_ALLOW_ORIGINS is not valid UTF-8: {}",
+                    raw.to_string_lossy()
+                )
+            })
+        })
+        .transpose()?;
+    allowed_origins_from(args.into_iter(), env)
 }
 
 fn allowed_origins_from(

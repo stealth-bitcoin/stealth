@@ -1,14 +1,20 @@
 use std::process::Command;
 
-fn run_api(args: &[&str], env_origins: Option<&str>) -> std::process::Output {
+// The bind address is invalid, so a run that gets past origin parsing still exits.
+fn api_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_stealth-api"));
     command
-        .args(args)
         .env_remove("STEALTH_API_ALLOW_ORIGINS")
         .env("STEALTH_API_BIND", "not-an-address")
         .env("STEALTH_RPC_URL", "http://127.0.0.1:1")
         .env("STEALTH_RPC_USER", "u")
         .env("STEALTH_RPC_PASS", "p");
+    command
+}
+
+fn run_api(args: &[&str], env_origins: Option<&str>) -> std::process::Output {
+    let mut command = api_command();
+    command.args(args);
     if let Some(value) = env_origins {
         command.env("STEALTH_API_ALLOW_ORIGINS", value);
     }
@@ -142,4 +148,52 @@ async fn configured_origins_reach_the_running_server() {
         preflight_allow_origin(port, "https://evil.example").await,
         None
     );
+}
+
+#[test]
+fn unknown_argument_stops_startup_naming_it() {
+    let output = run_api(&["--allow-orgin", "https://wallet.example.org"], None);
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("unknown argument: --allow-orgin"),
+        "stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_argument_is_reported_not_panicked_on() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let output = api_command()
+        .arg("--allow-origin")
+        .arg(std::ffi::OsStr::from_bytes(b"https://wallet\xff.example"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    assert!(stderr.contains("not valid UTF-8"), "stderr: {stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_allow_origins_env_stops_startup() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let output = api_command()
+        .env(
+            "STEALTH_API_ALLOW_ORIGINS",
+            std::ffi::OsStr::from_bytes(b"https://wallet\xff.example"),
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("STEALTH_API_ALLOW_ORIGINS"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("not valid UTF-8"), "stderr: {stderr}");
 }
