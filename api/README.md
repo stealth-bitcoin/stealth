@@ -97,7 +97,10 @@ original of a fee bump or a payment double-spent by a raw transaction (each an
 object with `txid` and `conflicts_with`; the conflicting transaction is
 analyzed only when the wallet lists it and the scan keeps it), and
 `abandoned_txids` for those abandoned in the wallet. Any other wallet
-transaction the node cannot serve still fails the scan.
+transaction the node cannot serve still fails the scan. A fresh scan wallet
+only sees the active chain and the mempool, so through this API the lists can
+be non-empty only for a scan with `cache_wallet`, whose wallet was watching
+when these transactions were in the mempool.
 
 #### Example (real descriptor from Bitcoin Core)
 
