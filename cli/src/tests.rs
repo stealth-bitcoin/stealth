@@ -984,5 +984,9 @@ mod usage {
             entry.contains("in UTXO mode, the history of the pasted outputs' addresses"),
             "{entry}"
         );
+        assert!(
+            entry.contains("only when run in the foreground with stdin and stderr on a terminal"),
+            "{entry}"
+        );
     }
 }
