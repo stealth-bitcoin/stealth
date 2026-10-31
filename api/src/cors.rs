@@ -139,12 +139,17 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
     if authority.contains(['/', '?', '#']) {
         return Err(invalid("an origin has no path, query or trailing slash"));
     }
-    if authority.contains(['@', '*'])
+    if authority.contains(['@', '*', '<', '>', '^', '|'])
         || authority
             .chars()
             .any(|c| c.is_whitespace() || c.is_control())
     {
         return Err(invalid("host contains characters an origin cannot have"));
+    }
+    if !authority.starts_with('[') && authority.contains(['[', ']']) {
+        return Err(invalid(
+            "square brackets are only allowed around an IPv6 address",
+        ));
     }
     if !authority.starts_with('[') && authority.contains(['%', '\\']) {
         return Err(invalid(

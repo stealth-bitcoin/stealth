@@ -43,7 +43,8 @@ frontend's Vite dev server. To allow another web origin, pass it with
 path; the API refuses to start on a malformed one. Hosts must be ASCII (use the
 punycode form of an internationalised name), IPv4 addresses must be four
 decimal numbers without leading zeros, and a default port such as `:443` is
-dropped to match what browsers send. Unknown arguments stop startup too.
+dropped to match what browsers send. `stealth-api --help` lists the flag and
+the environment variables; any other unknown argument stops startup.
 Added origins also get `Access-Control-Allow-Private-Network`, which some
 Chrome versions ask for before a public page may reach a loopback address.
 

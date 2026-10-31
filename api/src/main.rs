@@ -10,11 +10,33 @@ use stealth_bitcoincore::BitcoinCoreRpc;
 use stealth_engine::gateway::BlockchainGateway;
 use tracing_subscriber::EnvFilter;
 
+const USAGE: &str = "\
+Usage: stealth-api [--allow-origin <origin>]...
+
+Options:
+  --allow-origin <origin>  Also allow this web origin (scheme://host[:port]); repeatable
+  -h, --help               Print this help
+
+Environment:
+  STEALTH_API_BIND           Listen address (default 127.0.0.1:20899)
+  STEALTH_API_ALLOW_ORIGINS  Extra web origins, comma-separated
+  STEALTH_RPC_URL            bitcoind RPC endpoint (default: auto-detected)
+  STEALTH_RPC_USER           RPC username
+  STEALTH_RPC_PASS           RPC password
+  STEALTH_RPC_COOKIE         Path to the RPC .cookie file
+
+Loopback origins (localhost, 127.0.0.1, [::1]) are always allowed.
+";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
-    let origins = read_allowed_origins()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let Some(origins) = read_allowed_origins()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+    else {
+        print!("{USAGE}");
+        return Ok(());
+    };
 
     // `BitcoinCoreRpc` uses `reqwest::blocking::Client`, which must be
     // constructed outside a Tokio runtime.
@@ -53,7 +75,8 @@ fn read_bind_addr() -> Result<SocketAddr, String> {
         .map_err(|_| format!("invalid STEALTH_API_BIND value: {raw}"))
 }
 
-fn read_allowed_origins() -> Result<AllowedOrigins, String> {
+/// `None` when the user asked for `--help`.
+fn read_allowed_origins() -> Result<Option<AllowedOrigins>, String> {
     let args = std::env::args_os()
         .skip(1)
         .map(|arg| {
@@ -61,6 +84,9 @@ fn read_allowed_origins() -> Result<AllowedOrigins, String> {
                 .map_err(|arg| format!("argument is not valid UTF-8: {}", arg.to_string_lossy()))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return Ok(None);
+    }
     let env = std::env::var_os("STEALTH_API_ALLOW_ORIGINS")
         .map(|raw| {
             raw.into_string().map_err(|raw| {
@@ -71,7 +97,7 @@ fn read_allowed_origins() -> Result<AllowedOrigins, String> {
             })
         })
         .transpose()?;
-    allowed_origins_from(args.into_iter(), env)
+    allowed_origins_from(args.into_iter(), env).map(Some)
 }
 
 fn allowed_origins_from(
@@ -99,9 +125,7 @@ fn allowed_origins_from(
         } else if let Some(value) = arg.strip_prefix("--allow-origin=") {
             flagged.push(value.to_owned());
         } else {
-            return Err(format!(
-                "unknown argument: {arg} (supported: --allow-origin <origin>)"
-            ));
+            return Err(format!("unknown argument: {arg} (see --help)"));
         }
     }
     origins

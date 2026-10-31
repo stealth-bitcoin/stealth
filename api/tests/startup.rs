@@ -112,7 +112,11 @@ async fn configured_origins_reach_the_running_server() {
     let port = free_port();
     let _api = RunningApi(
         Command::new(env!("CARGO_BIN_EXE_stealth-api"))
-            .args(["--allow-origin", "https://flag.example"])
+            .args([
+                "--allow-origin",
+                "https://flag.example",
+                "--allow-origin=https://equals.example",
+            ])
             .env("STEALTH_API_ALLOW_ORIGINS", "https://env.example")
             .env("STEALTH_API_BIND", format!("127.0.0.1:{port}"))
             .env("STEALTH_RPC_URL", "http://127.0.0.1:1")
@@ -138,6 +142,7 @@ async fn configured_origins_reach_the_running_server() {
 
     for origin in [
         "https://flag.example",
+        "https://equals.example",
         "https://env.example",
         "http://localhost:5173",
     ] {
@@ -196,4 +201,34 @@ fn non_utf8_allow_origins_env_stops_startup() {
         "stderr: {stderr}"
     );
     assert!(stderr.contains("not valid UTF-8"), "stderr: {stderr}");
+}
+
+#[test]
+fn help_prints_usage_and_exits_successfully() {
+    for flag in ["--help", "-h"] {
+        let output = run_api(&[flag], None);
+        assert!(output.status.success(), "{flag}: {}", stderr(&output));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for expected in [
+            "--allow-origin",
+            "STEALTH_API_ALLOW_ORIGINS",
+            "STEALTH_API_BIND",
+            "STEALTH_RPC_URL",
+            "STEALTH_RPC_USER",
+            "STEALTH_RPC_PASS",
+            "STEALTH_RPC_COOKIE",
+        ] {
+            assert!(
+                stdout.contains(expected),
+                "{flag} output lacks {expected}: {stdout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn help_does_not_hide_other_unknown_arguments() {
+    let output = run_api(&["--hepl"], None);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("unknown argument: --hepl"));
 }

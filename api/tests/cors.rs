@@ -309,3 +309,23 @@ fn canonical_ipv4_and_names_with_digits_are_accepted() {
         assert!(result.is_ok(), "{raw:?} was refused: {:?}", result.err());
     }
 }
+
+#[test]
+fn forbidden_host_code_points_are_refused() {
+    for raw in [
+        "http://a<b.example",
+        "http://a>b.example",
+        "http://a^b.example",
+        "http://a|b.example",
+        "http://a[b.example",
+        "http://a]b.example",
+        "http://wallet.example]",
+        "http://a:b:c.example",
+        "http://a\tb.example",
+        "http://a\u{7f}b.example",
+        "http://a\0b.example",
+    ] {
+        let result = stealth_api::AllowedOrigins::localhost().with_extra([raw]);
+        assert!(result.is_err(), "{raw:?} was accepted");
+    }
+}
