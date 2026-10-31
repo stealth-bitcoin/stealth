@@ -80,3 +80,6 @@ impl TxGraph {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
