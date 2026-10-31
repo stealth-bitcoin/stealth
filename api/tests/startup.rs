@@ -263,3 +263,197 @@ fn help_in_the_value_position_is_a_missing_value() {
         );
     }
 }
+
+#[test]
+fn malformed_allow_host_flag_stops_startup_with_a_clear_error() {
+    let output = run_api(&["--allow-host", "http://stealth.lan"], None);
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("invalid --allow-host value"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("http://stealth.lan"), "stderr: {stderr}");
+}
+
+#[test]
+fn malformed_allow_hosts_env_stops_startup_with_a_clear_error() {
+    let output = api_command()
+        .env("STEALTH_API_ALLOW_HOSTS", "stealth.lan,*")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("invalid STEALTH_API_ALLOW_HOSTS value"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn allow_host_flag_without_a_value_stops_startup() {
+    for args in [&["--allow-host"][..], &["--allow-host", "--help"][..]] {
+        let output = run_api(args, None);
+        assert!(!output.status.success(), "{args:?} succeeded");
+        let stderr = stderr(&output);
+        assert!(
+            stderr.contains("--allow-host needs a value"),
+            "stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn help_lists_the_host_options() {
+    let output = run_api(&["--help"], None);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in ["--allow-host", "STEALTH_API_ALLOW_HOSTS"] {
+        assert!(stdout.contains(expected), "help lacks {expected}: {stdout}");
+    }
+}
+
+// Binds to port 0 and reads the port the server reports, so no other process can take it first.
+// Also returns the log lines printed up to that point.
+fn spawn_api_on_any_port(args: &[&str], env: &[(&str, &str)]) -> (RunningApi, u16, Vec<String>) {
+    use std::io::BufRead;
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stealth-api"));
+    command
+        .args(args)
+        .env_remove("STEALTH_API_ALLOW_ORIGINS")
+        .env_remove("STEALTH_API_ALLOW_HOSTS")
+        .env("STEALTH_API_BIND", "127.0.0.1:0")
+        .env("STEALTH_RPC_URL", "http://127.0.0.1:1")
+        .env("STEALTH_RPC_USER", "u")
+        .env("STEALTH_RPC_PASS", "p")
+        .env("RUST_LOG", "info")
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    command.envs(env.iter().copied());
+    let mut child = command.spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let api = RunningApi(child);
+    let mut lines = std::io::BufReader::new(stdout).lines();
+    let mut startup_log = Vec::new();
+    let port = lines
+        .by_ref()
+        .map_while(Result::ok)
+        .find(|line| {
+            startup_log.push(line.clone());
+            line.contains("listening")
+        })
+        .and_then(|line| {
+            let address = line.split("bind_addr=").nth(1)?;
+            let after = address.split_whitespace().next()?.rsplit_once(':')?.1;
+            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<u16>().ok()
+        })
+        .expect("stealth-api did not report its listening port");
+    // Keep draining stdout so the server never blocks on a full pipe.
+    std::thread::spawn(move || lines.for_each(drop));
+    (api, port, startup_log)
+}
+
+async fn status_with_host(port: u16, host: &str) -> reqwest::StatusCode {
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/wallet/scan"))
+        .header("host", host)
+        .json(&serde_json::json!({ "descriptor": "wpkh(x/0/*)" }))
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn running_server_checks_the_host_header() {
+    let (_api, port, startup_log) = spawn_api_on_any_port(
+        &[
+            "--allow-host",
+            "flag.example",
+            "--allow-host=equals.example:8080",
+        ],
+        &[("STEALTH_API_ALLOW_HOSTS", "env.example")],
+    );
+    assert!(
+        startup_log
+            .iter()
+            .any(|line| line.contains("Host check accepts")
+                && line.contains("flag.example")
+                && line.contains("env.example")),
+        "startup log: {startup_log:?}"
+    );
+    assert!(
+        startup_log
+            .iter()
+            .any(|line| line.contains("--allow-host flag.example has no port")),
+        "startup log: {startup_log:?}"
+    );
+
+    for host in [
+        format!("127.0.0.1:{port}"),
+        format!("localhost:{port}"),
+        "flag.example".to_owned(),
+        "equals.example:8080".to_owned(),
+        "env.example".to_owned(),
+    ] {
+        let status = status_with_host(port, &host).await;
+        assert_ne!(status, reqwest::StatusCode::FORBIDDEN, "host {host}");
+    }
+    for host in [
+        "attacker.example".to_owned(),
+        format!("attacker.example:{port}"),
+        "localhost:5173".to_owned(),
+    ] {
+        let status = status_with_host(port, &host).await;
+        assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "host {host}");
+    }
+}
+
+#[tokio::test]
+async fn running_server_bound_to_every_interface_warns_about_host_names() {
+    let (_api, port, startup_log) =
+        spawn_api_on_any_port(&[], &[("STEALTH_API_BIND", "0.0.0.0:0")]);
+    assert!(
+        startup_log
+            .iter()
+            .any(|line| line.contains("WARN")
+                && line.contains("only loopback Host names are accepted")),
+        "startup log: {startup_log:?}"
+    );
+    assert_eq!(
+        status_with_host(port, &format!("0.0.0.0:{port}")).await,
+        reqwest::StatusCode::FORBIDDEN
+    );
+}
+
+#[test]
+fn allow_host_on_443_stops_startup_unless_the_api_listens_on_443() {
+    // Port 1 cannot be bound without privileges, so a run that gets past the host check still exits.
+    let mut child = api_command()
+        .args(["--allow-host", "stealth.lan:443"])
+        .env("STEALTH_API_BIND", "127.0.0.1:1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut exited = false;
+    for _ in 0..100 {
+        if child.try_wait().unwrap().is_some() {
+            exited = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !exited {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(exited, "stealth-api kept running");
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("stealth.lan:443"), "stderr: {stderr}");
+    assert!(stderr.contains("without :443"), "stderr: {stderr}");
+}
