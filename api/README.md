@@ -96,8 +96,10 @@ for unconfirmed ones a transaction in the mempool conflicts with, such as the
 original of a fee bump or a payment double-spent by a raw transaction (each an
 object with `txid` and `conflicts_with`; the conflicting transaction is
 analyzed only when the wallet lists it and the scan keeps it),
-`abandoned_txids` for those abandoned in the scan's own wallet, and
-`unavailable_txids` for unconfirmed ones the node no longer has (replaced or
+`abandoned_txids` for those abandoned in the scan's own wallet,
+`orphaned_txids` for coinbases from a block no longer in the chain (they can
+only come back if a reorg restores that block; Core also marks them abandoned,
+but they are listed here instead), and `unavailable_txids` for unconfirmed ones the node no longer has (replaced or
 double-spent, expired or evicted from the mempool, never broadcast, or
 depending on a transaction that was; such a one may still confirm unless a
 conflicting transaction is mined). The abandoned list fills only
@@ -108,7 +110,10 @@ answers with any error other than not found. `mempoolconflicts`,
 which `mempool_conflicted_txids` relies on, appeared in Bitcoin Core 28.0; on
 an older node an unmined fee bump's original lands in `unavailable_txids`. A
 scan that hits an unconfirmed transaction the node does not have while the
-node is still loading its mempool fails, asking to scan again later. A fresh scan wallet
+node is still loading its mempool fails, asking to scan again later. So does
+one that keeps seeing new blocks land between listing the wallet and fetching
+its transactions: without txindex a transaction mined in between reads as not
+found, so the history is read again once before giving up. A fresh scan wallet
 only sees the active chain and the mempool, so through this API the lists can
 be non-empty only for a scan with `cache_wallet`, whose wallet was watching
 when these transactions were in the mempool.
