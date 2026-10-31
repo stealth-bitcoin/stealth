@@ -1,8 +1,9 @@
+use std::net::Ipv6Addr;
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
 use thiserror::Error;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, AllowPrivateNetwork, Any, CorsLayer};
 
 const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
 
@@ -43,22 +44,29 @@ impl AllowedOrigins {
         Ok(self)
     }
 
-    /// The explicitly added origins, normalised to lowercase.
+    /// The explicitly added origins, normalised to the form browsers send.
     pub fn extra(&self) -> &[String] {
         &self.extra
     }
 
     pub(crate) fn layer(&self) -> CorsLayer {
         let extra = Arc::new(self.extra.clone());
+        let is_extra = move |origin: &HeaderValue| {
+            extra
+                .iter()
+                .any(|allowed| allowed.as_bytes().eq_ignore_ascii_case(origin.as_bytes()))
+        };
+        let is_extra_for_network = is_extra.clone();
         let allow = AllowOrigin::predicate(move |origin: &HeaderValue, _| {
-            let origin = origin.as_bytes();
-            is_loopback_origin(origin)
-                || extra
-                    .iter()
-                    .any(|allowed| allowed.as_bytes().eq_ignore_ascii_case(origin))
+            is_loopback_origin(origin.as_bytes()) || is_extra(origin)
+        });
+        // Chrome asks before a public page reaches a loopback address; loopback pages never need it.
+        let private_network = AllowPrivateNetwork::predicate(move |origin: &HeaderValue, _| {
+            is_extra_for_network(origin)
         });
         CorsLayer::new()
             .allow_origin(allow)
+            .allow_private_network(private_network)
             .allow_methods(Any)
             .allow_headers(Any)
             .expose_headers(Any)
@@ -74,13 +82,16 @@ fn is_loopback_origin(origin: &[u8]) -> bool {
     };
     LOOPBACK_HOSTS.iter().any(|host| {
         rest.strip_prefix(host).is_some_and(|port| {
-            port.is_empty() || port.strip_prefix(':').is_some_and(is_valid_port)
+            port.is_empty() || port.strip_prefix(':').and_then(parse_port).is_some()
         })
     })
 }
 
-fn is_valid_port(port: &str) -> bool {
-    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
+fn parse_port(port: &str) -> Option<u16> {
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    port.parse().ok()
 }
 
 fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
@@ -88,11 +99,20 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
         origin: raw.to_owned(),
         reason,
     };
-    let origin = raw.trim().to_ascii_lowercase();
-    let authority = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-        .ok_or_else(|| invalid("scheme must be http:// or https://"))?;
+    let trimmed = raw.trim();
+    if !trimmed.is_ascii() {
+        return Err(invalid(
+            "host must be ASCII; use the punycode form (xn--...) of an internationalised name",
+        ));
+    }
+    let origin = trimmed.to_ascii_lowercase();
+    let (scheme, default_port, authority) = if let Some(rest) = origin.strip_prefix("http://") {
+        ("http", 80, rest)
+    } else if let Some(rest) = origin.strip_prefix("https://") {
+        ("https", 443, rest)
+    } else {
+        return Err(invalid("scheme must be http:// or https://"));
+    };
     if authority.is_empty() {
         return Err(invalid("host is missing"));
     }
@@ -107,28 +127,45 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
         return Err(invalid("host contains characters an origin cannot have"));
     }
     let (host, port) = match authority.strip_prefix('[') {
-        Some(ipv6) => {
-            let (address, after) = ipv6
+        Some(bracketed) => {
+            let (address, after) = bracketed
                 .split_once(']')
                 .ok_or_else(|| invalid("unclosed IPv6 bracket"))?;
+            let address: Ipv6Addr = address
+                .parse()
+                .map_err(|_| invalid("brackets must hold an IPv6 address"))?;
+            // Browsers print IPv4-mapped addresses in hex, Rust in dotted form; they would never match.
+            if address.to_ipv4_mapped().is_some() {
+                return Err(invalid(
+                    "use the IPv4 address instead of an IPv4-mapped IPv6 address",
+                ));
+            }
             let port = match after.strip_prefix(':') {
                 Some(port) => Some(port),
                 None if after.is_empty() => None,
                 None => return Err(invalid("unexpected text after the IPv6 address")),
             };
-            (address, port)
+            (format!("[{address}]"), port)
         }
         None => match authority.split_once(':') {
-            Some((host, port)) => (host, Some(port)),
-            None => (authority, None),
+            Some((host, port)) => (host.to_owned(), Some(port)),
+            None => (authority.to_owned(), None),
         },
     };
     if host.is_empty() {
         return Err(invalid("host is missing"));
     }
-    if port.is_some_and(|port| !is_valid_port(port)) {
-        return Err(invalid("port must be a number from 0 to 65535"));
-    }
+    let port = match port {
+        Some(port) => {
+            Some(parse_port(port).ok_or_else(|| invalid("port must be a number from 0 to 65535"))?)
+        }
+        None => None,
+    };
+    // Browsers leave the scheme's default port out of the Origin header.
+    let origin = match port {
+        Some(port) if port != default_port => format!("{scheme}://{host}:{port}"),
+        _ => format!("{scheme}://{host}"),
+    };
     HeaderValue::from_str(&origin).map_err(|_| invalid("not a valid header value"))?;
     Ok(origin)
 }

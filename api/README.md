@@ -40,7 +40,16 @@ Browsers may only call the API from loopback origins (`http://localhost`,
 frontend's Vite dev server. To allow another web origin, pass it with
 `--allow-origin` (repeatable) or list it in `STEALTH_API_ALLOW_ORIGINS`
 (comma-separated). Each value is an exact origin, `scheme://host[:port]` with no
-path; the API refuses to start on a malformed one.
+path; the API refuses to start on a malformed one. Hosts must be ASCII (use the
+punycode form of an internationalised name), and a default port such as `:443`
+is dropped to match what browsers send. Added origins also get
+`Access-Control-Allow-Private-Network`, which Chrome requires before a public
+page may reach a loopback address.
+
+CORS only decides which web pages may read the API's responses. It does not
+stop DNS rebinding, where an attacker's domain resolves to `127.0.0.1` and the
+page becomes same-origin with the API; that needs a `Host` header check, which
+the API does not do yet.
 
 ```bash
 cargo run --bin stealth-api -- --allow-origin https://wallet.example.org

@@ -91,7 +91,7 @@ async fn preflight_from_foreign_origin_gets_no_allow_origin_header() {
 
 #[tokio::test]
 async fn request_without_origin_still_reaches_the_api() {
-    // The Vite proxy and curl may send no Origin at all; CORS must not block them.
+    // curl and the CLI send no Origin; CORS must not block them.
     let request = Request::builder()
         .method(Method::POST)
         .uri(SCAN_PATH)
@@ -162,4 +162,112 @@ fn malformed_extra_origins_are_rejected() {
             "error for {raw:?}: {error}"
         );
     }
+}
+
+#[test]
+fn extra_origins_are_normalised_to_what_browsers_send() {
+    for (raw, expected) in [
+        (
+            "https://wallet.example.org:443",
+            "https://wallet.example.org",
+        ),
+        ("http://wallet.example.org:80", "http://wallet.example.org"),
+        (
+            "https://wallet.example.org:80",
+            "https://wallet.example.org:80",
+        ),
+        (
+            "http://wallet.example.org:05173",
+            "http://wallet.example.org:5173",
+        ),
+        ("HTTPS://Wallet.Example.ORG", "https://wallet.example.org"),
+        ("http://[0:0:0:0:0:0:0:1]:5173", "http://[::1]:5173"),
+        ("http://[FE80:0:0:0:0:0:0:1]", "http://[fe80::1]"),
+        (
+            "https://xn--bcher-kva.example",
+            "https://xn--bcher-kva.example",
+        ),
+    ] {
+        let origins = stealth_api::AllowedOrigins::localhost()
+            .with_extra([raw])
+            .unwrap_or_else(|error| panic!("{raw:?} rejected: {error}"));
+        assert_eq!(origins.extra(), [expected], "origin {raw:?}");
+    }
+}
+
+#[tokio::test]
+async fn extra_origin_with_default_port_matches_the_browser_origin() {
+    let headers = simple_request(
+        app_allowing(&["https://wallet.example.org:443"]),
+        "https://wallet.example.org",
+    )
+    .await;
+    assert_eq!(allowed_origin(&headers), Some("https://wallet.example.org"));
+}
+
+#[test]
+fn bracketed_host_must_be_an_ipv6_address() {
+    for raw in [
+        "http://[evil]",
+        "http://[127.0.0.1]:5173",
+        "http://[::1%25eth0]",
+        "http://[]",
+        "http://[::ffff:127.0.0.1]",
+    ] {
+        let result = stealth_api::AllowedOrigins::localhost().with_extra([raw]);
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("{raw:?} was accepted"));
+        assert!(
+            error.to_string().contains("IPv6"),
+            "error for {raw:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn non_ascii_host_is_refused_with_a_punycode_hint() {
+    let result = stealth_api::AllowedOrigins::localhost().with_extra(["https://bücher.example"]);
+    let error = result
+        .err()
+        .unwrap_or_else(|| panic!("non-ASCII host was accepted"));
+    assert!(error.to_string().contains("punycode"), "error: {error}");
+    assert!(
+        error.to_string().contains("bücher.example"),
+        "error: {error}"
+    );
+}
+
+async fn private_network_preflight(app: Router, origin: &str) -> HeaderMap {
+    let request = Request::builder()
+        .method(Method::OPTIONS)
+        .uri(SCAN_PATH)
+        .header(header::ORIGIN, origin)
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+        .header("access-control-request-private-network", "true")
+        .body(Body::empty())
+        .unwrap();
+    app.oneshot(request).await.unwrap().headers().clone()
+}
+
+fn allows_private_network(headers: &HeaderMap) -> bool {
+    headers
+        .get("access-control-allow-private-network")
+        .is_some_and(|value| value == "true")
+}
+
+#[tokio::test]
+async fn private_network_access_is_granted_to_extra_origins_only() {
+    let app = || app_allowing(&["https://wallet.example.org"]);
+
+    let headers = private_network_preflight(app(), "https://wallet.example.org").await;
+    assert_eq!(allowed_origin(&headers), Some("https://wallet.example.org"));
+    assert!(allows_private_network(&headers));
+
+    let headers = private_network_preflight(app(), "http://localhost:5173").await;
+    assert!(!allows_private_network(&headers));
+
+    let headers = private_network_preflight(app(), "https://evil.example").await;
+    assert!(!allows_private_network(&headers));
+    assert_eq!(allowed_origin(&headers), None);
 }

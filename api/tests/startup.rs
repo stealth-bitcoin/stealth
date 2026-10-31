@@ -66,3 +66,80 @@ fn valid_allow_origin_flags_get_past_origin_parsing() {
     let stderr = stderr(&output);
     assert!(stderr.contains("STEALTH_API_BIND"), "stderr: {stderr}");
 }
+
+struct RunningApi(std::process::Child);
+
+impl Drop for RunningApi {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+async fn preflight_allow_origin(port: u16, origin: &str) -> Option<String> {
+    let response = reqwest::Client::new()
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{port}/api/wallet/scan"),
+        )
+        .header("origin", origin)
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    response
+        .headers()
+        .get("access-control-allow-origin")
+        .map(|value| value.to_str().unwrap().to_owned())
+}
+
+#[tokio::test]
+async fn configured_origins_reach_the_running_server() {
+    let port = free_port();
+    let _api = RunningApi(
+        Command::new(env!("CARGO_BIN_EXE_stealth-api"))
+            .args(["--allow-origin", "https://flag.example"])
+            .env("STEALTH_API_ALLOW_ORIGINS", "https://env.example")
+            .env("STEALTH_API_BIND", format!("127.0.0.1:{port}"))
+            .env("STEALTH_RPC_URL", "http://127.0.0.1:1")
+            .env("STEALTH_RPC_USER", "u")
+            .env("STEALTH_RPC_PASS", "p")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut ready = false;
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(ready, "stealth-api did not start listening on port {port}");
+
+    for origin in [
+        "https://flag.example",
+        "https://env.example",
+        "http://localhost:5173",
+    ] {
+        let allowed = preflight_allow_origin(port, origin).await;
+        assert_eq!(allowed.as_deref(), Some(origin), "origin {origin}");
+    }
+    assert_eq!(
+        preflight_allow_origin(port, "https://evil.example").await,
+        None
+    );
+}
