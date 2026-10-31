@@ -142,8 +142,8 @@ const LEFT_OUT = {
   },
   mempoolConflicted: {
     settled: false,
-    one: 'that conflicts with one in the mempool',
-    many: 'that conflict with ones in the mempool',
+    one: 'that conflicts, or depends on one that conflicts, with a transaction in the mempool',
+    many: 'that conflict, or depend on ones that conflict, with transactions in the mempool',
     beforeOne: 'the conflicting one reached the mempool',
     beforeMany: 'the conflicting ones reached the mempool',
   },
@@ -185,7 +185,7 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
   const kind = effectiveKind(rawKind, descriptor)
   const conflicted = stats.conflicted_txids ?? []
   const inMempoolConflict = (stats.mempool_conflicted_txids ?? []).map(
-    (r) => `${r.txid} conflicts with ${r.conflicts_with}, which is in the mempool and not confirmed yet`,
+    (r) => `${r.txid}: it, or a transaction it depends on, conflicts with ${r.conflicts_with}, which is in the mempool and not confirmed yet`,
   )
   const abandoned = stats.abandoned_txids ?? []
   const anyLeftOut = conflicted.length + inMempoolConflict.length + abandoned.length > 0

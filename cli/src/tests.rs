@@ -415,10 +415,11 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 1 transaction that conflicts with one in the mempool. It may still \
-                 confirm; until then it is not part of the history the wallet sees. It may still \
-                 have been seen by the network before the conflicting one reached the mempool; \
-                 Stealth does not analyze it.\n  {CONFLICTED} conflicts with {REPLACEMENT}, \
+                "Left out 1 transaction that conflicts, or depends on one that conflicts, with \
+                 a transaction in the mempool. It may still confirm; until then it is not part \
+                 of the history the wallet sees. It may still have been seen by the network \
+                 before the conflicting one reached the mempool; Stealth does not analyze it.\n  \
+                 {CONFLICTED}: it, or a transaction it depends on, conflicts with {REPLACEMENT}, \
                  which is in the mempool and not confirmed yet\n"
             )),
             "{text}"
@@ -427,6 +428,26 @@ mod ordering {
             position(&text, REPLACEMENT) < position(&text, "No privacy issues found."),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_descendant_of_a_tx_in_conflict_with_the_mempool_is_not_said_to_conflict_itself() {
+        // A payment double-spent in the mempool, and a child spending its change.
+        let child = "f5561a23e573423aeb6d9200aaf74db3ac73c83fae52f5261520d28506dadcd9";
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.mempool_conflicted_txids = vec![
+            replaced(CONFLICTED, REPLACEMENT),
+            replaced(child, REPLACEMENT),
+        ];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "  {child}: it, or a transaction it depends on, conflicts with {REPLACEMENT}, \
+                 which is in the mempool and not confirmed yet\n"
+            )),
+            "{text}"
+        );
+        assert!(!text.contains(&format!("{child} conflicts with")), "{text}");
     }
 
     #[test]
@@ -439,10 +460,11 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(
-                "Left out 2 transactions that conflict with ones in the mempool. They may still \
-                 confirm; until then they are not part of the history the wallet sees. They may \
-                 still have been seen by the network before the conflicting ones reached the \
-                 mempool; Stealth does not analyze them.\n"
+                "Left out 2 transactions that conflict, or depend on ones that conflict, with \
+                 transactions in the mempool. They may still confirm; until then they are not \
+                 part of the history the wallet sees. They may still have been seen by the \
+                 network before the conflicting ones reached the mempool; Stealth does not \
+                 analyze them.\n"
             ),
             "{text}"
         );

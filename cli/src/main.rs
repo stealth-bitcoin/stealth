@@ -272,7 +272,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
         .iter()
         .map(|r| {
             format!(
-                "{} conflicts with {}, which is in the mempool and not confirmed yet",
+                "{}: it, or a transaction it depends on, conflicts with {}, which is in the mempool and not confirmed yet",
                 r.txid, r.conflicts_with
             )
         })
@@ -282,8 +282,8 @@ fn text_report(report: &stealth_engine::Report) -> String {
         &in_mempool_conflict,
         &LeftOutReason {
             settled: false,
-            one: "that conflicts with one in the mempool",
-            many: "that conflict with ones in the mempool",
+            one: "that conflicts, or depends on one that conflicts, with a transaction in the mempool",
+            many: "that conflict, or depend on ones that conflict, with transactions in the mempool",
             before_one: "the conflicting one reached the mempool",
             before_many: "the conflicting ones reached the mempool",
         },
