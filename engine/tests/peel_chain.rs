@@ -722,9 +722,14 @@ fn big_tx(id: u32, vins: &[(u32, u32)], vouts: Vec<TxOutput>) -> DecodedTransact
 
 #[test]
 fn many_chains_merging_into_one_tail_are_one_finding() {
-    // T1 to T900 form one chain; each T(i) from T2 on also spends the change
-    // of its own one-input peel S(i), so 900 chains share T(i).. as a tail.
-    const N: u32 = 900;
+    // T1 to T4000 form one chain; each T(i) from T2 on also spends the change
+    // of its own one-input peel S(i), so 4,000 chains share T(i).. as a tail.
+    // A covering pass that does not stop at covered txs takes far longer.
+    const N: u32 = 4_000;
+    let thresholds = DetectorThresholds {
+        peel_chain_max_hops: 10_000,
+        ..DetectorThresholds::default()
+    };
     let (t, s, g) = (|i: u32| i, |i: u32| 100_000 + i, |i: u32| 200_000 + i);
     let us = ours(1);
     let them = external(1);
@@ -776,7 +781,7 @@ fn many_chains_merging_into_one_tail_are_one_finding() {
     };
     let graph = TxGraph::from_wallet_history(history);
     let started = std::time::Instant::now();
-    let report = graph.detect_all(&DetectorThresholds::default(), None, None);
+    let report = graph.detect_all(&thresholds, None, None);
     let elapsed = started.elapsed();
     let peels: Vec<&Finding> = report
         .findings
@@ -790,12 +795,12 @@ fn many_chains_merging_into_one_tail_are_one_finding() {
     assert_eq!(start(f), big_id(t(1)).to_string());
     assert_eq!(hops(f), u64::from(N));
     assert_eq!(merged(f), Some(u64::from(N)));
-    // 2N - 1 txs in the set, listed once each up to the bound of 1,000.
+    // 2N - 1 txs in the set, each listed once.
     let listed = chain_txids(f);
     let unique: HashSet<&String> = listed.iter().collect();
-    assert_eq!(listed.len(), 1_000);
+    assert_eq!(listed.len(), 2 * N as usize - 1);
     assert_eq!(unique.len(), listed.len());
-    assert!(truncated(f));
+    assert!(!truncated(f));
     eprintln!("detect_all on {N} merge points took {elapsed:?}");
     assert!(elapsed.as_secs() < 10, "detect_all took {elapsed:?}");
 }
