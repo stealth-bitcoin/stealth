@@ -97,7 +97,7 @@ export default function LoadingScreen({
               </div>
             )}
           </div>
-    
+
           <div className={styles.footer}>
             <div
               className={styles.progressBar}

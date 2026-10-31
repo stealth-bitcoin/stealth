@@ -202,7 +202,7 @@ describe('App scan flow', () => {
       expect(getScan).toHaveBeenCalledTimes(1)
     })
 
-    it('sends the scan again with the count as max_txs when told to scan anyway', async () => {
+    it('sends the scan again with the limit lifted when told to scan anyway', async () => {
       queueJobs(tooLarge())
       render(<App />)
       await submitScan()
@@ -211,7 +211,7 @@ describe('App scan flow', () => {
       startScan.mockResolvedValue('scan-2')
       fireEvent.click(screen.getByRole('button', { name: /scan anyway/i }))
       await act(async () => {})
-      expect(startScan).toHaveBeenLastCalledWith({ descriptor: DESC, max_txs: 12345 })
+      expect(startScan).toHaveBeenLastCalledWith({ descriptor: DESC, no_limits: true })
       expect(screen.queryByRole('alertdialog')).toBeNull()
 
       queueJobs(job('done', { report: REPORT }))

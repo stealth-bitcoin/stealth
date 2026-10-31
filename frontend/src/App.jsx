@@ -83,7 +83,7 @@ export default function App() {
   }
 
   function handleScanAnyway() {
-    return handleAnalyze({ ...scan, body: { ...scan.body, max_txs: limitExceeded.tx_count } })
+    return handleAnalyze({ ...scan, body: { ...scan.body, no_limits: true } })
   }
 
   function handleReset() {
