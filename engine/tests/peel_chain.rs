@@ -786,9 +786,8 @@ fn many_chains_merging_into_one_tail_are_one_finding() {
     // One flow: T1 and S2 both start a path of N hops.
     assert_eq!(peels.len(), 1, "{} findings", peels.len());
     let f = peels[0];
-    assert!([big_id(t(1)), big_id(s(2))]
-        .map(|t| t.to_string())
-        .contains(&start(f)));
+    // T1 and S2 both start a path of N hops; T1 has the smaller txid.
+    assert_eq!(start(f), big_id(t(1)).to_string());
     assert_eq!(hops(f), u64::from(N));
     assert_eq!(merged(f), Some(u64::from(N)));
     // 2N - 1 txs in the set, listed once each up to the bound of 1,000.
@@ -808,4 +807,58 @@ fn two_hops_are_a_chain_and_one_is_not() {
     assert_eq!(hops(&findings[0]), 2);
     assert_eq!(findings[0].severity, Severity::High);
     assert!(peel_findings(chain(0x10, &[0x11])).is_empty());
+}
+
+#[test]
+fn a_later_send_spending_two_chains_peeled_outputs_does_not_join_them() {
+    // 0x13 and 0x23 each send a small output back to the wallet, and 0x30
+    // spends both; 0x30 is a single peel, not a chain.
+    let txs = vec![
+        funding(0x10, 100_000_000),
+        funding(0x20, 100_000_000),
+        peel(0x11, &[(0x10, 0)], 1_000_000, 98_000_000),
+        peel(0x12, &[(0x11, 1)], 1_000_000, 96_000_000),
+        peel_to_self(0x13, (0x12, 1), 0x13 + 0x40, 1_000_000, 94_000_000),
+        peel(0x21, &[(0x20, 0)], 1_000_000, 98_000_000),
+        peel(0x22, &[(0x21, 1)], 1_000_000, 96_000_000),
+        peel_to_self(0x23, (0x22, 1), 0x23 + 0x40, 1_000_000, 94_000_000),
+        peel(0x30, &[(0x13, 0), (0x23, 0)], 100_000, 1_800_000),
+    ];
+    let findings = peel_findings(txs);
+    assert_eq!(findings.len(), 2, "{findings:#?}");
+    assert_eq!(starts(&findings), ids(&[0x11, 0x21]));
+    for f in &findings {
+        let head = if start(f) == txid(0x11).to_string() {
+            [0x11, 0x12, 0x13]
+        } else {
+            [0x21, 0x22, 0x23]
+        };
+        assert_eq!(chain_txids(f), ids(&head));
+        assert_eq!(merged(f), None);
+    }
+}
+
+#[test]
+fn a_side_chain_shorter_than_the_minimum_is_not_counted_as_merged() {
+    // With a minimum of 3 hops, 0x21 to 0x14 is only 2 hops: it is listed
+    // as part of the flow but is not a chain of its own.
+    let thresholds = DetectorThresholds {
+        peel_chain_min_hops: 3,
+        ..DetectorThresholds::default()
+    };
+    let txs = vec![
+        funding(0x10, 100_000_000),
+        funding(0x20, 100_000_000),
+        peel(0x11, &[(0x10, 0)], 1_000_000, 98_000_000),
+        peel(0x12, &[(0x11, 1)], 1_000_000, 96_000_000),
+        peel(0x13, &[(0x12, 1)], 1_000_000, 94_000_000),
+        peel(0x21, &[(0x20, 0)], 1_000_000, 98_000_000),
+        peel(0x14, &[(0x13, 1), (0x21, 1)], 1_000_000, 190_000_000),
+    ];
+    let findings = peel_findings_with(txs, &thresholds);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    assert_eq!(hops(f), 4);
+    assert_eq!(chain_txids(f), ids(&[0x11, 0x12, 0x13, 0x14, 0x21]));
+    assert_eq!(merged(f), None);
 }

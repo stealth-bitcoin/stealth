@@ -386,39 +386,6 @@ impl TxGraph {
                 cur = step(&t);
             }
         }
-        // Chains that merge, or where one spends another's output, are one flow.
-        let mut nodes: Vec<Txid> = starts.iter().map(|(t, _)| *t).collect();
-        let mut index: HashMap<Txid, usize> = HashMap::with_capacity(nodes.len());
-        for (i, t) in nodes.iter().enumerate() {
-            index.insert(*t, i);
-        }
-        for &t in &covered {
-            if let std::collections::hash_map::Entry::Vacant(slot) = index.entry(t) {
-                slot.insert(nodes.len());
-                nodes.push(t);
-            }
-        }
-        let mut parent: Vec<usize> = (0..nodes.len()).collect();
-        fn root(parent: &mut [usize], mut i: usize) -> usize {
-            while parent[i] != i {
-                parent[i] = parent[parent[i]];
-                i = parent[i];
-            }
-            i
-        }
-        for (i, t) in nodes.iter().enumerate() {
-            for input in self.get_input_addresses(t) {
-                if let Some(&j) = index.get(&input.funding_txid) {
-                    let (a, b) = (root(&mut parent, i), root(&mut parent, j));
-                    parent[a] = b;
-                }
-            }
-        }
-        let mut size: HashMap<usize, usize> = HashMap::new();
-        for i in 0..nodes.len() {
-            *size.entry(root(&mut parent, i)).or_default() += 1;
-        }
-
         // Hops from each peel to its chain's end, counting a loop's txs once.
         let mut remaining: HashMap<Txid, usize> = HashMap::with_capacity(next.len());
         for &first in &txids {
@@ -452,6 +419,49 @@ impl TxGraph {
             }
         }
 
+        // Chains that merge, or where a chain starts from another's peeled
+        // output, are one flow.
+        let starts_set: HashSet<Txid> = starts.iter().map(|(t, _)| *t).collect();
+        let mut nodes: Vec<Txid> = starts.iter().map(|(t, _)| *t).collect();
+        let mut index: HashMap<Txid, usize> = HashMap::with_capacity(nodes.len());
+        for (i, t) in nodes.iter().enumerate() {
+            index.insert(*t, i);
+        }
+        for &t in &covered {
+            if let std::collections::hash_map::Entry::Vacant(slot) = index.entry(t) {
+                slot.insert(nodes.len());
+                nodes.push(t);
+            }
+        }
+        let mut parent: Vec<usize> = (0..nodes.len()).collect();
+        fn root(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        let length = |t: &Txid| remaining.get(t).copied().unwrap_or(1);
+        let is_chain = |t: &Txid| starts_set.contains(t) && length(t) >= min_hops;
+        for (i, t) in nodes.iter().enumerate() {
+            // The change feeding the next hop joins it, and so does any output
+            // spent by a start that is a chain of its own.
+            let mut links: Vec<Txid> = step(t).into_iter().collect();
+            if is_chain(t) {
+                links.extend(self.get_input_addresses(t).iter().map(|ia| ia.funding_txid));
+            }
+            for linked in links {
+                if let Some(&j) = index.get(&linked) {
+                    let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                    parent[a] = b;
+                }
+            }
+        }
+        let mut size: HashMap<usize, usize> = HashMap::new();
+        for i in 0..nodes.len() {
+            *size.entry(root(&mut parent, i)).or_default() += 1;
+        }
+
         // One finding per flow: its longest path first, then the other chains,
         // each tx once, up to `max_hops` txids.
         let mut flows: Vec<usize> = Vec::new();
@@ -469,7 +479,6 @@ impl TxGraph {
             let Some(flow_starts) = members.get(&flow) else {
                 continue;
             };
-            let length = |t: &Txid| remaining.get(t).copied().unwrap_or(1);
             let Some(&(txid, ratio)) = flow_starts.iter().rev().max_by_key(|(t, _)| length(t))
             else {
                 continue;
@@ -482,7 +491,7 @@ impl TxGraph {
             let at_least = longest > max_hops;
             let chains = flow_starts
                 .iter()
-                .filter(|(t, _)| !covered.contains(t))
+                .filter(|(t, _)| !covered.contains(t) && length(t) >= min_hops)
                 .count();
 
             let mut chain = Vec::new();
