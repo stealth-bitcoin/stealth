@@ -1,4 +1,5 @@
-// In-memory tests for the common-input-ownership (CIOH) detector.
+// In-memory tests for the common-input-ownership (CIOH) detector and the
+// advice other detectors give about CIOH.
 //
 // Runs entirely in memory; no bitcoind node required.
 
@@ -9,10 +10,10 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, Network, ScriptBuf, Txid, WPubkeyHash};
 use stealth_engine::config::DetectorThresholds;
 use stealth_engine::gateway::{
-    DecodedTransaction, DescriptorType, TxInputRef, TxOutput, WalletHistory, WalletTxCategory,
-    WalletTxEntry,
+    DecodedTransaction, DescriptorType, TxInputRef, TxOutput, Utxo, WalletHistory,
+    WalletTxCategory, WalletTxEntry,
 };
-use stealth_engine::{Finding, TxGraph, VulnerabilityType};
+use stealth_engine::{Finding, Severity, TxGraph, VulnerabilityType};
 
 // ─── builders ───────────────────────────────────────────────────────────────
 
@@ -214,4 +215,66 @@ fn correction_allows_coins_of_one_address_together() {
         .expect("CIOH finding has a correction");
     assert!(!correction.contains("only one UTXO"), "{correction}");
     assert!(correction.contains("different addresses"), "{correction}");
+}
+
+#[test]
+fn all_inputs_yours_across_two_addresses_is_critical() {
+    let a = wpkh(1);
+    let b = wpkh(2);
+    let (history, _) = spend_history(&[&a, &a, &b], &[a.clone(), b.clone()]);
+    let findings = cioh_findings(history);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].severity, Severity::Critical);
+}
+
+#[test]
+fn some_inputs_from_a_stranger_is_high() {
+    let a = wpkh(1);
+    let b = wpkh(2);
+    let stranger = wpkh(200);
+    let (history, _) = spend_history(&[&a, &b, &stranger], &[a.clone(), b.clone()]);
+    let findings = cioh_findings(history);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].severity, Severity::High);
+}
+
+#[test]
+fn dust_advice_says_spending_it_links_your_other_addresses() {
+    let a = wpkh(1);
+    let funding = txid(0x10);
+    let history = WalletHistory {
+        wallet_txs: vec![entry(funding, Some(&a), WalletTxCategory::Receive)],
+        utxos: vec![Utxo {
+            txid: funding,
+            vout: 0,
+            address: Some(a.clone()),
+            amount: Amount::from_sat(500),
+            confirmations: 3,
+            script_type: DescriptorType::P2wpkh,
+        }],
+        transactions: [(
+            funding,
+            tx(funding, vec![vin(txid(0xA0), 0)], vec![out(0, &a, 500)]),
+        )]
+        .into_iter()
+        .collect(),
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::from([a.clone()]),
+    };
+    let report = TxGraph::from_wallet_history(history).detect_all(
+        &DetectorThresholds::default(),
+        None,
+        None,
+    );
+    let correction = report
+        .findings
+        .iter()
+        .find(|f| f.vulnerability_type == VulnerabilityType::Dust)
+        .and_then(|f| f.correction.as_deref())
+        .expect("dust finding has a correction");
+    assert!(
+        correction.contains("links your other addresses to this one"),
+        "{correction}"
+    );
+    assert!(!correction.contains("other inputs"), "{correction}");
 }

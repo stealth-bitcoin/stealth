@@ -76,8 +76,8 @@ impl TxGraph {
                     "Do NOT spend this dust UTXO — spending it reveals your other UTXOs \
                      via common-input-ownership. Freeze it in your wallet immediately."
                 } else {
-                    "Do not spend this dust output — doing so links your other inputs \
-                     to this address via CIOH. Use your wallet's coin freeze feature to \
+                    "Do not spend this dust output — doing so links your other addresses \
+                     to this one via CIOH. Use your wallet's coin freeze feature to \
                      exclude it from future transactions."
                 };
                 findings.push(Finding {
