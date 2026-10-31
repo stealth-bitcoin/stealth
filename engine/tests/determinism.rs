@@ -480,17 +480,23 @@ fn cluster_merges(history: &WalletHistory) -> Vec<String> {
 }
 
 #[test]
-fn cluster_merge_ignores_a_coin_whose_funding_tx_descends_from_the_other() {
-    // Mainnet shape of dfa822be…: one input spends `source:0`, the other spends a tx that spent `source:1`.
+fn cluster_merge_ignores_the_mainnet_same_chain_spend() {
+    // Mainnet shape of dfa822be…: `payer` funds `source`, and `child` spends `source:1`, also at `payer`.
     let (w1, w2) = (wpkh(201), wpkh(204));
     let payer = wpkh(202);
+    let earlier = txid(0x500);
     let source = txid(0x501);
     let child = txid(0x502);
     let spend = txid(0x503);
     let txs = vec![
         tx(
+            earlier,
+            vec![vin(txid(0x5F0), 0)],
+            vec![out(0, &payer, 1_100_000)],
+        ),
+        tx(
             source,
-            vec![vin(txid(0x5F1), 0)],
+            vec![vin(earlier, 0)],
             vec![out(0, &w1, 400_000), out(1, &payer, 600_000)],
         ),
         tx(
@@ -561,19 +567,17 @@ fn cluster_merge_still_flags_coins_from_distinct_origins() {
 
 #[test]
 fn cluster_merge_counts_chains_not_inputs() {
-    // Mainnet shape of 0641f418…: two inputs share one chain, the third is a distinct origin.
+    // Two inputs come from one funding tx, the third is a distinct origin.
     let w: Vec<Address<NetworkUnchecked>> = (224u8..=226).map(wpkh).collect();
     let source = txid(0x521);
-    let child = txid(0x522);
     let other = txid(0x523);
     let spend = txid(0x524);
     let txs = vec![
         tx(
             source,
             vec![vin(txid(0x5F5), 0)],
-            vec![out(0, &w[0], 400_000), out(1, &wpkh(222), 600_000)],
+            vec![out(0, &w[0], 400_000), out(1, &w[1], 500_000)],
         ),
-        tx(child, vec![vin(source, 1)], vec![out(0, &w[1], 500_000)]),
         tx(
             other,
             vec![vin(txid(0x5F6), 0)],
@@ -582,10 +586,10 @@ fn cluster_merge_counts_chains_not_inputs() {
     ];
     let history = spend_history(
         &w,
-        &[source, child, other],
+        &[source, other],
         tx(
             spend,
-            vec![vin(source, 0), vin(child, 0), vin(other, 0)],
+            vec![vin(source, 0), vin(source, 1), vin(other, 0)],
             vec![out(0, &wpkh(223), 1_190_000)],
         ),
         txs,
@@ -656,6 +660,103 @@ fn cluster_merge_ignores_coins_at_one_own_address() {
             spend,
             funding.iter().map(|f| vin(*f, 0)).collect(),
             vec![out(0, &wpkh(249), 1_190_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history), Vec::<String>::new());
+}
+
+#[test]
+fn cluster_merge_ignores_coins_from_one_funding_tx() {
+    let (w1, w2) = (wpkh(101), wpkh(102));
+    let funding = txid(0x551);
+    let spend = txid(0x552);
+    let txs = vec![tx(
+        funding,
+        vec![vin(txid(0x5FA), 0)],
+        vec![out(0, &w1, 400_000), out(1, &w2, 400_000)],
+    )];
+    let history = spend_history(
+        &[w1, w2],
+        &[funding],
+        tx(
+            spend,
+            vec![vin(funding, 0), vin(funding, 1)],
+            vec![out(0, &wpkh(103), 790_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history), Vec::<String>::new());
+}
+
+#[test]
+fn cluster_merge_flags_a_counterparty_paid_from_the_same_batch() {
+    // An exchange batch pays us and Alice; Alice later pays us from her output of that batch.
+    let (x, y) = (wpkh(111), wpkh(112));
+    let (exchange, alice) = (wpkh(113), wpkh(114));
+    let (hot, batch, alice_pays) = (txid(0x561), txid(0x562), txid(0x563));
+    let spend = txid(0x564);
+    let txs = vec![
+        tx(
+            hot,
+            vec![vin(txid(0x5FB), 0)],
+            vec![out(0, &exchange, 2_000_000)],
+        ),
+        tx(
+            batch,
+            vec![vin(hot, 0)],
+            vec![out(0, &x, 400_000), out(1, &alice, 1_500_000)],
+        ),
+        tx(alice_pays, vec![vin(batch, 1)], vec![out(0, &y, 400_000)]),
+    ];
+    let history = spend_history(
+        &[x, y],
+        &[batch, alice_pays],
+        tx(
+            spend,
+            vec![vin(batch, 0), vin(alice_pays, 0)],
+            vec![out(0, &wpkh(115), 790_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history).len(), 1);
+}
+
+#[test]
+fn cluster_merge_groups_inputs_linked_only_through_a_third() {
+    // `a` and `c` share an own address, `c` and `b` share a payer; `a` and `b` share nothing.
+    let (x, y) = (wpkh(121), wpkh(122));
+    let (payer_a, payer_bc) = (wpkh(123), wpkh(124));
+    let (pa, pb, pc) = (txid(0x571), txid(0x572), txid(0x573));
+    let (fa, fb, fc) = (txid(0x574), txid(0x575), txid(0x576));
+    let spend = txid(0x577);
+    let txs = vec![
+        tx(
+            pa,
+            vec![vin(txid(0x5FC), 0)],
+            vec![out(0, &payer_a, 900_000)],
+        ),
+        tx(
+            pb,
+            vec![vin(txid(0x5FD), 0)],
+            vec![out(0, &payer_bc, 900_000)],
+        ),
+        tx(
+            pc,
+            vec![vin(txid(0x5FE), 0)],
+            vec![out(0, &payer_bc, 900_000)],
+        ),
+        tx(fa, vec![vin(pa, 0)], vec![out(0, &x, 400_000)]),
+        tx(fb, vec![vin(pb, 0)], vec![out(0, &y, 400_000)]),
+        tx(fc, vec![vin(pc, 0)], vec![out(0, &x, 400_000)]),
+    ];
+    let history = spend_history(
+        &[x, y],
+        &[fa, fb, fc],
+        tx(
+            spend,
+            vec![vin(fa, 0), vin(fb, 0), vin(fc, 0)],
+            vec![out(0, &wpkh(125), 1_190_000)],
         ),
         txs,
     );

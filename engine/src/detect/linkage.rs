@@ -96,9 +96,7 @@ impl TxGraph {
 
             // Trace each input one hop back to find funding sources.
             let mut funding_sources: HashMap<String, HashSet<String>> = HashMap::new();
-            // Per input: funding tx plus its parents, its own address and its payers, coinbase flag.
-            let mut ancestries: Vec<(HashSet<Txid>, HashSet<Address<NetworkUnchecked>>, bool)> =
-                Vec::new();
+            let mut origins: Vec<Origin> = Vec::new();
             for ia in &our_in {
                 let parent_tx = match self.fetch_tx(&ia.funding_txid) {
                     Some(t) => t,
@@ -117,32 +115,22 @@ impl TxGraph {
                 let key = format!("{}:{}", &ftxid[..16], ia.funding_vout);
                 funding_sources.insert(key, gp_sources);
 
-                let mut txs: HashSet<Txid> = parent_tx
-                    .vin
-                    .iter()
-                    .filter(|v| !v.coinbase)
-                    .map(|v| v.previous_txid)
-                    .collect();
-                txs.insert(ia.funding_txid);
-                let mut addrs: HashSet<Address<NetworkUnchecked>> = self
-                    .get_input_addresses(&ia.funding_txid)
-                    .into_iter()
-                    .map(|p| p.address)
-                    .collect();
-                addrs.insert(ia.address.clone());
-                let coinbase = parent_tx.vin.iter().any(|v| v.coinbase);
-                ancestries.push((txs, addrs, coinbase));
+                origins.push(Origin {
+                    funding_txid: ia.funding_txid,
+                    address: ia.address.clone(),
+                    payers: self
+                        .get_input_addresses(&ia.funding_txid)
+                        .into_iter()
+                        .map(|p| p.address)
+                        .collect(),
+                    coinbase: parent_tx.vin.iter().any(|v| v.coinbase),
+                });
             }
 
-            // Inputs whose ancestries share a tx, an address or a coinbase origin are one chain.
-            let mut chain: Vec<usize> = (0..ancestries.len()).collect();
-            for i in 0..ancestries.len() {
-                for j in (i + 1)..ancestries.len() {
-                    let ((txs_a, addrs_a, cb_a), (txs_b, addrs_b, cb_b)) =
-                        (&ancestries[i], &ancestries[j]);
-                    let linked = !txs_a.is_disjoint(txs_b)
-                        || !addrs_a.is_disjoint(addrs_b)
-                        || (*cb_a && *cb_b);
+            let mut chain: Vec<usize> = (0..origins.len()).collect();
+            for i in 0..origins.len() {
+                for j in (i + 1)..origins.len() {
+                    let linked = origins[i].same_chain(&origins[j]);
                     if linked && chain[i] != chain[j] {
                         let (from, to) = (chain[j], chain[i]);
                         for c in chain.iter_mut().filter(|c| **c == from) {
@@ -422,5 +410,23 @@ impl TxGraph {
                 });
             }
         }
+    }
+}
+
+/// Where one of our inputs came from, as far back as cluster merge looks.
+struct Origin {
+    funding_txid: Txid,
+    address: Address<NetworkUnchecked>,
+    payers: HashSet<Address<NetworkUnchecked>>,
+    coinbase: bool,
+}
+
+impl Origin {
+    /// Same funding tx, same own address, a payer in common, or both coinbase.
+    fn same_chain(&self, other: &Origin) -> bool {
+        self.funding_txid == other.funding_txid
+            || self.address == other.address
+            || !self.payers.is_disjoint(&other.payers)
+            || (self.coinbase && other.coinbase)
     }
 }
