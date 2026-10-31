@@ -2927,6 +2927,17 @@ mod tests {
     }
 
     #[test]
+    fn any_other_getmempoolinfo_error_fails_the_scan() {
+        let warming_up = json!({
+            "result": null, "error": { "code": -28, "message": "Loading block index..." },
+        });
+        let error = node_refetching(("500 Internal Server Error", warming_up.to_string()), true)
+            .load_history_for_wallet("bob")
+            .expect_err("a node that cannot answer is not a node that will not tell");
+        assert!(error.to_string().contains("Loading block index"), "{error}");
+    }
+
+    #[test]
     fn a_node_that_will_not_tell_about_its_mempool_still_gets_the_refetch() {
         let method_not_found = json!({
             "result": null, "error": { "code": -32601, "message": "Method not found" },
