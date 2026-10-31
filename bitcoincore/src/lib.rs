@@ -3802,6 +3802,33 @@ mod tests {
     }
 
     #[test]
+    fn a_count_reply_without_an_integer_txcount_fails_the_scan_and_unloads_the_wallet() {
+        for info in [
+            json!({ "scanning": false }),
+            json!({ "txcount": "many" }),
+            json!({ "txcount": 1.5 }),
+        ] {
+            for persist in [false, true] {
+                let reply = json!({ "result": info, "error": null }).to_string();
+                let (rpc, calls) = node_answering_getwalletinfo(("200 OK", reply));
+                let error = scan_one_address(&rpc, persist, &HistoryLimit::at_most(0))
+                    .expect_err("no count to check");
+                assert!(
+                    matches!(error, AnalysisError::EnvironmentUnavailable(ref m) if m.contains("txcount")),
+                    "{info} persist={persist}: {error:?}"
+                );
+                assert!(!fetched_history(&calls), "{info}");
+                let calls = calls.lock().unwrap();
+                assert_eq!(
+                    calls.last().map(String::as_str),
+                    Some("unloadwallet"),
+                    "{calls:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn any_other_getwalletinfo_failure_still_fails_the_scan() {
         let (rpc, calls) = node_answering_getwalletinfo((
             "500 Internal Server Error",

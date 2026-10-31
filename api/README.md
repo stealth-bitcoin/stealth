@@ -241,7 +241,7 @@ curl 'http://localhost:20899/api/wallet/scan' \
 |--------|---------|
 | `200` | Scan completed — body is a `Report` |
 | `400` | Invalid input (bad descriptor shape, empty UTXOs, …) |
-| `422` | The wallet history is above `max_txs` when `error.code` is `history_too_large`; a plain-text `422` is a body field of the wrong type |
+| `422` | The wallet history, or for a `utxos` body the history of the pasted outputs' addresses, is above `max_txs`, when `error.code` is `history_too_large`; a plain-text `422` is a body field of the wrong type |
 | `502` | bitcoind RPC unavailable/auth failed/connection failed |
 
 ## Environment variables
