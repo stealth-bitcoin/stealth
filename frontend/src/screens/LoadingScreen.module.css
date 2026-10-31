@@ -190,3 +190,48 @@
   max-width: 400px;
   text-align: center;
 }
+
+/* History limit confirm step */
+.confirm {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: 440px;
+  text-align: center;
+}
+
+.confirmTitle {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--warning);
+}
+
+.confirmText {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.confirmActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+
+.scanAnywayButton {
+  padding: 8px 28px;
+  background: var(--warning-dim);
+  color: var(--warning);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.scanAnywayButton:hover {
+  background: rgba(244, 162, 97, 0.25);
+}

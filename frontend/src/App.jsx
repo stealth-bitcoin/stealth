@@ -15,6 +15,7 @@ export default function App() {
   const [job, setJob] = useState(null)
   const [report, setReport] = useState(null)
   const [error, setError] = useState(null)
+  const [limitExceeded, setLimitExceeded] = useState(null)
   const pollFailures = useRef(0)
 
   useEffect(() => {
@@ -42,6 +43,9 @@ export default function App() {
         setReport(next.report)
         setScreen('report')
         setScanId(null)
+      } else if (next.state === 'failed' && next.limit_exceeded) {
+        setLimitExceeded(next.limit_exceeded)
+        setScanId(null)
       } else if (next.state === 'failed') {
         setError(next.error ? `Scan failed: ${next.error}` : 'Scan failed. Please try again.')
         setScreen('input')
@@ -63,6 +67,7 @@ export default function App() {
     setJob(null)
     setReport(null)
     setError(null)
+    setLimitExceeded(null)
     setScreen('loading')
     try {
       setScanId(await startScan(nextScan.body))
@@ -77,6 +82,10 @@ export default function App() {
     if (scanId) return cancelScan(scanId)
   }
 
+  function handleScanAnyway() {
+    return handleAnalyze({ ...scan, body: { ...scan.body, max_txs: limitExceeded.tx_count } })
+  }
+
   function handleReset() {
     setScreen('input')
     setScan(null)
@@ -84,6 +93,7 @@ export default function App() {
     setJob(null)
     setReport(null)
     setError(null)
+    setLimitExceeded(null)
   }
 
   function renderScreen() {
@@ -95,6 +105,9 @@ export default function App() {
           state={job?.state}
           progress={job?.progress}
           onCancel={handleCancel}
+          limitExceeded={limitExceeded}
+          onScanAnyway={handleScanAnyway}
+          onDismiss={handleReset}
         />
       )
     }

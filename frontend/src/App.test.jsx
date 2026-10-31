@@ -182,4 +182,56 @@ describe('App scan flow', () => {
     await tick(3000)
     expect(getScan).toHaveBeenCalledTimes(1)
   })
+
+  describe('a history above the limit', () => {
+    const tooLarge = () =>
+      job('failed', {
+        error: 'analysis failed: the wallet history holds 12345 transactions',
+        limit_exceeded: { tx_count: 12345, limit: 5000 },
+      })
+
+    it('asks before loading it instead of failing the scan', async () => {
+      queueJobs(tooLarge())
+      render(<App />)
+      await submitScan()
+      await tick()
+      expect(screen.getByRole('alertdialog').textContent).toMatch(/12,345 transactions/)
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.queryByPlaceholderText(/paste a descriptor/i)).toBeNull()
+      await tick(3000)
+      expect(getScan).toHaveBeenCalledTimes(1)
+    })
+
+    it('sends the scan again with the count as max_txs when told to scan anyway', async () => {
+      queueJobs(tooLarge())
+      render(<App />)
+      await submitScan()
+      await tick()
+
+      startScan.mockResolvedValue('scan-2')
+      fireEvent.click(screen.getByRole('button', { name: /scan anyway/i }))
+      await act(async () => {})
+      expect(startScan).toHaveBeenLastCalledWith({ descriptor: DESC, max_txs: 12345 })
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+
+      queueJobs(job('done', { report: REPORT }))
+      await tick()
+      expect(getScan).toHaveBeenLastCalledWith('scan-2')
+      expect(screen.getByText(/no privacy issues found/i)).toBeTruthy()
+    })
+
+    it('goes back to the input without sending anything when cancelled', async () => {
+      queueJobs(tooLarge())
+      render(<App />)
+      await submitScan()
+      await tick()
+
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      await act(async () => {})
+      expect(screen.getByPlaceholderText(/paste a descriptor/i)).toBeTruthy()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(startScan).toHaveBeenCalledTimes(1)
+      expect(cancelScan).not.toHaveBeenCalled()
+    })
+  })
 })
