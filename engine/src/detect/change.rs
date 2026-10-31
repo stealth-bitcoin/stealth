@@ -241,13 +241,17 @@ impl TxGraph {
                         "spending_txid": child_txid.to_string(),
                         "total_inputs_in_child": child_inputs.len(),
                     })),
-                    correction: Some(
+                    correction: Some(format!(
                         "Freeze small change like this in your wallet from now on and never \
-                         merge it with your other coins: that links the two transactions. \
-                         Change above a CoinJoin coordinator's minimum can go through a \
-                         WabiSabi CoinJoin instead."
-                            .into(),
-                    ),
+                         merge it with your other coins: that links the two transactions.{}",
+                        // Dust is under any CoinJoin coordinator's minimum.
+                        if out.value > thresholds.dust {
+                            " Change above a CoinJoin coordinator's minimum can go through a \
+                             WabiSabi CoinJoin instead."
+                        } else {
+                            ""
+                        }
+                    )),
                 });
             }
         }

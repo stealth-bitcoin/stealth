@@ -520,7 +520,18 @@ fn toxic_findings(
     extra: Vec<Coin>,
     also_ours: &[&Address<NetworkUnchecked>],
 ) -> Vec<Finding> {
-    let mut coins = vec![coin(a, 600), coin(big, 50_000)];
+    toxic_findings_of(600, a, big, extra, also_ours)
+}
+
+/// As [`toxic_findings`], with `change_sats` of change instead of 600.
+fn toxic_findings_of(
+    change_sats: u64,
+    a: &Address<NetworkUnchecked>,
+    big: &Address<NetworkUnchecked>,
+    extra: Vec<Coin>,
+    also_ours: &[&Address<NetworkUnchecked>],
+) -> Vec<Finding> {
+    let mut coins = vec![coin(a, change_sats), coin(big, 50_000)];
     coins.extend(extra);
     let mut ours = vec![a, big];
     ours.extend_from_slice(also_ours);
@@ -583,7 +594,7 @@ fn a_larger_own_coin_elsewhere_still_makes_the_merge_toxic() {
 
 #[test]
 fn toxic_change_advice_is_for_next_time_and_offers_wabisabi_only_above_the_minimum() {
-    let findings = toxic_findings(&wpkh(1), &wpkh(2), vec![], &[]);
+    let findings = toxic_findings_of(5_000, &wpkh(1), &wpkh(2), vec![], &[]);
     let correction = findings[0].correction.as_deref().expect("a correction");
     assert!(
         correction.starts_with("Freeze small change like this"),
@@ -604,4 +615,20 @@ fn toxic_change_advice_is_for_next_time_and_offers_wabisabi_only_above_the_minim
     ] {
         assert!(!correction.contains(absent), "{absent}: {correction}");
     }
+}
+
+#[test]
+fn toxic_change_of_dust_size_gets_no_coinjoin_mention() {
+    for sats in [546, 600, 1_000] {
+        let findings = toxic_findings_of(sats, &wpkh(1), &wpkh(2), vec![], &[]);
+        let correction = findings[0].correction.as_deref().expect("a correction");
+        assert!(
+            correction.starts_with("Freeze small change like this"),
+            "{correction}"
+        );
+        assert!(!correction.contains("CoinJoin"), "{sats}: {correction}");
+    }
+    let findings = toxic_findings_of(1_001, &wpkh(1), &wpkh(2), vec![], &[]);
+    let correction = findings[0].correction.as_deref().expect("a correction");
+    assert!(correction.contains("WabiSabi"), "{correction}");
 }
