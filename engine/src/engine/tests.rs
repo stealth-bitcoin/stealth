@@ -77,6 +77,7 @@ fn chain_history(payments: u32, still_unspent: u32) -> WalletHistory {
         transactions: (1..=payments).map(|n| (txid(n), payment(n))).collect(),
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([addr()]),
+        ranged_addresses: HashSet::new(),
     }
 }
 
@@ -384,7 +385,7 @@ const PUBKEY: &str = "03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1
 const PUBKEY2: &str = "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
 
 fn ranged(descriptor: &str) -> bool {
-    crate::engine::is_ranged(descriptor)
+    crate::descriptor::is_ranged(descriptor)
 }
 
 #[test]

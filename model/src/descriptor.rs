@@ -48,6 +48,14 @@ const EXTENDED_KEY_LEN: usize = 78;
 /// SLIP-132 multisig keys are rejected without echoing the input.
 /// Anything else (descriptors, `addr(...)`, garbage) passes through
 /// untouched.
+/// True when the descriptor is ranged, i.e. derives a chain of addresses
+/// rather than naming fixed scripts. In descriptor syntax (BIP 380) `*`
+/// occurs only as a derivation wildcard, never in keys, scripts or the
+/// checksum, so its presence is the ranged check.
+pub fn is_ranged(descriptor: &str) -> bool {
+    descriptor.contains('*')
+}
+
 pub fn expand_input(raw: &str) -> Result<Vec<String>, AnalysisError> {
     let trimmed = raw.trim();
     let (key, path) = match trimmed.split_once('/') {

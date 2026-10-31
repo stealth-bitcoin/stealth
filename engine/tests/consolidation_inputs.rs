@@ -58,7 +58,7 @@ fn tx(id: Txid, vin: Vec<TxInputRef>, vout: Vec<TxOutput>) -> DecodedTransaction
 
 // We receive a sweep of two addressless outputs (P2PK, bare multisig) and one
 // output at someone else's address; every funding transaction is known.
-fn sweep_of_addressless_prevouts() -> WalletHistory {
+fn sweep_of_addressless_prevouts(ranged: bool) -> WalletHistory {
     let ours = wpkh(1);
     let (funding_a, funding_b, sweep) = (txid(0xa1), txid(0xa2), txid(0xc0));
     let transactions = [
@@ -98,19 +98,21 @@ fn sweep_of_addressless_prevouts() -> WalletHistory {
         transactions: transactions.into_iter().map(|t| (t.txid, t)).collect(),
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
+        ranged_addresses: if ranged {
+            HashSet::from([wpkh(1)])
+        } else {
+            HashSet::new()
+        },
     }
 }
 
 // `ranged` says whether our coin's address came from a ranged descriptor.
 fn scan(ranged: bool) -> Report {
-    let addrs = if ranged {
-        HashSet::from([wpkh(1)])
-    } else {
-        HashSet::new()
-    };
-    TxGraph::from_wallet_history(sweep_of_addressless_prevouts())
-        .with_ranged_addresses(addrs)
-        .detect_all(&Default::default(), None, None)
+    TxGraph::from_wallet_history(sweep_of_addressless_prevouts(ranged)).detect_all(
+        &Default::default(),
+        None,
+        None,
+    )
 }
 
 fn consolidation_count(report: &Report) -> usize {

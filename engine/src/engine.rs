@@ -9,11 +9,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bitcoin::{Amount, Txid};
 
-use crate::descriptor::{expand_input, normalize_descriptors};
+use crate::descriptor::{expand_input, is_ranged, normalize_descriptors};
 use crate::error::AnalysisError;
 use crate::gateway::{
-    BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, Utxo, WalletHistory,
-    WalletTxCategory, WalletTxEntry,
+    BlockchainGateway, DecodedTransaction, DescriptorType, Utxo, WalletHistory, WalletTxCategory,
+    WalletTxEntry,
 };
 use crate::graph::TxGraph;
 use crate::types::Report;
@@ -81,12 +81,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .gateway
             .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let ranged = if resolved.iter().all(|d| is_ranged(&d.desc)) {
-            history.derived_addresses.clone()
-        } else {
-            self.derive_ranged(&resolved)?
-        };
-        let graph = TxGraph::from_wallet_history(history).with_ranged_addresses(ranged);
+        let graph = TxGraph::from_wallet_history(history);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -98,10 +93,10 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
 
     fn analyze_utxos(&self, utxos: Vec<UtxoInput>) -> Result<Report, AnalysisError> {
         self.mark_phase(ScanPhase::LoadingHistory);
-        let (mut history, ranged) = self.resolve_utxo_history(&utxos)?;
+        let mut history = self.resolve_utxo_history(&utxos)?;
         let addresses_without_history = self.merge_address_history(&mut history)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let graph = TxGraph::from_wallet_history(history).with_ranged_addresses(ranged);
+        let graph = TxGraph::from_wallet_history(history);
         let mut report = graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -159,11 +154,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
 
     /// Build a [`WalletHistory`] from raw UTXO inputs by fetching the
     /// referenced transactions (and their parents) through the gateway.
-    /// Also returns the ownership addresses derived from ranged descriptors.
-    fn resolve_utxo_history(
-        &self,
-        utxos: &[UtxoInput],
-    ) -> Result<(WalletHistory, AddressSet), AnalysisError> {
+    fn resolve_utxo_history(&self, utxos: &[UtxoInput]) -> Result<WalletHistory, AnalysisError> {
         let mut wallet_txs = Vec::new();
         let mut utxo_entries = Vec::new();
         let mut transactions: HashMap<Txid, DecodedTransaction> = HashMap::new();
@@ -256,16 +247,17 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             depth += 1;
         }
 
-        let (internal_addresses, derived_addresses, ranged) = self.derive_ownership_addresses()?;
+        let (internal_addresses, derived_addresses, ranged_addresses) =
+            self.derive_ownership_addresses()?;
 
-        let history = WalletHistory {
+        Ok(WalletHistory {
             wallet_txs,
             utxos: utxo_entries,
             transactions,
             internal_addresses,
             derived_addresses,
-        };
-        Ok((history, ranged))
+            ranged_addresses,
+        })
     }
 
     /// Derive the addresses of `ownership_descriptors` so `is_ours()` can
@@ -302,15 +294,6 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         }
         Ok((internal, derived, ranged))
     }
-
-    /// Addresses derived from the ranged descriptors among `resolved`.
-    fn derive_ranged(&self, resolved: &[ResolvedDescriptor]) -> Result<AddressSet, AnalysisError> {
-        let mut ranged = HashSet::new();
-        for descriptor in resolved.iter().filter(|d| is_ranged(&d.desc)) {
-            ranged.extend(self.gateway.derive_addresses(descriptor)?);
-        }
-        Ok(ranged)
-    }
 }
 
 /// Prefix a node error with the pasted output it came from, so the user
@@ -328,14 +311,6 @@ fn name_pasted_output(error: AnalysisError, utxo: &UtxoInput) -> AnalysisError {
     }
 }
 
-/// True when the descriptor is ranged, i.e. derives a chain of addresses
-/// rather than naming fixed scripts. In descriptor syntax (BIP 380) `*`
-/// occurs only as a derivation wildcard, never in keys, scripts or the
-/// checksum, so its presence is the ranged check.
-pub(crate) fn is_ranged(descriptor: &str) -> bool {
-    descriptor.contains('*')
-}
-
 /// The node's entries replace the ones built from the pasted outputs for the
 /// transactions it returned; an output the node did not return keeps its entry.
 pub(crate) fn merge_chain_history(history: &mut WalletHistory, full: WalletHistory) {
@@ -345,6 +320,7 @@ pub(crate) fn merge_chain_history(history: &mut WalletHistory, full: WalletHisto
     history.transactions.extend(full.transactions);
     history.internal_addresses.extend(full.internal_addresses);
     history.derived_addresses.extend(full.derived_addresses);
+    history.ranged_addresses.extend(full.ranged_addresses);
 }
 
 #[cfg(test)]

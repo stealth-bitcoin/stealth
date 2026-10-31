@@ -238,15 +238,8 @@ impl TxGraph {
             input_cache,
             output_cache,
             spending_index,
-            ranged_addrs: history.derived_addresses,
+            ranged_addrs: history.ranged_addresses,
         }
-    }
-
-    /// Replace the addresses derived from ranged descriptors, which default
-    /// to every derived address (a Core wallet's descriptors are ranged).
-    pub fn with_ranged_addresses(mut self, ranged: HashSet<Address<NetworkUnchecked>>) -> Self {
-        self.ranged_addrs = ranged;
-        self
     }
 }
 

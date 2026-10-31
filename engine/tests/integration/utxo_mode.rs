@@ -492,10 +492,12 @@ fn utxo_scan_with_ownership_descriptors_warns_on_a_merge_into_our_change() {
         .analyze(ScanTarget::Utxos(utxo_inputs_for(&alice)))
         .expect("utxo scan failed");
     assert_consolidation_warning(&report, 1, 3, 0);
-    assert!(report
+    let warning = report
         .warnings
         .iter()
-        .any(|w| w.description.contains("your change address")));
+        .find(|w| w.vulnerability_type == VulnerabilityType::Consolidation)
+        .expect("warning");
+    assert_change_address_wording(warning);
 }
 
 #[test]

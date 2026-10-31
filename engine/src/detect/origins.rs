@@ -78,7 +78,7 @@ impl TxGraph {
                     ),
                 });
             } else {
-                // Only the user's wallet pays its own change chain, so it likely built this merge.
+                // Only the user's wallet pays its change chain, alone or with others.
                 let on_change = self.addr_map.get(&utxo.address).is_some_and(|m| m.internal);
                 let vouched = self.ranged_addrs.contains(&utxo.address);
                 if vouched && unresolved == 0 && !on_change {
@@ -90,17 +90,30 @@ impl TxGraph {
                     utxo.vout,
                     utxo.amount.to_btc()
                 );
-                let description = if on_change {
-                    format!(
-                        "{coin} sits on your change address, so your wallet likely built the \
-                         {n_in}-input consolidation it came from; this scan recognises {ours} of \
-                         its inputs as yours and cannot tell whose the others are (another \
-                         account or script type?)"
+                let (description, correction) = if on_change {
+                    (
+                        format!(
+                            "{coin} sits on your change address and came from a {n_in}-input \
+                             consolidation; this scan recognises {ours} of its inputs as yours \
+                             and cannot tell whose the others are. Either your wallet merged \
+                             coins from another account or script type, or this was a \
+                             collaborative transaction (Payjoin, CoinJoin, dual-funded channel) \
+                             whose other inputs belong to others"
+                        ),
+                        "If these inputs were yours, from another account or script type: \
+                         avoid merging many coins in one transaction; consolidate through a \
+                         CoinJoin, or inside a Payjoin (BIP-78) payment so the merge looks like \
+                         an ordinary spend.",
                     )
                 } else {
-                    format!(
-                        "{coin} came from a {n_in}-input consolidation; this scan recognises \
-                         {ours} of its inputs as yours and cannot tell whose the others are"
+                    (
+                        format!(
+                            "{coin} came from a {n_in}-input consolidation; this scan recognises \
+                             {ours} of its inputs as yours and cannot tell whose the others are"
+                        ),
+                        "If these inputs were yours: avoid merging many coins in one \
+                         transaction; consolidate through a CoinJoin, or inside a Payjoin \
+                         (BIP-78) payment so the merge looks like an ordinary spend.",
                     )
                 };
                 warnings.push(Finding {
@@ -108,12 +121,7 @@ impl TxGraph {
                     severity: Severity::Low,
                     description,
                     details: Some(details),
-                    correction: Some(
-                        "If these inputs were yours: avoid merging many coins in one \
-                         transaction; consolidate through a CoinJoin, or inside a Payjoin \
-                         (BIP-78) payment so the merge looks like an ordinary spend."
-                            .into(),
-                    ),
+                    correction: Some(correction.into()),
                 });
             }
         }

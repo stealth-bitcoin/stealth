@@ -507,11 +507,7 @@ fn ranged_scan_warns_when_a_consolidation_pays_our_change_address() {
         .iter()
         .find(|w| w.vulnerability_type == VulnerabilityType::Consolidation)
         .expect("warning");
-    assert!(
-        warning.description.contains("your change address"),
-        "{}",
-        warning.description
-    );
+    assert_change_address_wording(warning);
 }
 
 #[test]
@@ -544,4 +540,28 @@ fn a_coin_at_a_fixed_address_beside_a_ranged_descriptor_warns() {
     let mut descriptors = wallet_descriptors(&alice);
     descriptors.push(format!("addr({dest})"));
     assert_consolidation_warning(&scan_descriptors(&node, descriptors), 0, 3, 0);
+}
+
+#[test]
+fn a_sweep_to_a_ranged_receive_address_beside_a_fixed_one_is_silent() {
+    let node = node();
+    let alice = receive_from_a_sweep(&node);
+    let (_carol, dest) = someone_consolidates_own_coins(&node);
+
+    // The xpub-derived coin is covered even though an addr() rides along.
+    let mut descriptors = wallet_descriptors(&alice);
+    descriptors.push(format!("addr({dest})"));
+    let report = scan_descriptors(&node, descriptors);
+    let flagged: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.vulnerability_type == VulnerabilityType::Consolidation)
+        .collect();
+    assert_eq!(
+        flagged.len(),
+        1,
+        "only the coin at the fixed address: {flagged:?}"
+    );
+    let details = flagged[0].details.as_ref().expect("details");
+    assert_eq!(details["consolidation_inputs"], 3);
 }

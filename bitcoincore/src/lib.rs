@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use stealth_model::config::AnalysisConfig;
+use stealth_model::descriptor::is_ranged;
 use stealth_model::error::AnalysisError;
 use stealth_model::gateway::{
     BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, TxFetchResults,
@@ -490,6 +491,7 @@ impl BitcoinCoreRpc {
             transactions,
             internal_addresses: HashSet::new(),
             derived_addresses: HashSet::new(),
+            ranged_addresses: HashSet::new(),
         })
     }
 
@@ -908,15 +910,20 @@ impl BitcoinCoreRpc {
 
         let mut internal_addresses = HashSet::new();
         let mut derived_addresses = HashSet::new();
+        let mut ranged_addresses = HashSet::new();
         for desc in descriptors {
             let addrs = self.derive_addresses(desc)?;
             if desc.internal {
                 internal_addresses.extend(addrs.iter().cloned());
             }
+            if is_ranged(&desc.desc) {
+                ranged_addresses.extend(addrs.iter().cloned());
+            }
             derived_addresses.extend(addrs);
         }
         history.internal_addresses = internal_addresses;
         history.derived_addresses = derived_addresses;
+        history.ranged_addresses = ranged_addresses;
 
         Ok(history)
     }
@@ -1159,15 +1166,20 @@ impl BlockchainGateway for BitcoinCoreRpc {
         let descriptors = self.list_wallet_descriptors(wallet_name)?;
         let mut internal_addresses = HashSet::new();
         let mut derived_addresses = HashSet::new();
+        let mut ranged_addresses = HashSet::new();
         for desc in &descriptors {
             let addrs = self.derive_addresses(desc)?;
             if desc.internal {
                 internal_addresses.extend(addrs.iter().cloned());
             }
+            if is_ranged(&desc.desc) {
+                ranged_addresses.extend(addrs.iter().cloned());
+            }
             derived_addresses.extend(addrs);
         }
         history.internal_addresses = internal_addresses;
         history.derived_addresses = derived_addresses;
+        history.ranged_addresses = ranged_addresses;
 
         Ok(history)
     }
