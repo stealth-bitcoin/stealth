@@ -263,6 +263,12 @@ fn text_report(report: &stealth_engine::Report) -> String {
         lines.push(String::new());
     }
 
+    // The note says why nothing was analyzed; the empty-scan hint would contradict it.
+    if is_empty_report(&report.summary) && !conflicted.is_empty() {
+        lines.push("Nothing else was left to analyze.".to_owned());
+        return lines.join("\n") + "\n";
+    }
+
     if is_empty_report(&report.summary) {
         lines.push("No transactions found for this input.".to_owned());
         lines.push(

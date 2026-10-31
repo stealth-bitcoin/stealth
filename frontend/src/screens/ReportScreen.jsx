@@ -152,6 +152,8 @@ function ConflictedNote({ txids }) {
 export default function ReportScreen({ report, descriptor, kind: rawKind, onReset }) {
   const { stats, findings, warnings, summary } = report
   const kind = effectiveKind(rawKind, descriptor)
+  const conflicted = stats.conflicted_txids ?? []
+  const emptyScan = summary.analyzed_nothing && findings.length === 0 && warnings.length === 0
 
   return (
     <div className={styles.root}>
@@ -213,10 +215,15 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
         )}
 
         {/* Conflicted transactions left out */}
-        <ConflictedNote txids={stats.conflicted_txids ?? []} />
+        <ConflictedNote txids={conflicted} />
 
-        {/* Nothing-analyzed banner */}
-        {summary.analyzed_nothing && findings.length === 0 && warnings.length === 0 && (
+        {/* Nothing-analyzed banner; the conflicted note already says why, when it is shown */}
+        {emptyScan && conflicted.length > 0 && (
+          <div className={styles.emptyBanner}>
+            <strong>Nothing else was left to analyze.</strong>
+          </div>
+        )}
+        {emptyScan && conflicted.length === 0 && (
           <div className={styles.emptyBanner}>
             <strong>No transactions found for this input.</strong>
             <p className={styles.emptyHint}>{emptyHint(kind)}</p>

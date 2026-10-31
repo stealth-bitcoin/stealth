@@ -367,6 +367,27 @@ mod ordering {
     }
 
     #[test]
+    fn a_scan_whose_every_tx_was_conflicted_gives_no_empty_scan_hint() {
+        let stats = stealth_engine::types::Stats {
+            transactions_analyzed: 0,
+            addresses_seen: 1,
+            utxos_current: 0,
+            addresses_without_history: 0,
+            conflicted_txids: vec![CONFLICTED.parse().unwrap()],
+        };
+        let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
+        assert!(text.contains(CONFLICTED), "{text}");
+        assert!(
+            text.ends_with(&format!(
+                "  {CONFLICTED}\n\nNothing else was left to analyze.\n"
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("No transactions found"), "{text}");
+        assert!(!text.contains("unused address"), "{text}");
+    }
+
+    #[test]
     fn a_report_without_conflicted_txs_has_no_note() {
         let text = text_report(&report(Vec::new(), Vec::new()));
         assert!(!text.contains("conflicted"), "{text}");

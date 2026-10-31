@@ -407,6 +407,14 @@ describe('ReportScreen — conflicted transactions left out', () => {
     expect(screen.getByText(other)).toBeTruthy()
   })
 
+  it('gives no empty-scan hint when every transaction was left out', () => {
+    render(<ReportScreen report={makeReport({ txs: 0, conflicted: [original] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.getByText(original)).toBeTruthy()
+    expect(screen.getByText(/nothing else was left to analyze/i)).toBeTruthy()
+    expect(screen.queryByText(/no transactions found for this input/i)).toBeNull()
+    expect(screen.queryByText(/unused|off-chain|catching up/i)).toBeNull()
+  })
+
   it('says nothing when no transaction was left out, or the report predates the field', () => {
     const report = makeReport({ txs: 2 })
     render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
