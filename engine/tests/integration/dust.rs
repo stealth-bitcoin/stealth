@@ -153,6 +153,96 @@ fn detect_dust_spending() {
     assert!(has_finding(&report, VulnerabilityType::DustSpending));
 }
 
+/// Signs and broadcasts a raw spend of `inputs` from `wallet`, then mines it.
+fn spend_raw(
+    node: &Node,
+    wallet: &corepc_node::Client,
+    inputs: &[Input],
+    outputs: &[Output],
+    miner: &Address,
+) {
+    let raw = wallet.create_raw_transaction(inputs, outputs).unwrap();
+    let tx = raw.transaction().unwrap();
+    let signed = wallet.sign_raw_transaction_with_wallet(&tx).unwrap();
+    let stx = signed.into_model().unwrap().tx;
+    wallet.send_raw_transaction(&stx).unwrap();
+    mine(node, 1, miner);
+}
+
+#[test]
+fn coins_of_one_address_spent_together_link_nothing_new() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let ba = bob.new_address().unwrap();
+    node.client
+        .send_to_address(&ba, Amount::from_btc(2.0).unwrap())
+        .unwrap();
+    mine(&node, 1, &da);
+
+    // Alice pays bob from address `a`, leaving 600 sats of change back at `a`.
+    let a = alice.new_address().unwrap();
+    bob.send_to_address(&a, Amount::from_sat(100_000)).unwrap();
+    mine(&node, 1, &da);
+    let first = alice.list_unspent().unwrap().0.remove(0);
+    spend_raw(
+        &node,
+        &alice,
+        &[Input {
+            txid: first.txid.parse().unwrap(),
+            vout: first.vout as u64,
+            sequence: None,
+        }],
+        &[
+            Output::new(bob.new_address().unwrap(), Amount::from_sat(89_400)),
+            Output::new(a.clone(), Amount::from_sat(600)),
+        ],
+        &da,
+    );
+
+    // A larger coin lands at the same address; alice spends both together.
+    bob.send_to_address(&a, Amount::from_sat(1_000_000))
+        .unwrap();
+    mine(&node, 1, &da);
+    let coins = alice.list_unspent().unwrap().0;
+    assert_eq!(coins.len(), 2);
+    let inputs: Vec<Input> = coins
+        .iter()
+        .map(|u| Input {
+            txid: u.txid.parse().unwrap(),
+            vout: u.vout as u64,
+            sequence: None,
+        })
+        .collect();
+    spend_raw(
+        &node,
+        &alice,
+        &inputs,
+        &[
+            Output::new(bob.new_address().unwrap(), Amount::from_sat(20_000)),
+            Output::new(alice.new_address().unwrap(), Amount::from_sat(970_600)),
+        ],
+        &da,
+    );
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    for kind in [
+        VulnerabilityType::DustSpending,
+        VulnerabilityType::ToxicChange,
+        VulnerabilityType::UnnecessaryInput,
+    ] {
+        assert!(
+            !has_finding(&report, kind),
+            "{kind:?}: {:?}",
+            report.findings
+        );
+    }
+}
+
 // ─── 13. Dust Attack Detection ─────────────────────────────────────────────
 //
 // Dust-attack detection is folded into the Dust detector: when a dust

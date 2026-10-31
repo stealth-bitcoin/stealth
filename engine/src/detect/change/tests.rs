@@ -9,6 +9,7 @@ use bitcoin::{
 };
 use serde_json::Value;
 
+use crate::config::DetectorThresholds;
 use crate::gateway::{
     DecodedTransaction, DescriptorType, TxInputRef, TxOutput, WalletHistory, WalletTxCategory,
     WalletTxEntry,
@@ -282,6 +283,18 @@ fn findings_for(
     vout: Vec<TxOutput>,
     ours: &[&Address<NetworkUnchecked>],
 ) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    TxGraph::from_wallet_history(history_for(coins, vout, ours))
+        .detect_change_detection(&mut findings);
+    findings
+}
+
+/// One spend of `coins`, each from its own funding tx, to `vout`, seen by a wallet owning `ours`.
+fn history_for(
+    coins: Vec<Coin>,
+    vout: Vec<TxOutput>,
+    ours: &[&Address<NetworkUnchecked>],
+) -> WalletHistory {
     let spend = txid(100);
     let mut wallet_txs = Vec::new();
     let mut transactions = HashMap::new();
@@ -318,17 +331,14 @@ fn findings_for(
         }
     }
     transactions.insert(spend, tx(spend, vin, vout));
-    let history = WalletHistory {
+    WalletHistory {
         wallet_txs,
         utxos: vec![],
         transactions,
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
         ranged_addresses: HashSet::new(),
-    };
-    let mut findings = Vec::new();
-    TxGraph::from_wallet_history(history).detect_change_detection(&mut findings);
-    findings
+    }
 }
 
 fn back_to_input(n: u32, sats: u64) -> String {
@@ -501,4 +511,55 @@ fn change_back_to_the_input_gets_no_script_type_line_it_implies() {
         "{}",
         findings[0].description
     );
+}
+
+/// Toxic change findings for a 600-sat coin of `a` spent with a 50,000-sat coin of `big`.
+fn toxic_findings(
+    a: &Address<NetworkUnchecked>,
+    big: &Address<NetworkUnchecked>,
+    extra: Vec<Coin>,
+) -> Vec<Finding> {
+    let mut coins = vec![coin(a, 600), coin(big, 50_000)];
+    coins.extend(extra);
+    let mut history = history_for(coins, vec![out(0, &wpkh(101), 40_000)], &[a, big]);
+    // The 600-sat coin is change from an earlier spend of a coin of `a`.
+    let earlier = txid(50);
+    history
+        .transactions
+        .insert(earlier, tx(earlier, vec![], vec![out(0, a, 100_000)]));
+    history
+        .wallet_txs
+        .push(entry(earlier, Some(a), WalletTxCategory::Receive));
+    if let Some(source) = history.transactions.get_mut(&txid(1)) {
+        source.vin.push(TxInputRef {
+            previous_txid: earlier,
+            previous_vout: 0,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        });
+    }
+    let mut findings = Vec::new();
+    TxGraph::from_wallet_history(history)
+        .detect_toxic_change(&DetectorThresholds::default(), &mut findings);
+    findings
+}
+
+#[test]
+fn small_change_merged_with_a_coin_at_another_address_is_toxic() {
+    let findings = toxic_findings(&wpkh(1), &wpkh(2), vec![]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+}
+
+#[test]
+fn small_change_merged_with_a_coin_at_its_own_address_links_nothing_new() {
+    let a = wpkh(1);
+    let findings = toxic_findings(&a, &a, vec![]);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn a_strangers_input_does_not_make_one_address_toxic() {
+    let a = wpkh(1);
+    let findings = toxic_findings(&a, &a, vec![coin(&wpkh(200), 30_000)]);
+    assert!(findings.is_empty(), "{findings:?}");
 }

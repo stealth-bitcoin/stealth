@@ -387,6 +387,16 @@ impl TxGraph {
                 continue;
             }
 
+            // Coins from a single address link nothing that address does not already.
+            let own_addresses: HashSet<_> = input_addrs
+                .iter()
+                .filter(|ia| self.is_ours(&ia.address))
+                .map(|ia| &ia.address)
+                .collect();
+            if own_addresses.len() < 2 {
+                continue;
+            }
+
             let mut dust_inputs = Vec::new();
             let mut normal_inputs = Vec::new();
             for ia in &input_addrs {
@@ -430,3 +440,6 @@ impl TxGraph {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

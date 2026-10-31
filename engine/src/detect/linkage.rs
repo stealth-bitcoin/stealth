@@ -345,7 +345,9 @@ impl TxGraph {
                 .iter()
                 .filter(|ia| self.is_ours(&ia.address))
                 .collect();
-            if our_in.len() < 2 {
+            // Coins from a single address link nothing that address does not already.
+            let our_addresses: HashSet<_> = our_in.iter().map(|ia| &ia.address).collect();
+            if our_addresses.len() < 2 {
                 continue;
             }
 
@@ -424,3 +426,6 @@ impl Origin {
             || self.address == other.address
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -184,7 +184,18 @@ fn spent_dust_is_not_hidden_by_unspent_sibling_at_same_address() {
 
 #[test]
 fn toxic_change_findings_name_their_output() {
-    let toxic = findings(history(true), VulnerabilityType::ToxicChange);
+    // The larger coin sits at a second own address, so the merge links two addresses.
+    let mut h = history(true);
+    let other = tr(2);
+    if let Some(large) = h
+        .transactions
+        .get_mut(&txid(PARENT))
+        .and_then(|parent| parent.vout.iter_mut().find(|o| o.n == 3))
+    {
+        large.address = Some(other.clone());
+    }
+    h.derived_addresses.insert(other);
+    let toxic = findings(h, VulnerabilityType::ToxicChange);
     let mut vouts: Vec<u64> = toxic
         .iter()
         .filter_map(|f| f.details.as_ref())
