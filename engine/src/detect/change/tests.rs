@@ -5,8 +5,7 @@ use std::collections::{HashMap, HashSet};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash;
 use bitcoin::{
-    Address, Amount, Network, PubkeyHash, ScriptBuf, ScriptHash, Txid, WPubkeyHash, WitnessProgram,
-    WitnessVersion,
+    Address, Amount, Network, ScriptBuf, Txid, WPubkeyHash, WitnessProgram, WitnessVersion,
 };
 use serde_json::Value;
 
@@ -24,19 +23,6 @@ fn txid(n: u32) -> Txid {
 
 fn wpkh(seed: u8) -> Address<NetworkUnchecked> {
     parse(ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array(
-        [seed; 20],
-    )))
-}
-
-fn pkh(seed: u8) -> Address<NetworkUnchecked> {
-    parse(ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array(
-        [seed; 20],
-    )))
-}
-
-/// A P2SH address, as a wrapped segwit (sh-wpkh) coin pays to.
-fn sh(seed: u8) -> Address<NetworkUnchecked> {
-    parse(ScriptBuf::new_p2sh(&ScriptHash::from_byte_array(
         [seed; 20],
     )))
 }
@@ -750,64 +736,35 @@ fn a_larger_own_coin_elsewhere_still_makes_the_merge_toxic() {
 }
 
 #[test]
-fn toxic_change_advice_is_for_next_time_and_offers_wabisabi_only_above_the_minimum() {
-    let findings = toxic_findings_of(5_000, &wpkh(1), &wpkh(2), vec![], &[]);
-    let correction = findings[0].correction.as_deref().expect("a correction");
-    assert!(
-        correction.starts_with("Freeze small change like this"),
-        "{correction}"
-    );
-    assert!(correction.contains("from now on"), "{correction}");
-    assert!(
-        correction.contains("at or above a CoinJoin coordinator's minimum"),
-        "{correction}"
-    );
-    assert!(correction.contains("WabiSabi"), "{correction}");
-    for absent in [
-        "spend it alone",
-        "OP_RETURN",
-        "bump fee",
-        "PayJoin",
-        "Lightning",
-    ] {
-        assert!(!correction.contains(absent), "{absent}: {correction}");
+fn toxic_change_advice_is_for_next_time_and_suggests_no_coinjoin() {
+    // A coordinator's 5,000-sat minimum applies to outputs too, so change this small cannot
+    // come out of a round alone.
+    for change in [wpkh(1), tr(1)] {
+        for sats in [546, 600, 1_000, 5_000, 10_000] {
+            let findings = toxic_findings_of(sats, &change, &wpkh(2), vec![], &[]);
+            let correction = findings[0].correction.as_deref().expect("a correction");
+            assert!(
+                correction.starts_with("Freeze small change like this"),
+                "{correction}"
+            );
+            assert!(correction.contains("from now on"), "{correction}");
+            assert!(correction.contains("never merge it"), "{correction}");
+            for absent in [
+                "CoinJoin",
+                "WabiSabi",
+                "spend it alone",
+                "OP_RETURN",
+                "bump fee",
+                "PayJoin",
+                "Lightning",
+            ] {
+                assert!(
+                    !correction.contains(absent),
+                    "{sats} {absent}: {correction}"
+                );
+            }
+        }
     }
-}
-
-#[test]
-fn toxic_change_under_the_coordinators_minimum_gets_no_coinjoin_mention() {
-    for sats in [546, 600, 1_000] {
-        let findings = toxic_findings_of(sats, &wpkh(1), &wpkh(2), vec![], &[]);
-        let correction = findings[0].correction.as_deref().expect("a correction");
-        assert!(
-            correction.starts_with("Freeze small change like this"),
-            "{correction}"
-        );
-        assert!(!correction.contains("CoinJoin"), "{sats}: {correction}");
-    }
-    // Wasabi's coordinator registers coins from 5,000 sats by default.
-    for sats in [1_001, 4_999] {
-        let findings = toxic_findings_of(sats, &wpkh(1), &wpkh(2), vec![], &[]);
-        let correction = findings[0].correction.as_deref().expect("a correction");
-        assert!(!correction.contains("CoinJoin"), "{sats}: {correction}");
-    }
-    for sats in [5_000, 10_000] {
-        let findings = toxic_findings_of(sats, &wpkh(1), &wpkh(2), vec![], &[]);
-        let correction = findings[0].correction.as_deref().expect("a correction");
-        assert!(correction.contains("WabiSabi"), "{sats}: {correction}");
-    }
-}
-
-#[test]
-fn toxic_change_at_a_script_type_the_coordinator_refuses_gets_no_coinjoin_mention() {
-    for change in [pkh(1), sh(1)] {
-        let findings = toxic_findings_of(5_000, &change, &wpkh(2), vec![], &[]);
-        let correction = findings[0].correction.as_deref().expect("a correction");
-        assert!(!correction.contains("CoinJoin"), "{change:?}: {correction}");
-    }
-    let findings = toxic_findings_of(5_000, &tr(1), &wpkh(2), vec![], &[]);
-    let correction = findings[0].correction.as_deref().expect("a correction");
-    assert!(correction.contains("WabiSabi"), "{correction}");
 }
 
 #[test]

@@ -2,8 +2,6 @@
 
 use std::collections::HashSet;
 
-use bitcoin::address::NetworkUnchecked;
-use bitcoin::Address;
 use serde_json::json;
 
 use super::list_addresses;
@@ -12,10 +10,6 @@ use crate::graph::TxGraph;
 use crate::types::*;
 
 const MAX_CHANGE_REASONS: usize = 6;
-
-/// Smallest coin Wasabi's WabiSabi coordinator registers by default (MinRegistrableAmount);
-/// it takes only P2WPKH and P2TR inputs.
-const WABISABI_MIN_SATS: u64 = 5_000;
 
 /// Keeps at most `cap` reasons, the first of each heuristic before any other, in first-found order.
 fn cap_reasons(problems: Vec<(&'static str, String)>, cap: usize) -> Vec<String> {
@@ -36,12 +30,6 @@ fn cap_reasons(problems: Vec<(&'static str, String)>, cap: usize) -> Vec<String>
         .zip(keep)
         .filter_map(|((_, reason), kept)| kept.then_some(reason))
         .collect()
-}
-
-/// The address is P2WPKH or P2TR, the script types a WabiSabi coordinator takes.
-fn wabisabi_script(address: &Address<NetworkUnchecked>) -> bool {
-    let script = address.assume_checked_ref().script_pubkey();
-    script.is_p2wpkh() || script.is_p2tr()
 }
 
 impl TxGraph {
@@ -293,16 +281,11 @@ impl TxGraph {
                         "tied_addresses": tied,
                         "possibly_tied_addresses": possibly_tied,
                     })),
-                    correction: Some(format!(
+                    correction: Some(
                         "Freeze small change like this in your wallet from now on and never \
-                         merge it with your other coins: that ties their addresses together.{}",
-                        if sats >= WABISABI_MIN_SATS && wabisabi_script(&out.address) {
-                            " Change at or above a CoinJoin coordinator's minimum can go through a \
-                             WabiSabi CoinJoin instead."
-                        } else {
-                            ""
-                        }
-                    )),
+                         merge it with your other coins: that ties their addresses together."
+                            .into(),
+                    ),
                 });
             }
         }
