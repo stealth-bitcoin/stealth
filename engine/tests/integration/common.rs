@@ -56,6 +56,23 @@ pub fn has_finding(report: &stealth_engine::Report, vtype: VulnerabilityType) ->
         .any(|f| f.vulnerability_type == vtype)
 }
 
+/// The correction of the first finding of `vtype`, which must say freeze first and warn that
+/// an inscription or runes spent as fee are lost.
+pub fn assert_dust_advice(report: &stealth_engine::Report, vtype: VulnerabilityType) {
+    let correction = report
+        .findings
+        .iter()
+        .find(|f| f.vulnerability_type == vtype)
+        .and_then(|f| f.correction.as_deref())
+        .unwrap_or_default();
+    assert!(correction.starts_with("Freeze"), "{correction}");
+    assert!(
+        correction.contains("ordinals inscription or runes"),
+        "{correction}"
+    );
+    assert!(!correction.contains("bump fee"), "{correction}");
+}
+
 /// A client bound to one of the node's wallets, for RPCs the engine does not expose.
 pub fn node_wallet(node: &Node, name: &str) -> corepc_node::Client {
     corepc_node::Client::new_with_auth(

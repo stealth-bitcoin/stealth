@@ -868,7 +868,7 @@ fn unconfirmed_dust_listed_by_the_address_history_is_unspent_without_asking() {
         })
         .and_then(|f| f.correction.clone())
         .unwrap_or_default();
-    assert!(freeze.contains("freeze"), "{freeze}");
+    assert!(freeze.starts_with("Freeze it"), "{freeze}");
     assert!(gateway.asked.borrow().is_empty());
 }
 
@@ -941,5 +941,5 @@ fn a_failed_creating_tx_lookup_still_reports_present_dust_unspent() {
         })
         .and_then(|f| f.correction.clone())
         .unwrap_or_default();
-    assert!(freeze.contains("freeze"), "{freeze}");
+    assert!(freeze.starts_with("Freeze it"), "{freeze}");
 }

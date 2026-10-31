@@ -7,9 +7,10 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, Network, ScriptBuf, Txid, WPubkeyHash};
 
 use crate::config::DetectorThresholds;
+use crate::detect::DUST_OPTIONS;
 use crate::gateway::{
-    DecodedTransaction, DescriptorType, TxInputRef, TxOutput, WalletHistory, WalletTxCategory,
-    WalletTxEntry,
+    DecodedTransaction, DescriptorType, TxInputRef, TxOutput, Utxo, WalletHistory,
+    WalletTxCategory, WalletTxEntry,
 };
 use crate::graph::TxGraph;
 use crate::types::Finding;
@@ -130,4 +131,60 @@ fn a_strangers_input_does_not_make_one_address_dust_spending() {
         &[&a],
     ));
     assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn dust_spending_advice_freezes_first_with_the_shared_options() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let findings = dust_spending(spend_of(&[(&a, 600), (&b, 50_000)], &[&a, &b]));
+    let correction = findings[0].correction.as_deref().expect("a correction");
+    assert!(correction.starts_with("Freeze"), "{correction}");
+    assert!(correction.contains(DUST_OPTIONS), "{correction}");
+}
+
+#[test]
+fn unspent_dust_advice_freezes_first_with_the_shared_options() {
+    let a = wpkh(1);
+    let fund = txid(1);
+    let history = WalletHistory {
+        wallet_txs: vec![entry(fund, Some(&a), WalletTxCategory::Receive)],
+        utxos: vec![Utxo {
+            txid: fund,
+            vout: 0,
+            address: Some(a.clone()),
+            amount: Amount::from_sat(600),
+            confirmations: 3,
+            script_type: DescriptorType::P2wpkh,
+        }],
+        transactions: HashMap::from([(fund, tx(fund, vec![], vec![out(0, &a, 600)]))]),
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::new(),
+        ranged_addresses: HashSet::new(),
+    };
+    let mut findings = Vec::new();
+    TxGraph::from_wallet_history(history)
+        .detect_dust(&DetectorThresholds::default(), &mut findings);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let correction = findings[0].correction.as_deref().expect("a correction");
+    assert!(correction.starts_with("Freeze"), "{correction}");
+    assert!(correction.contains(DUST_OPTIONS), "{correction}");
+}
+
+#[test]
+fn the_shared_options_warn_that_an_inscription_spent_as_fee_is_lost() {
+    for needle in [
+        "alone as fee",
+        "one coin per transaction",
+        "0-value OP_RETURN",
+        "low fee rate",
+        "ordinals inscription or runes",
+        "lost",
+        "WabiSabi",
+        "coordinator's minimum",
+    ] {
+        assert!(DUST_OPTIONS.contains(needle), "{needle}: {DUST_OPTIONS}");
+    }
+    for banned in ["PayJoin", "Payjoin", "Lightning", "tx0", "Whirlpool"] {
+        assert!(!DUST_OPTIONS.contains(banned), "{banned}: {DUST_OPTIONS}");
+    }
 }

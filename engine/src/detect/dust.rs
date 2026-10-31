@@ -6,6 +6,7 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, OutPoint, Txid};
 use serde_json::json;
 
+use super::DUST_OPTIONS;
 use crate::config::DetectorThresholds;
 use crate::graph::TxGraph;
 use crate::types::*;
@@ -193,20 +194,16 @@ impl TxGraph {
                 label,
             )
         };
-        let correction = if attack.is_some() {
-            "Do NOT spend this dust UTXO — spending it links your other addresses \
-             to this one via common-input-ownership. Freeze it in your wallet immediately."
-        } else {
-            "Do not spend this dust output — doing so links your other addresses \
-             to this one via CIOH. Use your wallet's coin freeze feature to \
-             exclude it from future transactions."
-        };
+        let correction = format!(
+            "Freeze it in your wallet: spending it with your other coins links your \
+             other addresses to this one. {DUST_OPTIONS}"
+        );
         Finding {
             vulnerability_type: VulnerabilityType::Dust,
             severity,
             description,
             details: Some(details),
-            correction: Some(correction.into()),
+            correction: Some(correction),
         }
     }
 
@@ -430,11 +427,10 @@ impl TxGraph {
                             json!({"address": n.address.assume_checked_ref().to_string(), "sats": n.value.to_sat()})
                         }).collect::<Vec<_>>(),
                     })),
-                    correction: Some(
-                        "Freeze dust UTXOs in your wallet to prevent them from being \
-                         automatically selected as inputs."
-                            .into(),
-                    ),
+                    correction: Some(format!(
+                        "Freeze each dust coin in your wallet so it is never picked as an \
+                         input with your other coins. {DUST_OPTIONS}"
+                    )),
                 });
             }
         }

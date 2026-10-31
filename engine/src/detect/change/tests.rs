@@ -563,3 +563,15 @@ fn a_strangers_input_does_not_make_one_address_toxic() {
     let findings = toxic_findings(&a, &a, vec![coin(&wpkh(200), 30_000)]);
     assert!(findings.is_empty(), "{findings:?}");
 }
+
+#[test]
+fn toxic_change_advice_freezes_first_and_never_says_absorb_into_the_fee() {
+    let findings = toxic_findings(&wpkh(1), &wpkh(2), vec![]);
+    let correction = findings[0].correction.as_deref().expect("a correction");
+    assert!(correction.starts_with("Freeze"), "{correction}");
+    assert!(
+        correction.contains(crate::detect::DUST_OPTIONS),
+        "{correction}"
+    );
+    assert!(!correction.contains("bump fee"), "{correction}");
+}

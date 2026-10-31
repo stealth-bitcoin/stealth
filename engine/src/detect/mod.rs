@@ -15,6 +15,12 @@ mod dust;
 mod linkage;
 mod origins;
 
+/// Ways to get rid of a small coin, shared by every dust-related correction after "freeze it".
+const DUST_OPTIONS: &str = "If you want it gone: spend it alone as fee, one coin per transaction \
+     (a single input and one 0-value OP_RETURN output), only at a low fee rate. If the coin holds \
+     an ordinals inscription or runes, spending it as fee hands them to the miner and they are lost. \
+     Or, if it is above the coordinator's minimum and you accept the fee, put it in a WabiSabi CoinJoin.";
+
 impl TxGraph {
     /// Run all vulnerability detectors and produce a [`Report`].
     ///

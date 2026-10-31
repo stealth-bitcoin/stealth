@@ -51,6 +51,7 @@ fn detect_dust() {
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
     assert!(has_finding(&report, VulnerabilityType::Dust));
+    assert_dust_advice(&report, VulnerabilityType::Dust);
 }
 
 // ─── 4. Dust Spending with Normal Inputs ────────────────────────────────────
@@ -151,6 +152,7 @@ fn detect_dust_spending() {
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
     assert!(has_finding(&report, VulnerabilityType::DustSpending));
+    assert_dust_advice(&report, VulnerabilityType::DustSpending);
 }
 
 /// Signs and broadcasts a raw spend of `inputs` from `wallet`, then mines it.
