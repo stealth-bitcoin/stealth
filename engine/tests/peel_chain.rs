@@ -890,3 +890,44 @@ fn a_chain_taking_in_another_chains_peeled_output_partway_is_one_flow() {
     assert_eq!(chain_txids(f), ids(&[0x11, 0x12, 0x13, 0x31, 0x32, 0x33]));
     assert_eq!(merged(f), Some(2));
 }
+
+#[test]
+fn a_send_consolidating_two_chains_change_joins_them() {
+    // 0x30 spends the change of 0x12 and of 0x22; the change links them on
+    // chain, so they are one flow even though nothing follows 0x30.
+    let txs = vec![
+        funding(0x10, 100_000_000),
+        funding(0x20, 100_000_000),
+        peel(0x11, &[(0x10, 0)], 1_000_000, 98_000_000),
+        peel(0x12, &[(0x11, 1)], 1_000_000, 96_000_000),
+        peel(0x21, &[(0x20, 0)], 1_000_000, 98_000_000),
+        peel(0x22, &[(0x21, 1)], 1_000_000, 96_000_000),
+        peel(0x30, &[(0x12, 1), (0x22, 1)], 1_000_000, 190_000_000),
+    ];
+    let findings = peel_findings(txs);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    assert_eq!(start(f), txid(0x11).to_string());
+    assert_eq!(hops(f), 3);
+    assert_eq!(chain_txids(f), ids(&[0x11, 0x12, 0x30, 0x21, 0x22]));
+    assert_eq!(merged(f), Some(2));
+}
+
+#[test]
+fn a_chain_spending_a_lone_peels_output_takes_it_into_the_flow() {
+    // 0x31 is a single peel whose small output comes back to the wallet;
+    // 0x41 spends it and starts a chain of its own, so 0x31 joins the flow.
+    let txs = vec![
+        funding(0x30, 100_000_000),
+        peel_to_self(0x31, (0x30, 0), 0x50, 10_000_000, 89_000_000),
+        peel(0x41, &[(0x31, 0)], 1_000_000, 8_000_000),
+        peel(0x42, &[(0x41, 1)], 1_000_000, 6_000_000),
+    ];
+    let findings = peel_findings(txs);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    assert_eq!(start(f), txid(0x41).to_string());
+    assert_eq!(hops(f), 2);
+    assert_eq!(chain_txids(f), ids(&[0x41, 0x42, 0x31]));
+    assert_eq!(merged(f), None);
+}
