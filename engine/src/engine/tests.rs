@@ -159,6 +159,10 @@ impl BlockchainGateway for FakeGateway {
         self.persisted.borrow_mut().push(persist);
         self.limits.borrow_mut().push(limit.max_txs);
         self.counted_of.borrow_mut().push(limit.of);
+        // With an asker, a history one above the limit, so it is asked.
+        if let (Some(limit_txs), Some(_)) = (limit.max_txs, &limit.ask) {
+            limit.check(limit_txs + 1)?;
+        }
         self.scanned
             .borrow_mut()
             .extend(descriptors.iter().map(|d| d.desc.clone()));
@@ -344,6 +348,27 @@ fn the_address_history_load_of_a_utxo_scan_carries_the_history_limit() {
         gateway.counted_of.borrow().as_slice(),
         [HistoryOf::PastedAddresses, HistoryOf::PastedAddresses]
     );
+}
+
+#[test]
+fn the_address_history_load_of_a_utxo_scan_asks_the_asker() {
+    let gateway = FakeGateway::new(Ok(chain_history(3, 1)));
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&asked);
+    let settings = EngineSettings {
+        history_limit: HistoryLimit {
+            ask: Some(std::sync::Arc::new(move |of, _, _| {
+                seen.lock().unwrap().push(of);
+                true
+            })),
+            ..HistoryLimit::at_most(3)
+        },
+        ..EngineSettings::default()
+    };
+    AnalysisEngine::new(&gateway, settings)
+        .analyze(ScanTarget::Utxos(vec![pasted()]))
+        .expect("told to go on");
+    assert_eq!(*asked.lock().unwrap(), vec![HistoryOf::PastedAddresses]);
 }
 
 #[test]
