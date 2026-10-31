@@ -514,6 +514,12 @@ impl BitcoinCoreRpc {
             frontier = next.into_iter().collect();
             depth += 1;
         }
+        // Until the node has loaded its mempool, every unconfirmed tx reads as not found.
+        if !left_out.unavailable.is_empty() && !self.mempool_loaded()? {
+            return Err(AnalysisError::EnvironmentUnavailable(
+                "the node is still loading its mempool; scan again once it has finished".into(),
+            ));
+        }
         wallet_txs.retain(|entry| !left_out.unavailable.contains(&entry.txid));
         utxos.retain(|utxo| !left_out.unavailable.contains(&utxo.txid));
 
@@ -632,6 +638,12 @@ impl BitcoinCoreRpc {
         // skip walks newest-to-oldest; reverse to keep global oldest-first order.
         pages.reverse();
         Ok(pages.into_iter().flatten().collect())
+    }
+
+    /// Whether the node has finished loading its mempool from disk.
+    fn mempool_loaded(&self) -> Result<bool, AnalysisError> {
+        let info = self.call::<Value>(None, "getmempoolinfo", Vec::new())?;
+        Ok(info["loaded"] != json!(false))
     }
 
     fn block_count(&self) -> Result<u64, AnalysisError> {
@@ -2711,6 +2723,7 @@ mod tests {
         serve_node(move |method| {
             let result = match method {
                 "getblockcount" => json!(112),
+                "getmempoolinfo" => json!({ "loaded": true, "size": 0 }),
                 "listunspent" => unspent.clone(),
                 "listtransactions" => json!([{
                     "address": ADDR, "amount": 0.001, "category": "receive",
@@ -2758,6 +2771,39 @@ mod tests {
             .expect("scan");
         assert!(history.utxos.is_empty());
         assert_eq!(history.left_out.unavailable.len(), 1);
+    }
+
+    #[test]
+    fn a_node_still_loading_its_mempool_fails_the_scan_instead_of_listing_txs_as_gone() {
+        let rpc = serve_node(|method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "getmempoolinfo" => json!({ "loaded": false, "size": 0 }),
+                "listunspent" => json!([]),
+                "listtransactions" => json!([{
+                    "address": ADDR, "amount": 0.001, "category": "receive",
+                    "confirmations": 0, "mempoolconflicts": [], "txid": ORIGINAL, "vout": 0,
+                }]),
+                "getrawtransaction" => {
+                    let batch = json!([{ "id": 0, "result": null, "error": not_found() }]);
+                    return ("200 OK", batch.to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        });
+        let error = rpc
+            .load_history_for_wallet("bob")
+            .expect_err("a mempool still loading cannot tell what is gone");
+        assert!(
+            error
+                .to_string()
+                .contains("the node is still loading its mempool; scan again once it has finished"),
+            "{error}"
+        );
     }
 
     #[test]
