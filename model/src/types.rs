@@ -194,8 +194,8 @@ pub struct Stats {
     /// wallet, sorted by their displayed hex.
     #[serde(default)]
     pub abandoned_txids: Vec<Txid>,
-    /// Unconfirmed wallet transactions left out because the node no longer
-    /// has them, sorted by their displayed hex.
+    /// Unconfirmed wallet transactions left out because the node does not
+    /// have them, sorted by their displayed hex.
     #[serde(default)]
     pub unavailable_txids: Vec<Txid>,
     /// Coinbases left out because their block is no longer in the chain,

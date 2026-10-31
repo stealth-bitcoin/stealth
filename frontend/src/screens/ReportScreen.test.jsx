@@ -485,24 +485,24 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
     delete report.stats.orphaned_txids
     show(report)
     // Words from each of the five notes.
-    expect(screen.queryByText(/left out|conflict|in the mempool|abandoned|no longer has|coinbase/i)).toBeNull()
+    expect(screen.queryByText(/left out|conflict|in the mempool|abandoned|does not have|coinbase/i)).toBeNull()
   })
 })
 
-describe('ReportScreen — unconfirmed transactions the node no longer has', () => {
+describe('ReportScreen — unconfirmed transactions the node does not have', () => {
   const original = '515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb'
   const other = 'a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab'
   const show = (report) => render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
 
   it('names one and says why it was left out', () => {
     show(makeReport({ txs: 2, unavailable: [original] }))
-    expect(screen.getByText(/left out 1 transaction that is unconfirmed and that this node no longer has \(it may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. it may still confirm, unless it or a transaction it depends on has a conflicting transaction mined; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 1 transaction that is unconfirmed and that this node does not have \(it may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. it may still confirm, unless it or a transaction it depends on has a conflicting transaction mined; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
     expect(screen.getByText(original)).toBeTruthy()
   })
 
   it('counts several', () => {
     show(makeReport({ txs: 2, unavailable: [original, other] }))
-    expect(screen.getByText(/left out 2 transactions that are unconfirmed and that this node no longer has \(they may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. they may still confirm, unless they or a transaction they depend on has a conflicting transaction mined; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 2 transactions that are unconfirmed and that this node does not have \(they may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. they may still confirm, unless they or a transaction they depend on has a conflicting transaction mined; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
     expect(screen.getByText(other)).toBeTruthy()
   })
 
@@ -516,7 +516,7 @@ describe('ReportScreen — unconfirmed transactions the node no longer has', () 
     const report = makeReport({ txs: 2 })
     delete report.stats.unavailable_txids
     show(report)
-    expect(screen.queryByText(/no longer has/i)).toBeNull()
+    expect(screen.queryByText(/does not have/i)).toBeNull()
   })
 })
 

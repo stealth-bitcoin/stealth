@@ -165,8 +165,8 @@ const LEFT_OUT = {
   // A tx never broadcast was not seen, so this note says nothing about the network.
   unavailable: {
     settled: false,
-    one: 'that is unconfirmed and that this node no longer has (it may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was)',
-    many: 'that are unconfirmed and that this node no longer has (they may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was)',
+    one: 'that is unconfirmed and that this node does not have (it may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was)',
+    many: 'that are unconfirmed and that this node does not have (they may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was)',
     beforeOne: null,
     beforeMany: null,
     // What would stop it from confirming.

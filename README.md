@@ -178,8 +178,8 @@ Related work: [verso](https://github.com/aljazceru/verso), a wallet privacy tool
 
 Bitcoin Core 28 or later is recommended: from 28.0 on, `listtransactions`
 reports `mempoolconflicts`, which lets Stealth tell a transaction replaced in
-the mempool (an unmined fee bump, a double spend) from one the node merely no
-longer has. On older nodes such a transaction is listed as unavailable instead.
+the mempool (an unmined fee bump, a double spend) from one the node merely does
+not have. On older nodes such a transaction is listed as unavailable instead.
 
 ### 1. Clone the repository
 

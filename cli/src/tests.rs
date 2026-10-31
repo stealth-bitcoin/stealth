@@ -559,13 +559,13 @@ mod ordering {
     }
 
     #[test]
-    fn the_text_report_names_unconfirmed_txs_the_node_no_longer_has() {
+    fn the_text_report_names_unconfirmed_txs_the_node_does_not_have() {
         let mut clean = report(Vec::new(), Vec::new());
         clean.stats.unavailable_txids = vec![CONFLICTED.parse().unwrap()];
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 1 transaction that is unconfirmed and that this node no longer has (it \
+                "Left out 1 transaction that is unconfirmed and that this node does not have (it \
                  may have been replaced or double-spent, expired or been evicted from the \
                  mempool, never been broadcast, or depend on a transaction that was). It may \
                  still confirm, unless it or a transaction it depends on has a conflicting \
@@ -581,7 +581,7 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 2 transactions that are unconfirmed and that this node no longer has \
+                "Left out 2 transactions that are unconfirmed and that this node does not have \
                  (they may have been replaced or double-spent, expired or been evicted from the \
                  mempool, never been broadcast, or depend on a transaction that was). They may \
                  still confirm, unless they or a transaction they depend on has a conflicting \

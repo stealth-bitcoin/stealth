@@ -99,7 +99,7 @@ analyzed only when the wallet lists it and the scan keeps it),
 `abandoned_txids` for those abandoned in the scan's own wallet,
 `orphaned_txids` for coinbases from a block no longer in the chain (they can
 only come back if a reorg restores that block; Core also marks them abandoned,
-but they are listed here instead), and `unavailable_txids` for unconfirmed ones the node no longer has (replaced or
+but they are listed here instead), and `unavailable_txids` for unconfirmed ones the node does not have (replaced or
 double-spent, expired or evicted from the mempool, never broadcast, or
 depending on a transaction that was; such a one may still confirm, unless it or a
 transaction it depends on has a conflicting transaction mined). The abandoned list fills only
