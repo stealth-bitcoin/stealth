@@ -165,6 +165,11 @@ fn ctrl_c_at_the_prompt_is_a_no_and_leaves_no_wallet_loaded() {
         let (printed, code) = interrupt_at_the_prompt(&node, &descriptor_input(&aa), flags);
         assert_eq!(code, Some(2), "{flags:?}: {printed}");
         assert!(printed.contains("5 transactions"), "{flags:?}: {printed}");
+        let error = printed.find("error:").expect("the error");
+        assert!(
+            printed[..error].ends_with('\n'),
+            "the error starts on its own line: {printed:?}"
+        );
         assert_eq!(
             stealth_wallets_loaded(&node),
             Vec::<String>::new(),
