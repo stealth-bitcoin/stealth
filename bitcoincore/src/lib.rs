@@ -461,7 +461,24 @@ impl BitcoinCoreRpc {
     }
 
     fn load_history_for_wallet(&self, wallet_name: &str) -> Result<WalletHistory, AnalysisError> {
-        let (mut wallet_txs, mut left_out) = self.list_transactions(wallet_name)?;
+        // Without txindex a tx mined after the listing reads as not found; read again once.
+        for _ in 0..2 {
+            let (history, tip) = self.read_wallet_history(wallet_name)?;
+            if history.left_out.unavailable.is_empty() || self.block_count()? == tip {
+                return Ok(history);
+            }
+        }
+        Err(AnalysisError::EnvironmentUnavailable(
+            "new blocks kept arriving while the wallet history was read; scan again".into(),
+        ))
+    }
+
+    /// The wallet's history, and the tip the listing saw.
+    fn read_wallet_history(
+        &self,
+        wallet_name: &str,
+    ) -> Result<(WalletHistory, u64), AnalysisError> {
+        let (mut wallet_txs, mut left_out, tip) = self.list_transactions(wallet_name)?;
         let (mut utxos, conflicted_utxos) = self.list_unspent(wallet_name)?;
         left_out.conflicted.extend(conflicted_utxos);
         let confirmed: HashSet<Txid> = wallet_txs
@@ -523,7 +540,7 @@ impl BitcoinCoreRpc {
         wallet_txs.retain(|entry| !left_out.unavailable.contains(&entry.txid));
         utxos.retain(|utxo| !left_out.unavailable.contains(&utxo.txid));
 
-        Ok(WalletHistory {
+        let history = WalletHistory {
             wallet_txs,
             utxos,
             transactions,
@@ -531,21 +548,25 @@ impl BitcoinCoreRpc {
             derived_addresses: HashSet::new(),
             ranged_addresses: HashSet::new(),
             left_out,
-        })
+        };
+        Ok((history, tip))
     }
 
-    /// The wallet's entries, except those left out of the history, and why those were.
+    /// The wallet's entries, except those left out of the history, why those
+    /// were, and the tip the listing saw.
     fn list_transactions(
         &self,
         wallet_name: &str,
-    ) -> Result<(Vec<WalletTxEntry>, LeftOut), AnalysisError> {
+    ) -> Result<(Vec<WalletTxEntry>, LeftOut, u64), AnalysisError> {
         // A block landing mid-pagination shifts the skip windows; refetch once.
         let tip = self.block_count()?;
         let mut entries = self.fetch_transaction_pages(wallet_name)?;
-        if self.block_count()? != tip {
+        let after = self.block_count()?;
+        if after != tip {
             entries = self.fetch_transaction_pages(wallet_name)?;
         }
-        Self::convert_list_transactions(entries)
+        let (kept, left_out) = Self::convert_list_transactions(entries)?;
+        Ok((kept, left_out, after))
     }
 
     fn convert_list_transactions(
@@ -2825,6 +2846,75 @@ mod tests {
                 .contains("the node is still loading its mempool; scan again once it has finished"),
             "{error}"
         );
+    }
+
+    /// A node whose tip moves on every getblockcount call after the first
+    /// `stable` ones; when `mines`, the first new block mines the wallet's tx,
+    /// which the node did not have before.
+    fn node_with_a_block_landing(stable: usize, mines: bool) -> BitcoinCoreRpc {
+        let counts = Arc::new(AtomicU64::new(0));
+        let mined = Arc::new(AtomicBool::new(false));
+        serve_node(move |method| {
+            let result = match method {
+                "getblockcount" => {
+                    let n = counts.fetch_add(1, Ordering::SeqCst) as usize;
+                    if mines && n >= stable {
+                        mined.store(true, Ordering::SeqCst);
+                    }
+                    json!(112 + (n + 1).saturating_sub(stable))
+                }
+                "getmempoolinfo" => json!({ "loaded": true, "size": 0 }),
+                "listunspent" => json!([]),
+                "listtransactions" => {
+                    let confirmations = u32::from(mined.load(Ordering::SeqCst));
+                    json!([{
+                        "address": ADDR, "amount": 0.001, "category": "receive",
+                        "confirmations": confirmations, "blockheight": 113,
+                        "mempoolconflicts": [], "txid": ORIGINAL, "vout": 0,
+                    }])
+                }
+                "getrawtransaction" => {
+                    let answer = if mined.load(Ordering::SeqCst) {
+                        json!({ "id": 0, "error": null, "result": {
+                            "txid": ORIGINAL, "vin": [], "confirmations": 1,
+                            "vout": [{ "value": 0.001, "n": 0, "scriptPubKey": { "address": ADDR } }],
+                        }})
+                    } else {
+                        json!({ "id": 0, "result": null, "error": not_found() })
+                    };
+                    return ("200 OK", json!([answer]).to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        })
+    }
+
+    #[test]
+    fn a_tx_mined_between_the_listing_and_the_fetch_is_not_listed_as_gone() {
+        // Two counts around the listing, then the block lands before the third.
+        let history = node_with_a_block_landing(2, true)
+            .load_history_for_wallet("bob")
+            .expect("scan");
+        assert!(
+            history.left_out.unavailable.is_empty(),
+            "{:?}",
+            history.left_out
+        );
+        assert_eq!(history.wallet_txs.len(), 1);
+        assert_eq!(history.wallet_txs[0].confirmations, 1);
+    }
+
+    #[test]
+    fn blocks_landing_on_every_read_fail_the_scan_instead_of_listing_txs_as_gone() {
+        let error = node_with_a_block_landing(0, false)
+            .load_history_for_wallet("bob")
+            .map(|h| h.left_out)
+            .expect_err("a moving tip cannot tell a mined tx from a gone one");
+        assert!(error.to_string().contains("scan again"), "{error}");
     }
 
     #[test]
