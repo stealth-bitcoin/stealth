@@ -36,6 +36,10 @@ impl TxGraph {
                     .iter()
                     .filter(|ia| self.is_ours(&ia.address))
                     .count();
+                // Only a merge of at least two of our own coins is our consolidation.
+                if our_parent_in < 2 {
+                    continue;
+                }
 
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::Consolidation,

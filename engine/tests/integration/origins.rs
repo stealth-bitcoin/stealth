@@ -62,6 +62,135 @@ fn detect_consolidation() {
     assert!(has_finding(&report, VulnerabilityType::Consolidation));
 }
 
+// Funds `n` fresh UTXOs of `sats` each in `wallet`, returning them as inputs.
+fn fund_coins(node: &Node, wallet: &corepc_node::Client, n: usize, sats: u64) -> Vec<Input> {
+    let da = node.client.new_address().unwrap();
+    let mut txids = Vec::new();
+    for _ in 0..n {
+        let a = wallet.new_address().unwrap();
+        let sent = node
+            .client
+            .send_to_address(&a, Amount::from_sat(sats))
+            .unwrap();
+        txids.push(sent.txid().unwrap());
+    }
+    mine(node, 1, &da);
+    wallet
+        .list_unspent()
+        .unwrap()
+        .0
+        .iter()
+        .filter(|u| txids.contains(&u.txid.parse().unwrap()))
+        .map(|u| Input {
+            txid: u.txid.parse().unwrap(),
+            vout: u.vout as u64,
+            sequence: None,
+        })
+        .collect()
+}
+
+// Spends `inputs` into one output at `dest`, each signer signing its own inputs.
+fn merge_into(
+    node: &Node,
+    signers: &[&corepc_node::Client],
+    inputs: &[Input],
+    dest: Address,
+    total_sats: u64,
+) {
+    let raw = signers[0]
+        .create_raw_transaction(
+            inputs,
+            &[Output::new(dest, Amount::from_sat(total_sats - 10_000))],
+        )
+        .unwrap();
+    let mut tx = raw.transaction().unwrap();
+    for signer in signers {
+        tx = signer
+            .sign_raw_transaction_with_wallet(&tx)
+            .unwrap()
+            .into_model()
+            .unwrap()
+            .tx;
+    }
+    node.client.send_raw_transaction(&tx).unwrap();
+    let da = node.client.new_address().unwrap();
+    mine(node, 1, &da);
+}
+
+#[test]
+fn consolidation_made_by_someone_else_is_not_ours() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+
+    // Bob sweeps four of his own coins into a single payment to alice.
+    let inputs = fund_coins(&node, &bob, 4, 300_000);
+    merge_into(
+        &node,
+        &[&bob],
+        &inputs,
+        alice.new_address().unwrap(),
+        1_200_000,
+    );
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    assert!(!has_finding(&report, VulnerabilityType::Consolidation));
+}
+
+#[test]
+fn consolidation_with_two_of_our_coins_among_others_fires() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+
+    // Alice merges two of her coins with one of bob's into her own address.
+    let mut inputs = fund_coins(&node, &alice, 2, 300_000);
+    inputs.extend(fund_coins(&node, &bob, 1, 300_000));
+    merge_into(
+        &node,
+        &[&alice, &bob],
+        &inputs,
+        alice.new_address().unwrap(),
+        900_000,
+    );
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    assert!(has_finding(&report, VulnerabilityType::Consolidation));
+}
+
+#[test]
+fn consolidation_with_a_single_coin_of_ours_does_not_fire() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+
+    // Alice adds one coin to bob's three, as a Payjoin receiver would.
+    let mut inputs = fund_coins(&node, &bob, 3, 300_000);
+    inputs.extend(fund_coins(&node, &alice, 1, 300_000));
+    merge_into(
+        &node,
+        &[&bob, &alice],
+        &inputs,
+        alice.new_address().unwrap(),
+        1_200_000,
+    );
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    assert!(!has_finding(&report, VulnerabilityType::Consolidation));
+}
+
 // ─── 10. Exchange Origin ───────────────────────────────────────────────────
 
 #[test]
