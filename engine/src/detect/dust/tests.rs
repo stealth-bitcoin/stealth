@@ -754,3 +754,17 @@ fn a_full_scan_with_only_non_ranged_descriptors_does_not_count_strangers() {
     ));
     assert!(findings.is_empty(), "{findings:?}");
 }
+
+#[test]
+fn three_unattributed_inputs_with_two_equal_outputs_are_coinjoin_shaped() {
+    let a = wpkh(1);
+    let findings = dust_spending(with_outputs(dust_with_strangers(&a, 3), equal_outputs(2)));
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn two_unattributed_inputs_with_two_equal_outputs_still_count() {
+    let a = wpkh(1);
+    let findings = dust_spending(with_outputs(dust_with_strangers(&a, 2), equal_outputs(2)));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+}
