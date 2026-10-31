@@ -184,10 +184,14 @@ pasted outputs' addresses" instead of "the wallet history". An RPC user the
 node refuses `getwalletinfo` (`rpcwhitelist`) gets no count, so its scans go
 on unchecked and the gateway warns once on stderr; allow `getwalletinfo` to
 have the limit checked. To go on, send the same scan again with
-`max_txs` set to at least the count, or with `no_limits: true`; the rescan
-runs again.
+`no_limits: true`, or with `max_txs` set to at least the count, higher if the
+history may grow before the scan reaches it. Without `cache_wallet` the full
+rescan runs again; with it, the cache wallet left on disk is loaded with only
+the catch-up rescan.
 
-`POST /api/wallet/scan` answers `422`:
+`POST /api/wallet/scan` answers `422`. axum also answers `422`, as plain
+text, to a body whose field has the wrong type, so tell the two apart by
+`error.code == "history_too_large"`, not by the status alone:
 
 ```json
 {
@@ -236,7 +240,7 @@ curl 'http://localhost:20899/api/wallet/scan' \
 |--------|---------|
 | `200` | Scan completed — body is a `Report` |
 | `400` | Invalid input (bad descriptor shape, empty UTXOs, …) |
-| `422` | The wallet history is above `max_txs` (`history_too_large`) |
+| `422` | The wallet history is above `max_txs` when `error.code` is `history_too_large`; a plain-text `422` is a body field of the wrong type |
 | `502` | bitcoind RPC unavailable/auth failed/connection failed |
 
 ## Environment variables

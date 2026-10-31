@@ -99,14 +99,17 @@ it loads any of them. Above 5,000 it stops and says how many there are, since
 loading them can take long and put a heavy load on the node:
 
 - **CLI:** in a terminal (stdin and stderr both) it asks whether to go on;
-  Ctrl-C there counts as no. Elsewhere it stops with an error;
-  `--max-txs <n>` sets the limit and `--no-limits` lifts it.
+  Ctrl-C there counts as no. Elsewhere it stops with an error; scan again
+  with `--no-limits`, or with `--max-txs` set to at least the count, higher
+  if the history may grow.
 - **Frontend:** the scan screen shows the count with "Scan anyway" and
   "Cancel".
 - **API:** the job fails with `limit_exceeded` set; send the scan again with
-  `max_txs` or `no_limits` (see [api/README.md](../api/README.md)).
+  `no_limits` or `max_txs` (see [api/README.md](../api/README.md)).
 
-Going on from the frontend or the API runs the rescan again. UTXO mode counts
+Going on from the frontend or the API runs the full rescan again, unless the
+scan uses a cache wallet, which is loaded again with only the catch-up
+rescan. UTXO mode counts
 the history of the pasted outputs' addresses the same way. The count comes
 from `getwalletinfo`; an RPC user restricted with `rpcwhitelist` needs it
 allowed, or the limit is not checked.
