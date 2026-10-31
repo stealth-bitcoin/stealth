@@ -73,13 +73,16 @@ impl TxGraph {
         // In the order they are printed, which reverses the bytes a Txid sorts by.
         let mut conflicted_txids: Vec<Txid> = self.left_out.conflicted.iter().copied().collect();
         conflicted_txids.sort_by_cached_key(Txid::to_string);
-        let mut replaced_txids: Vec<ReplacedTx> = self
+        let mut mempool_conflicted_txids: Vec<MempoolConflict> = self
             .left_out
-            .replaced
+            .mempool_conflicted
             .iter()
-            .map(|(&txid, &replaced_by)| ReplacedTx { txid, replaced_by })
+            .map(|(&txid, &conflicts_with)| MempoolConflict {
+                txid,
+                conflicts_with,
+            })
             .collect();
-        replaced_txids.sort_by_cached_key(|r| r.txid.to_string());
+        mempool_conflicted_txids.sort_by_cached_key(|r| r.txid.to_string());
         let mut abandoned_txids: Vec<Txid> = self.left_out.abandoned.iter().copied().collect();
         abandoned_txids.sort_by_cached_key(Txid::to_string);
 
@@ -89,7 +92,7 @@ impl TxGraph {
             utxos_current: self.utxos.len(),
             addresses_without_history: 0,
             conflicted_txids,
-            replaced_txids,
+            mempool_conflicted_txids,
             abandoned_txids,
         };
 

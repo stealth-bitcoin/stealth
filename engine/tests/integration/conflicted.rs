@@ -228,9 +228,9 @@ fn a_tx_replaced_by_one_still_in_the_mempool_is_left_out_and_named() {
     let report = graph.detect_all(&Default::default(), None, None);
     let replaced: Vec<(Txid, Txid)> = report
         .stats
-        .replaced_txids
+        .mempool_conflicted_txids
         .iter()
-        .map(|r| (r.txid, r.replaced_by))
+        .map(|r| (r.txid, r.conflicts_with))
         .collect();
     assert_eq!(replaced, vec![(original, replacement)]);
     assert!(report.stats.conflicted_txids.is_empty());
@@ -278,4 +278,117 @@ fn an_unbroadcast_tx_the_node_cannot_serve_still_fails_the_scan() {
         ),
         "{error:?}"
     );
+}
+
+/// What a wallet scan left out because a tx in the mempool conflicts with it.
+fn mempool_conflicted(report: &stealth_engine::Report) -> Vec<(Txid, Txid)> {
+    report
+        .stats
+        .mempool_conflicted_txids
+        .iter()
+        .map(|c| (c.txid, c.conflicts_with))
+        .collect()
+}
+
+#[test]
+fn the_receiver_of_a_payment_bumped_but_not_mined_leaves_it_out() {
+    let node = node();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let (alice, _) = fund_sender(&node, &miner, "alice", 1_000_000);
+    let bob = node.create_wallet("bob").unwrap();
+    let to = bob.new_address().unwrap();
+    let gateway = gateway_for(&node);
+    let settings = EngineSettings {
+        persist_scan_wallet: true,
+        ..EngineSettings::default()
+    };
+    let descriptor = format!("addr({to})");
+    let cached_scan = || {
+        AnalysisEngine::new(&gateway, settings.clone())
+            .analyze(ScanTarget::Descriptor(descriptor.clone()))
+    };
+    cached_scan().expect("first scan");
+
+    let original: String = alice
+        .call(
+            "sendtoaddress",
+            &[
+                json!(to.to_string()),
+                json!(0.001),
+                json!(""),
+                json!(""),
+                json!(false),
+                json!(true),
+            ],
+        )
+        .expect("sendtoaddress");
+    let original: Txid = original.parse().unwrap();
+    let bumped: Value = alice
+        .call("bumpfee", &[json!(original.to_string())])
+        .expect("bumpfee");
+    let replacement: Txid = bumped["txid"].as_str().unwrap().parse().unwrap();
+
+    let history = gateway
+        .scan_wallet("bob")
+        .expect("a payment bumped by its sender must not fail the receiver's scan");
+    let graph = TxGraph::from_wallet_history(history);
+    assert!(!graph.our_txids.contains(&original));
+    assert!(graph.our_txids.contains(&replacement));
+    let report = graph.detect_all(&Default::default(), None, None);
+    assert_eq!(mempool_conflicted(&report), vec![(original, replacement)]);
+
+    let cached = cached_scan().expect("nor the cached descriptor scan");
+    assert_eq!(mempool_conflicted(&cached), vec![(original, replacement)]);
+    assert_eq!(cached.stats.transactions_analyzed, 1);
+}
+
+#[test]
+fn a_double_spend_from_outside_the_wallet_leaves_out_the_tx_and_its_child() {
+    let node = node();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let (alice, _) = fund_sender(&node, &miner, "alice", 1_000_000);
+    let funding = alice.list_unspent().unwrap().0.remove(0);
+    let payment = pay_bob(&node, &alice, false);
+    let child: String = alice
+        .call(
+            "sendtoaddress",
+            &[
+                json!(node.client.new_address().unwrap().to_string()),
+                json!(0.002),
+            ],
+        )
+        .expect("sendtoaddress");
+    let child: Txid = child.parse().unwrap();
+
+    let back = alice.new_address().unwrap();
+    let raw = alice
+        .create_raw_transaction(
+            &[Input {
+                txid: funding.txid.parse().unwrap(),
+                vout: funding.vout as u64,
+                sequence: None,
+            }],
+            &[Output::new(back, Amount::from_sat(1_000_000 - 50_000))],
+        )
+        .unwrap();
+    let signed = alice
+        .sign_raw_transaction_with_wallet(&raw.transaction().unwrap())
+        .unwrap();
+    let double_spend = signed.into_model().unwrap().tx;
+    alice.send_raw_transaction(&double_spend).unwrap();
+    let double_spend = double_spend.compute_txid();
+
+    let history = gateway_for(&node)
+        .scan_wallet("alice")
+        .expect("a double spend in the mempool must not fail the scan");
+    let graph = TxGraph::from_wallet_history(history);
+    assert!(!graph.our_txids.contains(&payment));
+    assert!(!graph.our_txids.contains(&child));
+    assert!(graph.our_txids.contains(&double_spend));
+    let report = graph.detect_all(&Default::default(), None, None);
+    let mut expected = vec![(payment, double_spend), (child, double_spend)];
+    expected.sort_by_key(|(txid, _)| txid.to_string());
+    assert_eq!(mempool_conflicted(&report), expected);
 }

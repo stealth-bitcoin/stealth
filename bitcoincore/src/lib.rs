@@ -534,29 +534,34 @@ impl BitcoinCoreRpc {
         let mut left_out = LeftOut::default();
         for entry in entries {
             let txid = || parse_txid("listtransactions", &entry.txid);
-            // Core serves neither a replaced nor an abandoned tx outside the wallet.
+            // Core serves neither a tx a mempool one conflicts with nor an abandoned
+            // tx outside the wallet; only the bumping wallet sets replaced_by_txid.
             let unconfirmed = depth(entry.confirmations) == 0;
+            let conflicts_with = entry
+                .replaced_by_txid
+                .as_deref()
+                .or(entry.mempoolconflicts.first().map(String::as_str));
             if is_conflicted(entry.confirmations) {
                 left_out.conflicted.insert(txid()?);
             } else if unconfirmed && entry.abandoned == Some(true) {
                 left_out.abandoned.insert(txid()?);
-            } else if let (true, Some(by)) = (unconfirmed, entry.replaced_by_txid.as_deref()) {
+            } else if let (true, Some(by)) = (unconfirmed, conflicts_with) {
                 left_out
-                    .replaced
+                    .mempool_conflicted
                     .insert(txid()?, parse_txid("listtransactions", by)?);
             } else {
                 kept.push(Self::convert_list_transaction_entry(entry)?);
             }
         }
         // A tx bumped twice names its first replacement; name the last one instead.
-        let firsts = left_out.replaced.clone();
-        for replaced_by in left_out.replaced.values_mut() {
+        let firsts = left_out.mempool_conflicted.clone();
+        for conflicts_with in left_out.mempool_conflicted.values_mut() {
             let mut seen = BTreeSet::new();
-            while let Some(&next) = firsts.get(replaced_by) {
-                if !seen.insert(*replaced_by) {
+            while let Some(&next) = firsts.get(conflicts_with) {
+                if !seen.insert(*conflicts_with) {
                     break;
                 }
-                *replaced_by = next;
+                *conflicts_with = next;
             }
         }
         Ok((kept, left_out))
@@ -1788,6 +1793,8 @@ struct ListTransactionEntry {
     blockheight: Option<u32>,
     abandoned: Option<bool>,
     replaced_by_txid: Option<String>,
+    #[serde(default)]
+    mempoolconflicts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2442,7 +2449,7 @@ mod tests {
         let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
         let txid = |s: &str| s.parse::<Txid>().unwrap();
         assert_eq!(
-            left_out.replaced.into_iter().collect::<Vec<_>>(),
+            left_out.mempool_conflicted.into_iter().collect::<Vec<_>>(),
             vec![(txid(ORIGINAL), txid(REPLACEMENT))]
         );
         assert_eq!(
@@ -2468,7 +2475,7 @@ mod tests {
                 .unwrap();
         let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
         assert!(kept.is_empty());
-        assert!(left_out.replaced.is_empty());
+        assert!(left_out.mempool_conflicted.is_empty());
         assert_eq!(
             left_out.abandoned.into_iter().collect::<Vec<_>>(),
             vec![ORIGINAL.parse::<Txid>().unwrap()]
@@ -2489,7 +2496,7 @@ mod tests {
             kept.iter().map(|e| e.txid).collect::<Vec<_>>(),
             [txid(IN_MEMPOOL)]
         );
-        let mut replaced: Vec<_> = left_out.replaced.into_iter().collect();
+        let mut replaced: Vec<_> = left_out.mempool_conflicted.into_iter().collect();
         replaced.sort();
         let mut expected = vec![
             (txid(ORIGINAL), txid(IN_MEMPOOL)),
@@ -2508,7 +2515,47 @@ mod tests {
         .unwrap();
         let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
         assert!(kept.is_empty());
-        assert_eq!(left_out.replaced.len(), 2);
+        assert_eq!(left_out.mempool_conflicted.len(), 2);
+    }
+
+    #[test]
+    fn a_receive_a_mempool_tx_conflicts_with_is_left_out_and_names_it() {
+        // The receiver of a bumped payment: no replaced_by_txid, only the sender has it.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            {
+                "address": ADDR, "amount": 0.001, "category": "receive", "confirmations": 0,
+                "abandoned": false, "mempoolconflicts": [REPLACEMENT], "trusted": false,
+                "txid": ORIGINAL, "vout": 0, "walletconflicts": [REPLACEMENT],
+            },
+            {
+                "address": ADDR, "amount": 0.001, "category": "receive", "confirmations": 0,
+                "mempoolconflicts": [], "trusted": false, "txid": REPLACEMENT, "vout": 0,
+                "walletconflicts": [ORIGINAL],
+            },
+        ]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            left_out.mempool_conflicted.into_iter().collect::<Vec<_>>(),
+            vec![(txid(ORIGINAL), txid(REPLACEMENT))]
+        );
+        assert_eq!(
+            kept.iter().map(|e| e.txid).collect::<Vec<_>>(),
+            [txid(REPLACEMENT)]
+        );
+    }
+
+    #[test]
+    fn a_confirmed_entry_with_mempool_conflicts_is_kept() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([{
+            "address": ADDR, "amount": 0.001, "category": "receive", "confirmations": 2,
+            "blockheight": 110, "mempoolconflicts": [REPLACEMENT], "txid": ORIGINAL, "vout": 0,
+        }]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert_eq!(left_out, Default::default());
+        assert_eq!(kept.len(), 1);
     }
 
     #[test]

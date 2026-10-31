@@ -186,21 +186,22 @@ pub struct Stats {
     /// sorted by their displayed hex.
     #[serde(default)]
     pub conflicted_txids: Vec<Txid>,
-    /// Wallet transactions left out because a tx not confirmed yet replaced
-    /// them, sorted by their displayed hex.
+    /// Wallet transactions left out because a tx in the mempool, not confirmed
+    /// yet, conflicts with them, sorted by their displayed hex.
     #[serde(default)]
-    pub replaced_txids: Vec<ReplacedTx>,
+    pub mempool_conflicted_txids: Vec<MempoolConflict>,
     /// Wallet transactions left out because they were abandoned in the
     /// wallet, sorted by their displayed hex.
     #[serde(default)]
     pub abandoned_txids: Vec<Txid>,
 }
 
-/// A wallet transaction replaced by one that is not confirmed yet.
+/// A wallet transaction a tx in the mempool conflicts with. That tx may not be
+/// a wallet one, so the scan may not analyze it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplacedTx {
+pub struct MempoolConflict {
     pub txid: Txid,
-    pub replaced_by: Txid,
+    pub conflicts_with: Txid,
 }
 
 /// Summary of the scan results.
@@ -257,7 +258,7 @@ mod summary_tests {
             utxos_current: 0,
             addresses_without_history: 0,
             conflicted_txids: Vec::new(),
-            replaced_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
         }
     }
@@ -289,19 +290,19 @@ mod summary_tests {
         }))
         .unwrap();
         assert!(older.conflicted_txids.is_empty());
-        assert!(older.replaced_txids.is_empty());
+        assert!(older.mempool_conflicted_txids.is_empty());
         assert!(older.abandoned_txids.is_empty());
 
         let other = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
-        with.replaced_txids = vec![ReplacedTx {
+        with.mempool_conflicted_txids = vec![MempoolConflict {
             txid: txid.parse().unwrap(),
-            replaced_by: other.parse().unwrap(),
+            conflicts_with: other.parse().unwrap(),
         }];
         with.abandoned_txids = vec![other.parse().unwrap()];
         let json = serde_json::to_value(&with).unwrap();
         assert_eq!(
-            json["replaced_txids"],
-            serde_json::json!([{ "txid": txid, "replaced_by": other }])
+            json["mempool_conflicted_txids"],
+            serde_json::json!([{ "txid": txid, "conflicts_with": other }])
         );
         assert_eq!(json["abandoned_txids"], serde_json::json!([other]));
     }

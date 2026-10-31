@@ -233,7 +233,7 @@ mod ordering {
             utxos_current: 1,
             addresses_without_history: 0,
             conflicted_txids: Vec::new(),
-            replaced_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
         };
         stealth_engine::Report::new(stats, findings, warnings)
@@ -270,7 +270,7 @@ mod ordering {
             utxos_current: 0,
             addresses_without_history: 0,
             conflicted_txids: Vec::new(),
-            replaced_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
@@ -300,7 +300,7 @@ mod ordering {
             utxos_current: 2,
             addresses_without_history: 2,
             conflicted_txids: Vec::new(),
-            replaced_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(
@@ -326,7 +326,7 @@ mod ordering {
             utxos_current: 2,
             addresses_without_history: 1,
             conflicted_txids: Vec::new(),
-            replaced_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
@@ -384,7 +384,7 @@ mod ordering {
             utxos_current: 0,
             addresses_without_history: 0,
             conflicted_txids: vec![CONFLICTED.parse().unwrap()],
-            replaced_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
@@ -401,17 +401,17 @@ mod ordering {
 
     const REPLACEMENT: &str = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
 
-    fn replaced(txid: &str, by: &str) -> stealth_engine::types::ReplacedTx {
-        stealth_engine::types::ReplacedTx {
+    fn replaced(txid: &str, by: &str) -> stealth_engine::types::MempoolConflict {
+        stealth_engine::types::MempoolConflict {
             txid: txid.parse().unwrap(),
-            replaced_by: by.parse().unwrap(),
+            conflicts_with: by.parse().unwrap(),
         }
     }
 
     #[test]
     fn the_text_report_names_a_replaced_tx_and_its_replacement() {
         let mut clean = report(Vec::new(), Vec::new());
-        clean.stats.replaced_txids = vec![replaced(CONFLICTED, REPLACEMENT)];
+        clean.stats.mempool_conflicted_txids = vec![replaced(CONFLICTED, REPLACEMENT)];
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
@@ -431,7 +431,7 @@ mod ordering {
     #[test]
     fn the_replaced_note_counts_several() {
         let mut clean = report(Vec::new(), Vec::new());
-        clean.stats.replaced_txids = vec![
+        clean.stats.mempool_conflicted_txids = vec![
             replaced(CONFLICTED, REPLACEMENT),
             replaced(REPLACEMENT, CONFLICTED),
         ];
@@ -477,7 +477,7 @@ mod ordering {
 
     #[test]
     fn a_scan_whose_every_tx_was_replaced_or_abandoned_gives_no_empty_scan_hint() {
-        for (replaced_txids, abandoned_txids) in [
+        for (mempool_conflicted_txids, abandoned_txids) in [
             (vec![replaced(CONFLICTED, REPLACEMENT)], Vec::new()),
             (Vec::new(), vec![CONFLICTED.parse().unwrap()]),
         ] {
@@ -487,7 +487,7 @@ mod ordering {
                 utxos_current: 0,
                 addresses_without_history: 0,
                 conflicted_txids: Vec::new(),
-                replaced_txids,
+                mempool_conflicted_txids,
                 abandoned_txids,
             };
             let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));

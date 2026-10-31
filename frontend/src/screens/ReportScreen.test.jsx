@@ -10,7 +10,7 @@ afterEach(cleanup)
 function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0, conflicted = [], replaced = [], abandoned = [] } = {}) {
   const analyzedNothing = txs === 0
   return {
-    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved, conflicted_txids: conflicted, replaced_txids: replaced, abandoned_txids: abandoned },
+    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved, conflicted_txids: conflicted, mempool_conflicted_txids: replaced, abandoned_txids: abandoned },
     findings,
     warnings,
     summary: {
@@ -432,13 +432,13 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
   const show = (report) => render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
 
   it('names a replaced transaction and the replacement not confirmed yet', () => {
-    show(makeReport({ txs: 2, replaced: [{ txid: original, replaced_by: other }] }))
+    show(makeReport({ txs: 2, replaced: [{ txid: original, conflicts_with: other }] }))
     expect(screen.getByText(/left out 1 transaction the wallet replaced\. it may still confirm; until then it is not part of the history the wallet sees\. it may still have been seen by the network before it was replaced; stealth does not analyze it\./i)).toBeTruthy()
     expect(screen.getByText(`${original} was replaced by ${other}, which is not confirmed yet`)).toBeTruthy()
   })
 
   it('counts several replaced transactions', () => {
-    show(makeReport({ txs: 2, replaced: [{ txid: original, replaced_by: other }, { txid: other, replaced_by: original }] }))
+    show(makeReport({ txs: 2, replaced: [{ txid: original, conflicts_with: other }, { txid: other, conflicts_with: original }] }))
     expect(screen.getByText(/left out 2 transactions the wallet replaced\. they may still confirm; until then they are not part of the history the wallet sees\. they may still have been seen by the network before they were replaced; stealth does not analyze them\./i)).toBeTruthy()
   })
 
@@ -453,7 +453,7 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
 
   it('gives no empty-scan hint when every transaction was replaced or abandoned', () => {
     for (const report of [
-      makeReport({ txs: 0, replaced: [{ txid: original, replaced_by: other }] }),
+      makeReport({ txs: 0, replaced: [{ txid: original, conflicts_with: other }] }),
       makeReport({ txs: 0, abandoned: [original] }),
     ]) {
       show(report)
@@ -465,7 +465,7 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
 
   it('says nothing when the report predates the fields', () => {
     const report = makeReport({ txs: 2 })
-    delete report.stats.replaced_txids
+    delete report.stats.mempool_conflicted_txids
     delete report.stats.abandoned_txids
     show(report)
     expect(screen.queryByText(/replaced|abandoned/i)).toBeNull()

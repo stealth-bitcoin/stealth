@@ -996,7 +996,7 @@ fn conflicted_txids_come_out_in_the_order_they_are_printed() {
 #[test]
 fn replaced_and_abandoned_txs_reach_the_report_in_printed_order() {
     let mut history = chain_history(2, 1);
-    history.left_out.replaced = [(txid(0x200), txid(50)), (txid(3), txid(51))].into();
+    history.left_out.mempool_conflicted = [(txid(0x200), txid(50)), (txid(3), txid(51))].into();
     history.left_out.abandoned = [txid(0x300), txid(4)].into();
     let gateway = FakeGateway::new(Ok(history));
     let report = AnalysisEngine::new(&gateway, EngineSettings::default())
@@ -1004,9 +1004,9 @@ fn replaced_and_abandoned_txs_reach_the_report_in_printed_order() {
         .expect("descriptor scan");
     let replaced: Vec<(Txid, Txid)> = report
         .stats
-        .replaced_txids
+        .mempool_conflicted_txids
         .iter()
-        .map(|r| (r.txid, r.replaced_by))
+        .map(|r| (r.txid, r.conflicts_with))
         .collect();
     assert_eq!(replaced, [(txid(3), txid(51)), (txid(0x200), txid(50))]);
     assert_eq!(report.stats.abandoned_txids, [txid(4), txid(0x300)]);
@@ -1015,9 +1015,9 @@ fn replaced_and_abandoned_txs_reach_the_report_in_printed_order() {
 #[test]
 fn a_utxo_scan_names_the_replaced_and_abandoned_txs_of_the_address_history() {
     let mut history = chain_history(12, 1);
-    history.left_out.replaced = [(txid(40), txid(41))].into();
+    history.left_out.mempool_conflicted = [(txid(40), txid(41))].into();
     history.left_out.abandoned = [txid(42)].into();
     let report = scan(&FakeGateway::new(Ok(history)));
-    assert_eq!(report.stats.replaced_txids.len(), 1);
+    assert_eq!(report.stats.mempool_conflicted_txids.len(), 1);
     assert_eq!(report.stats.abandoned_txids, [txid(42)]);
 }

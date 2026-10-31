@@ -269,8 +269,8 @@ pub struct LeftOut {
     /// Core reports them as conflicted (negative confirmations): each, or a
     /// tx it depends on, conflicts with another one.
     pub conflicted: BTreeSet<Txid>,
-    /// Replaced by a tx that is not confirmed yet, keyed to their replacement.
-    pub replaced: BTreeMap<Txid, Txid>,
+    /// In conflict with a tx in the mempool, not confirmed yet, keyed to that tx.
+    pub mempool_conflicted: BTreeMap<Txid, Txid>,
     /// Abandoned in the wallet.
     pub abandoned: BTreeSet<Txid>,
 }
@@ -278,7 +278,7 @@ pub struct LeftOut {
 impl LeftOut {
     pub fn extend(&mut self, other: LeftOut) {
         self.conflicted.extend(other.conflicted);
-        self.replaced.extend(other.replaced);
+        self.mempool_conflicted.extend(other.mempool_conflicted);
         self.abandoned.extend(other.abandoned);
     }
 }

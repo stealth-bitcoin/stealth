@@ -268,12 +268,12 @@ fn text_report(report: &stealth_engine::Report) -> String {
         },
     );
     let replaced: Vec<String> = stats
-        .replaced_txids
+        .mempool_conflicted_txids
         .iter()
         .map(|r| {
             format!(
                 "{} was replaced by {}, which is not confirmed yet",
-                r.txid, r.replaced_by
+                r.txid, r.conflicts_with
             )
         })
         .collect();

@@ -184,8 +184,8 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
   const { stats, findings, warnings, summary } = report
   const kind = effectiveKind(rawKind, descriptor)
   const conflicted = stats.conflicted_txids ?? []
-  const replaced = (stats.replaced_txids ?? []).map(
-    (r) => `${r.txid} was replaced by ${r.replaced_by}, which is not confirmed yet`,
+  const replaced = (stats.mempool_conflicted_txids ?? []).map(
+    (r) => `${r.txid} was replaced by ${r.conflicts_with}, which is not confirmed yet`,
   )
   const abandoned = stats.abandoned_txids ?? []
   const anyLeftOut = conflicted.length + replaced.length + abandoned.length > 0
