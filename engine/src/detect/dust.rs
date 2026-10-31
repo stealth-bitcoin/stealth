@@ -156,7 +156,7 @@ impl TxGraph {
     /// sends), judged on its outputs that do not pay back to its own input
     /// addresses, return a JSON evidence blob suitable for attaching to a
     /// Dust finding; otherwise return `None`.
-    fn dust_attack_evidence(
+    pub(super) fn dust_attack_evidence(
         &self,
         parent_txid: &Txid,
         thresholds: &DetectorThresholds,

@@ -291,3 +291,14 @@ fn dust_attack_ignores_sender_self_outputs() {
     assert_eq!(evidence["total_outputs"], 12);
     assert_eq!(evidence["unique_addresses"], 12);
 }
+
+#[test]
+fn dust_attack_with_self_outputs_is_not_exchange_origin() {
+    let node = node();
+    let report = dust_attack_with_self_outputs(&node);
+    assert!(
+        !has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "a dust attack is not an exchange withdrawal: {:?}",
+        report.findings
+    );
+}

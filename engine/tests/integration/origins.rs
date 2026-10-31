@@ -101,6 +101,84 @@ fn detect_exchange_origin() {
     assert!(has_finding(&report, VulnerabilityType::ExchangeOrigin));
 }
 
+// Outputs paying back to one of the batch's own input addresses are the
+// sender's change: the batch is judged on its other outputs only.
+
+fn exchange_batch_report(recipient_sats: &[u64], self_outputs: &[u64]) -> stealth_engine::Report {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let (exchange, exchange_addr) = fund_sender(&node, &da, "exchange", 1_000_000);
+
+    let mut outputs = vec![(alice.new_address().unwrap(), recipient_sats[0])];
+    for &sats in &recipient_sats[1..] {
+        outputs.push((node.client.new_address().unwrap(), sats));
+    }
+    for &sats in self_outputs {
+        outputs.push((exchange_addr.clone(), sats));
+    }
+    spend_to(&exchange, &outputs, &exchange_addr);
+    mine(&node, 1, &da);
+
+    scan_wallet(&gateway_for(&node), "alice")
+}
+
+#[test]
+fn exchange_batch_with_change_to_input_address_still_counts() {
+    let report = exchange_batch_report(&[100_000; 5], &[]);
+    assert!(
+        has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "five recipients plus change is a batch: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn exchange_batch_output_count_skips_change_to_input_address() {
+    // Small payouts against a 1M-sat input still trip the median-ratio signal.
+    let report = exchange_batch_report(&[50_000; 4], &[]);
+    assert!(
+        !has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "four recipients plus change is below the batch threshold: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn exchange_batch_median_skips_outputs_to_input_address() {
+    // Four distinct recipients (one paid twice) at 150k sats, and seven small
+    // outputs back to the sender that would drag the median down to 1k sats.
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let (exchange, exchange_addr) = fund_sender(&node, &da, "exchange", 1_000_000);
+
+    let repeated = node.client.new_address().unwrap();
+    let mut outputs = vec![
+        (alice.new_address().unwrap(), 150_000),
+        (node.client.new_address().unwrap(), 150_000),
+        (node.client.new_address().unwrap(), 150_000),
+        (repeated.clone(), 150_000),
+        (repeated, 150_000),
+    ];
+    for _ in 0..7 {
+        outputs.push((exchange_addr.clone(), 1_000));
+    }
+    spend_to(&exchange, &outputs, &exchange_addr);
+    mine(&node, 1, &da);
+
+    let report = scan_wallet(&gateway_for(&node), "alice");
+    assert!(
+        !has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "only the output count signal holds on the recipients: {:?}",
+        report.findings
+    );
+}
+
 // ─── 11. Tainted UTXOs ─────────────────────────────────────────────────────
 
 #[test]

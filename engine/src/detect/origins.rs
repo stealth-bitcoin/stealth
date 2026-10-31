@@ -83,12 +83,18 @@ impl TxGraph {
                 Some(t) => t,
                 None => continue,
             };
-            let n_out = tx.vout.len();
+            let input_addrs = self.get_input_addresses(txid);
+            let input_set: HashSet<_> = input_addrs.iter().map(|ia| &ia.address).collect();
+            let recipients: Vec<_> = tx
+                .vout
+                .iter()
+                .filter(|o| o.address.as_ref().is_none_or(|a| !input_set.contains(a)))
+                .collect();
+            let n_out = recipients.len();
             if n_out < batch_threshold {
                 continue;
             }
 
-            let input_addrs = self.get_input_addresses(txid);
             let our_inputs: Vec<_> = input_addrs
                 .iter()
                 .filter(|ia| self.is_ours(&ia.address))
@@ -105,11 +111,14 @@ impl TxGraph {
             if our_outputs.is_empty() {
                 continue;
             }
+            // Already reported as a dust attack, which is not a withdrawal.
+            if self.dust_attack_evidence(txid, thresholds).is_some() {
+                continue;
+            }
 
             let mut signals = vec![format!("High output count: {}", n_out)];
 
-            let unique_addr_count = tx
-                .vout
+            let unique_addr_count = recipients
                 .iter()
                 .filter_map(|o| o.address.as_ref())
                 .collect::<HashSet<_>>()
@@ -120,7 +129,7 @@ impl TxGraph {
 
             // Input-value to median-output-value ratio heuristic.
             let total_input: Amount = input_addrs.iter().map(|ia| ia.value).sum();
-            let mut output_values: Vec<u64> = tx.vout.iter().map(|o| o.value.to_sat()).collect();
+            let mut output_values: Vec<u64> = recipients.iter().map(|o| o.value.to_sat()).collect();
             output_values.sort_unstable();
             if !output_values.is_empty() {
                 let median = output_values[output_values.len() / 2];
