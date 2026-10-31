@@ -114,6 +114,10 @@ impl TxGraph {
                         );
                     }
 
+                    // Change back to an input address already implies these two lines.
+                    if change_back {
+                        continue;
+                    }
                     if in_types.contains(&ch_type) && change.script_type != payment.script_type {
                         note(
                             "script_type",

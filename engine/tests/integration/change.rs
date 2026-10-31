@@ -70,6 +70,12 @@ fn assert_change_back_reason(node: &Node) {
         reasons.contains("Change went back to an input address (output 1, 69990000 sats)"),
         "{reasons}"
     );
+    // The round 0.3 BTC payment is the only other evidence.
+    assert!(
+        change[0].description.ends_with("(2 heuristic(s) matched)"),
+        "{} {reasons}",
+        change[0].description
+    );
     let correction = change[0].correction.as_deref().unwrap();
     assert!(
         correction.starts_with("Send change to a fresh change address"),

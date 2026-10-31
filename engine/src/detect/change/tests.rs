@@ -483,3 +483,22 @@ fn the_receiver_gets_no_finding_for_the_senders_change_back_to_its_input() {
     );
     assert!(findings.is_empty(), "{findings:?}");
 }
+
+#[test]
+fn change_back_to_the_input_gets_no_script_type_line_it_implies() {
+    let funded = wpkh(1);
+    let findings = findings_for(
+        vec![coin(&funded, 50_000)],
+        vec![out(0, &tr(101), 46_543), out(1, &funded, 2_107)],
+        &[&funded],
+    );
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(reasons(&findings[0]), vec![back_to_input(1, 2_107)]);
+    assert!(
+        findings[0]
+            .description
+            .ends_with("(1 heuristic(s) matched)"),
+        "{}",
+        findings[0].description
+    );
+}
