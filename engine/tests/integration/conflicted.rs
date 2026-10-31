@@ -1,6 +1,13 @@
 use crate::common::*;
 use serde_json::{json, Value};
 
+/// Waits until every wallet has seen what the node just accepted or dropped.
+fn settle(client: &corepc_node::Client) {
+    let _: Value = client
+        .call("syncwithvalidationinterfacequeue", &[])
+        .unwrap();
+}
+
 /// Alice pays bob in a replaceable tx, bumps its fee and the replacement is
 /// mined, so Core reports the original with negative confirmations. Only the
 /// sender's wallet lists it: Core leaves conflicted receives out.
@@ -215,6 +222,7 @@ fn a_tx_replaced_by_one_still_in_the_mempool_is_left_out_and_named() {
     let bumped: Value = alice
         .call("bumpfee", &[json!(original.to_string())])
         .expect("bumpfee");
+    settle(&alice);
     let replacement: Txid = bumped["txid"].as_str().unwrap().parse().unwrap();
 
     let history = gateway_for(&node)
@@ -328,6 +336,7 @@ fn the_receiver_of_a_payment_bumped_but_not_mined_leaves_it_out() {
     let bumped: Value = alice
         .call("bumpfee", &[json!(original.to_string())])
         .expect("bumpfee");
+    settle(&alice);
     let replacement: Txid = bumped["txid"].as_str().unwrap().parse().unwrap();
 
     let history = gateway
@@ -379,6 +388,7 @@ fn a_raw_double_spend_of_the_wallets_own_payment_leaves_out_it_and_its_child() {
         .unwrap();
     let double_spend = signed.into_model().unwrap().tx;
     alice.send_raw_transaction(&double_spend).unwrap();
+    settle(&alice);
     let double_spend = double_spend.compute_txid();
 
     let history = gateway_for(&node)
@@ -439,6 +449,7 @@ fn the_receiver_of_a_payment_double_spent_away_from_him_leaves_it_out() {
         .unwrap();
     let double_spend = signed.into_model().unwrap().tx;
     alice.send_raw_transaction(&double_spend).unwrap();
+    settle(&alice);
     let double_spend = double_spend.compute_txid();
 
     let history = gateway
@@ -510,6 +521,7 @@ fn a_bumped_original_back_in_the_mempool_is_analyzed() {
         .client
         .call("bumpfee", &[json!(original)])
         .expect("bumpfee");
+    settle(&first.client);
     let original: Txid = original.parse().unwrap();
     let replacement: Txid = bumped["txid"].as_str().unwrap().parse().unwrap();
     first.stop().unwrap();
@@ -641,6 +653,7 @@ fn spend_output(
         .unwrap();
     let tx = signed.into_model().unwrap().tx;
     wallet.send_raw_transaction(&tx).unwrap();
+    settle(wallet);
     tx.compute_txid()
 }
 
@@ -711,11 +724,7 @@ fn a_coinbase_from_a_block_no_longer_in_the_chain_is_left_out_as_orphaned() {
         .client
         .call("invalidateblock", &[json!(hashes[0])])
         .unwrap();
-    // The wallet learns of the disconnected block asynchronously.
-    let _: Value = node
-        .client
-        .call("syncwithvalidationinterfacequeue", &[])
-        .unwrap();
+    settle(&node.client);
 
     let entry: Value = alice
         .call("gettransaction", &[json!(coinbase.to_string())])
@@ -750,11 +759,7 @@ fn a_spend_of_a_coinbase_a_reorg_removed_is_listed_as_abandoned() {
         .client
         .call("invalidateblock", &[json!(hashes[0])])
         .unwrap();
-    // The wallet learns of the disconnected block asynchronously.
-    let _: Value = node
-        .client
-        .call("syncwithvalidationinterfacequeue", &[])
-        .unwrap();
+    settle(&node.client);
 
     let entry: Value = alice
         .call("gettransaction", &[json!(spend.to_string())])
