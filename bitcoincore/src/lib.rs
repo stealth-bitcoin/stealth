@@ -488,7 +488,11 @@ impl BitcoinCoreRpc {
                 break;
             }
             let mut next = HashSet::new();
-            for (txid, fetched) in self.decode_transactions(&frontier)? {
+            let mut fetched_txs = self.decode_transactions(&frontier)?;
+            if depth == 0 {
+                fetched_txs = self.refetch_missing(fetched_txs, &confirmed)?;
+            }
+            for (txid, fetched) in fetched_txs {
                 let tx = match fetched {
                     Ok(tx) => tx,
                     // Replaced, double-spent, expired, evicted, never broadcast, or a child of one.
@@ -513,12 +517,6 @@ impl BitcoinCoreRpc {
             }
             frontier = next.into_iter().collect();
             depth += 1;
-        }
-        // Until the node has loaded its mempool, every unconfirmed tx reads as not found.
-        if !left_out.unavailable.is_empty() && !self.mempool_loaded()? {
-            return Err(AnalysisError::EnvironmentUnavailable(
-                "the node is still loading its mempool; scan again once it has finished".into(),
-            ));
         }
         wallet_txs.retain(|entry| !left_out.unavailable.contains(&entry.txid));
         utxos.retain(|utxo| !left_out.unavailable.contains(&utxo.txid));
@@ -643,10 +641,55 @@ impl BitcoinCoreRpc {
         Ok(pages.into_iter().flatten().collect())
     }
 
-    /// Whether the node has finished loading its mempool from disk.
-    fn mempool_loaded(&self) -> Result<bool, AnalysisError> {
-        let info = self.call::<Value>(None, "getmempoolinfo", Vec::new())?;
-        Ok(info["loaded"] != json!(false))
+    /// Unconfirmed wallet txs the node did not have are asked for once more,
+    /// after checking its mempool has loaded: until then every unconfirmed tx
+    /// reads as not found, and loading may finish during the first fetch.
+    fn refetch_missing(
+        &self,
+        fetched: TxFetchResults,
+        confirmed: &HashSet<Txid>,
+    ) -> Result<TxFetchResults, AnalysisError> {
+        let missing: Vec<Txid> = fetched
+            .iter()
+            .filter(|(txid, result)| {
+                matches!(result, Err(AnalysisError::TransactionNotFound(_)))
+                    && !confirmed.contains(txid)
+            })
+            .map(|(txid, _)| *txid)
+            .collect();
+        if missing.is_empty() {
+            return Ok(fetched);
+        }
+        if self.mempool_loaded()? == Some(false) {
+            return Err(AnalysisError::EnvironmentUnavailable(
+                "the node is still loading its mempool; scan again once it has finished".into(),
+            ));
+        }
+        let mut again: HashMap<Txid, _> = self.decode_transactions(&missing)?.into_iter().collect();
+        Ok(fetched
+            .into_iter()
+            .map(|(txid, result)| match again.remove(&txid) {
+                Some(retried) => (txid, retried),
+                None => (txid, result),
+            })
+            .collect())
+    }
+
+    /// Whether the node has finished loading its mempool from disk; `None`
+    /// when it will not tell (no such RPC, or not allowed).
+    fn mempool_loaded(&self) -> Result<Option<bool>, AnalysisError> {
+        match self.call_rpc::<Value>(None, "getmempoolinfo", Vec::new()) {
+            Ok(info) => Ok(Some(info["loaded"] != json!(false))),
+            Err(RpcError::Node(
+                _,
+                JsonRpcError {
+                    code: Some(RPC_METHOD_NOT_FOUND),
+                    ..
+                },
+            ))
+            | Err(RpcError::Other(AnalysisError::RpcForbidden { .. })) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn block_count(&self) -> Result<u64, AnalysisError> {
@@ -2825,6 +2868,83 @@ mod tests {
                 .contains("the node is still loading its mempool; scan again once it has finished"),
             "{error}"
         );
+    }
+
+    /// A wallet listing one unconfirmed entry the node lacks on the first
+    /// fetch; `serves_later` makes the next fetch find it. `mempool_info`
+    /// is the getmempoolinfo reply as (status, body).
+    fn node_refetching(mempool_info: (&'static str, String), serves_later: bool) -> BitcoinCoreRpc {
+        let fetches = Arc::new(AtomicU64::new(0));
+        serve_node(move |method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "getmempoolinfo" => return mempool_info.clone(),
+                "listunspent" => json!([]),
+                "listtransactions" => json!([{
+                    "address": ADDR, "amount": 0.001, "category": "receive",
+                    "confirmations": 0, "mempoolconflicts": [], "txid": ORIGINAL, "vout": 0,
+                }]),
+                "getrawtransaction" => {
+                    let first = fetches.fetch_add(1, Ordering::SeqCst) == 0;
+                    let answer = if serves_later && !first {
+                        json!({ "id": 0, "error": null, "result": {
+                            "txid": ORIGINAL, "vin": [],
+                            "vout": [{ "value": 0.001, "n": 0, "scriptPubKey": { "address": ADDR } }],
+                        }})
+                    } else {
+                        json!({ "id": 0, "result": null, "error": not_found() })
+                    };
+                    return ("200 OK", json!([answer]).to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        })
+    }
+
+    fn loaded() -> (&'static str, String) {
+        let reply = json!({ "result": { "loaded": true, "size": 1 }, "error": null });
+        ("200 OK", reply.to_string())
+    }
+
+    #[test]
+    fn a_tx_the_mempool_served_once_it_finished_loading_is_kept() {
+        let history = node_refetching(loaded(), true)
+            .load_history_for_wallet("bob")
+            .expect("scan");
+        assert!(
+            history.left_out.unavailable.is_empty(),
+            "{:?}",
+            history.left_out
+        );
+        assert_eq!(history.wallet_txs.len(), 1);
+        assert!(history
+            .transactions
+            .contains_key(&ORIGINAL.parse::<Txid>().unwrap()));
+    }
+
+    #[test]
+    fn a_node_that_will_not_tell_about_its_mempool_still_gets_the_refetch() {
+        let method_not_found = json!({
+            "result": null, "error": { "code": -32601, "message": "Method not found" },
+        });
+        for (mempool_info, what) in [
+            (("403 Forbidden", String::new()), "forbidden"),
+            (("200 OK", method_not_found.to_string()), "method not found"),
+        ] {
+            let served = node_refetching(mempool_info.clone(), true)
+                .load_history_for_wallet("bob")
+                .unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert!(served.left_out.unavailable.is_empty(), "{what}");
+            let missing = node_refetching(mempool_info, false)
+                .load_history_for_wallet("bob")
+                .unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert_eq!(missing.left_out.unavailable.len(), 1, "{what}");
+            assert!(missing.wallet_txs.is_empty(), "{what}");
+        }
     }
 
     #[test]
