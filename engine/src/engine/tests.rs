@@ -998,6 +998,7 @@ fn replaced_and_abandoned_txs_reach_the_report_in_printed_order() {
     let mut history = chain_history(2, 1);
     history.left_out.mempool_conflicted = [(txid(0x200), txid(50)), (txid(3), txid(51))].into();
     history.left_out.abandoned = [txid(0x300), txid(4)].into();
+    history.left_out.unavailable = [txid(0x400), txid(5)].into();
     let gateway = FakeGateway::new(Ok(history));
     let report = AnalysisEngine::new(&gateway, EngineSettings::default())
         .analyze(ScanTarget::Descriptor(format!("addr({ADDR})")))
@@ -1010,6 +1011,7 @@ fn replaced_and_abandoned_txs_reach_the_report_in_printed_order() {
         .collect();
     assert_eq!(replaced, [(txid(3), txid(51)), (txid(0x200), txid(50))]);
     assert_eq!(report.stats.abandoned_txids, [txid(4), txid(0x300)]);
+    assert_eq!(report.stats.unavailable_txids, [txid(5), txid(0x400)]);
 }
 
 #[test]
@@ -1017,7 +1019,9 @@ fn a_utxo_scan_names_the_replaced_and_abandoned_txs_of_the_address_history() {
     let mut history = chain_history(12, 1);
     history.left_out.mempool_conflicted = [(txid(40), txid(41))].into();
     history.left_out.abandoned = [txid(42)].into();
+    history.left_out.unavailable = [txid(43)].into();
     let report = scan(&FakeGateway::new(Ok(history)));
+    assert_eq!(report.stats.unavailable_txids, [txid(43)]);
     assert_eq!(report.stats.mempool_conflicted_txids.len(), 1);
     assert_eq!(report.stats.abandoned_txids, [txid(42)]);
 }

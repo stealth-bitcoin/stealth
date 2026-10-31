@@ -261,22 +261,23 @@ fn an_abandoned_tx_is_left_out_and_named() {
 }
 
 #[test]
-fn an_unbroadcast_tx_the_node_cannot_serve_still_fails_the_scan() {
+fn an_unbroadcast_tx_is_left_out_as_unavailable() {
     let node = node_without_wallet_broadcast();
     let miner = node.client.new_address().unwrap();
     mine(&node, 110, &miner);
     let alice = fund_without_broadcast(&node, &miner);
-    pay_bob(&node, &alice, false);
+    let payment = pay_bob(&node, &alice, false);
 
-    let error = gateway_for(&node)
+    let history = gateway_for(&node)
         .scan_wallet("alice")
-        .expect_err("a wallet tx the node cannot serve must fail the scan");
-    assert!(
-        matches!(
-            error,
-            stealth_engine::error::AnalysisError::TransactionNotFound(_)
-        ),
-        "{error:?}"
+        .expect("a wallet tx the node never had must not fail the scan");
+    let graph = TxGraph::from_wallet_history(history);
+    assert!(!graph.our_txids.contains(&payment));
+    let report = graph.detect_all(&Default::default(), None, None);
+    assert_eq!(report.stats.unavailable_txids, vec![payment]);
+    assert_eq!(
+        report.stats.transactions_analyzed, 1,
+        "the funding tx stays"
     );
 }
 
@@ -529,4 +530,81 @@ fn a_bumped_original_back_in_the_mempool_is_analyzed() {
     assert_eq!(report.stats.abandoned_txids, vec![replacement]);
     drop(node);
     let _ = std::fs::remove_dir_all(&datadir);
+}
+
+/// A payment and a child spending its change, both expired from the mempool.
+#[test]
+fn txs_expired_from_the_mempool_are_left_out_as_unavailable() {
+    let exe = corepc_node::exe_path().expect("bitcoind not found");
+    let mut conf = corepc_node::Conf::default();
+    conf.args.push("-txindex");
+    conf.args.push("-mempoolexpiry=1");
+    let node = Node::with_conf(exe, &conf).expect("failed to start bitcoind");
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let (alice, _) = fund_sender(&node, &miner, "alice", 1_000_000);
+    let bob = node.create_wallet("bob").unwrap();
+    let to = bob.new_address().unwrap();
+    let gateway = gateway_for(&node);
+    let settings = EngineSettings {
+        persist_scan_wallet: true,
+        ..EngineSettings::default()
+    };
+    let descriptor = format!("addr({to})");
+    let cached_scan = || {
+        AnalysisEngine::new(&gateway, settings.clone())
+            .analyze(ScanTarget::Descriptor(descriptor.clone()))
+    };
+    cached_scan().expect("first scan");
+
+    let payment: String = alice
+        .call("sendtoaddress", &[json!(to.to_string()), json!(0.001)])
+        .expect("sendtoaddress");
+    let payment: Txid = payment.parse().unwrap();
+    let child: String = alice
+        .call(
+            "sendtoaddress",
+            &[
+                json!(node.client.new_address().unwrap().to_string()),
+                json!(0.002),
+            ],
+        )
+        .expect("sendtoaddress");
+    let child: Txid = child.parse().unwrap();
+
+    // Past the one-hour expiry, the next tx the mempool accepts expires both.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let _: Value = node
+        .client
+        .call("setmocktime", &[json!(now + 2 * 3600)])
+        .unwrap();
+    node.client
+        .send_to_address(
+            &node.client.new_address().unwrap(),
+            Amount::from_sat(10_000),
+        )
+        .unwrap();
+    let mempool: Vec<String> = node.client.call("getrawmempool", &[]).unwrap();
+    assert!(!mempool.contains(&payment.to_string()), "{mempool:?}");
+    assert!(!mempool.contains(&child.to_string()), "{mempool:?}");
+
+    let report = scan_wallet(&gateway, "bob");
+    assert_eq!(report.stats.unavailable_txids, vec![payment]);
+    let alice_history = gateway
+        .scan_wallet("alice")
+        .expect("expired txs must not fail the sender's scan");
+    let graph = TxGraph::from_wallet_history(alice_history);
+    assert!(!graph.our_txids.contains(&payment));
+    assert!(!graph.our_txids.contains(&child));
+    let report = graph.detect_all(&Default::default(), None, None);
+    let mut expected = vec![payment, child];
+    expected.sort_by_key(Txid::to_string);
+    assert_eq!(report.stats.unavailable_txids, expected);
+
+    let cached = cached_scan().expect("nor the cached descriptor scan");
+    assert_eq!(cached.stats.unavailable_txids, vec![payment]);
+    assert_eq!(cached.stats.transactions_analyzed, 0);
 }

@@ -461,9 +461,15 @@ impl BitcoinCoreRpc {
     }
 
     fn load_history_for_wallet(&self, wallet_name: &str) -> Result<WalletHistory, AnalysisError> {
-        let (wallet_txs, mut left_out) = self.list_transactions(wallet_name)?;
-        let (utxos, conflicted_utxos) = self.list_unspent(wallet_name)?;
+        let (mut wallet_txs, mut left_out) = self.list_transactions(wallet_name)?;
+        let (mut utxos, conflicted_utxos) = self.list_unspent(wallet_name)?;
         left_out.conflicted.extend(conflicted_utxos);
+        let confirmed: HashSet<Txid> = wallet_txs
+            .iter()
+            .filter(|entry| entry.confirmations > 0)
+            .map(|entry| entry.txid)
+            .chain(utxos.iter().filter(|u| u.confirmations > 0).map(|u| u.txid))
+            .collect();
         let mut txids = wallet_txs
             .iter()
             .map(|entry| entry.txid)
@@ -485,6 +491,13 @@ impl BitcoinCoreRpc {
             for (txid, fetched) in self.decode_transactions(&frontier)? {
                 let tx = match fetched {
                     Ok(tx) => tx,
+                    // Expired, evicted or never broadcast; it may still confirm.
+                    Err(AnalysisError::TransactionNotFound(_))
+                        if depth == 0 && !confirmed.contains(&txid) =>
+                    {
+                        left_out.unavailable.insert(txid);
+                        continue;
+                    }
                     Err(error) if depth == 0 => return Err(error),
                     Err(_) => continue,
                 };
@@ -501,6 +514,8 @@ impl BitcoinCoreRpc {
             frontier = next.into_iter().collect();
             depth += 1;
         }
+        wallet_txs.retain(|entry| !left_out.unavailable.contains(&entry.txid));
+        utxos.retain(|utxo| !left_out.unavailable.contains(&utxo.txid));
 
         Ok(WalletHistory {
             wallet_txs,
@@ -2678,6 +2693,69 @@ mod tests {
         assert_eq!(
             history.left_out.conflicted.into_iter().collect::<Vec<_>>(),
             vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+    }
+
+    /// A wallet listing one entry at `confirmations`, whose tx getrawtransaction
+    /// answers with `error`.
+    fn node_failing_to_serve(confirmations: i64, error: Value) -> BitcoinCoreRpc {
+        serve_node(move |method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "listunspent" => json!([]),
+                "listtransactions" => json!([{
+                    "address": ADDR, "amount": 0.001, "category": "receive",
+                    "confirmations": confirmations, "abandoned": false, "mempoolconflicts": [],
+                    "txid": ORIGINAL, "vout": 0,
+                }]),
+                "getrawtransaction" => {
+                    let batch = json!([{ "id": 0, "result": null, "error": error }]);
+                    return ("200 OK", batch.to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        })
+    }
+
+    fn not_found() -> Value {
+        json!({ "code": -5, "message": "No such mempool or blockchain transaction." })
+    }
+
+    #[test]
+    fn an_unconfirmed_wallet_tx_the_node_no_longer_has_is_left_out_and_named() {
+        let history = node_failing_to_serve(0, not_found())
+            .load_history_for_wallet("bob")
+            .expect("an unconfirmed tx the node lacks must not fail the scan");
+        assert!(history.wallet_txs.is_empty());
+        assert_eq!(
+            history.left_out.unavailable.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn a_confirmed_wallet_tx_the_node_cannot_find_still_fails_the_scan() {
+        let error = node_failing_to_serve(3, not_found())
+            .load_history_for_wallet("bob")
+            .expect_err("a confirmed tx the node cannot find is a real failure");
+        assert!(
+            matches!(error, AnalysisError::TransactionNotFound(_)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn any_other_error_on_an_unconfirmed_wallet_tx_still_fails_the_scan() {
+        let error = node_failing_to_serve(0, json!({ "code": -1, "message": "boom" }))
+            .load_history_for_wallet("bob")
+            .expect_err("only not found leaves a tx out");
+        assert!(
+            matches!(error, AnalysisError::EnvironmentUnavailable(_)),
+            "{error:?}"
         );
     }
 

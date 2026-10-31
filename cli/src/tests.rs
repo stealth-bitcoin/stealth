@@ -235,6 +235,7 @@ mod ordering {
             conflicted_txids: Vec::new(),
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
         };
         stealth_engine::Report::new(stats, findings, warnings)
     }
@@ -272,6 +273,7 @@ mod ordering {
             conflicted_txids: Vec::new(),
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert_eq!(
@@ -302,6 +304,7 @@ mod ordering {
             conflicted_txids: Vec::new(),
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(
             stats,
@@ -328,6 +331,7 @@ mod ordering {
             conflicted_txids: Vec::new(),
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert!(text.contains("No privacy issues found."), "{text}");
@@ -386,6 +390,7 @@ mod ordering {
             conflicted_txids: vec![CONFLICTED.parse().unwrap()],
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert!(text.contains(CONFLICTED), "{text}");
@@ -513,6 +518,7 @@ mod ordering {
                 conflicted_txids: Vec::new(),
                 mempool_conflicted_txids,
                 abandoned_txids,
+                unavailable_txids: Vec::new(),
             };
             let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
             assert!(text.contains(CONFLICTED), "{text}");

@@ -273,6 +273,10 @@ pub struct LeftOut {
     pub mempool_conflicted: BTreeMap<Txid, Txid>,
     /// Abandoned in the wallet.
     pub abandoned: BTreeSet<Txid>,
+    /// Unconfirmed, unflagged, and no longer (or never) on the node: expired or
+    /// evicted from the mempool, abandoned in another wallet, or never broadcast.
+    #[serde(default)]
+    pub unavailable: BTreeSet<Txid>,
 }
 
 impl LeftOut {
@@ -280,6 +284,7 @@ impl LeftOut {
         self.conflicted.extend(other.conflicted);
         self.mempool_conflicted.extend(other.mempool_conflicted);
         self.abandoned.extend(other.abandoned);
+        self.unavailable.extend(other.unavailable);
     }
 }
 
