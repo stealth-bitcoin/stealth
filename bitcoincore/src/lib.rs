@@ -2546,6 +2546,24 @@ mod tests {
     }
 
     #[test]
+    fn of_several_mempool_conflicts_the_wallets_own_replacement_is_named() {
+        // IN_MEMPOOL ("f5...") lists first; the bump the wallet made comes second.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([unconfirmed_send(
+            ORIGINAL,
+            Some(REPLACEMENT),
+            &[IN_MEMPOOL, REPLACEMENT],
+            false
+        )]))
+        .unwrap();
+        let (_, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            left_out.mempool_conflicted.into_iter().collect::<Vec<_>>(),
+            vec![(txid(ORIGINAL), txid(REPLACEMENT))]
+        );
+    }
+
+    #[test]
     fn the_replacement_named_is_one_in_the_mempool_conflicts() {
         // A stale replaced_by_txid names a tx no longer in the mempool.
         let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([unconfirmed_send(
