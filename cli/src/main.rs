@@ -248,31 +248,63 @@ fn text_report(report: &stealth_engine::Report) -> String {
         ));
     }
 
-    let conflicted = &report.stats.conflicted_txids;
-    if !conflicted.is_empty() {
-        let one = conflicted.len() == 1;
-        lines.push(format!(
-            "Left out {} transaction{} Core reports as conflicted: {}, or a transaction \
-             it depends on, conflicts with another one, so {} not part of the wallet's history. \
-             {}",
-            conflicted.len(),
-            if one { "" } else { "s" },
-            if one { "it" } else { "each" },
-            if one { "it is" } else { "they are" },
-            if one {
-                "It may still have been seen by the network before it became conflicted; \
-                 Stealth does not analyze it."
-            } else {
-                "They may still have been seen by the network before they became conflicted; \
-                 Stealth does not analyze them."
-            },
-        ));
-        lines.extend(conflicted.iter().map(|txid| format!("  {txid}")));
-        lines.push(String::new());
-    }
+    let stats = &report.stats;
+    let conflicted: Vec<String> = stats
+        .conflicted_txids
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    left_out_note(
+        &mut lines,
+        &conflicted,
+        &LeftOutReason {
+            one: "Core reports as conflicted: it, or a transaction it depends on, conflicts \
+                  with another one",
+            many: "Core reports as conflicted: each, or a transaction it depends on, conflicts \
+                   with another one",
+            before_one: "it became conflicted",
+            before_many: "they became conflicted",
+        },
+    );
+    let replaced: Vec<String> = stats
+        .replaced_txids
+        .iter()
+        .map(|r| {
+            format!(
+                "{} was replaced by {}, which is not confirmed yet",
+                r.txid, r.replaced_by
+            )
+        })
+        .collect();
+    left_out_note(
+        &mut lines,
+        &replaced,
+        &LeftOutReason {
+            one: "the wallet replaced",
+            many: "the wallet replaced",
+            before_one: "it was replaced",
+            before_many: "they were replaced",
+        },
+    );
+    let abandoned: Vec<String> = stats
+        .abandoned_txids
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    left_out_note(
+        &mut lines,
+        &abandoned,
+        &LeftOutReason {
+            one: "that was abandoned in the wallet",
+            many: "that were abandoned in the wallet",
+            before_one: "it was abandoned",
+            before_many: "they were abandoned",
+        },
+    );
 
-    // The note says why nothing was analyzed; the empty-scan hint would contradict it.
-    if is_empty_report(&report.summary) && !conflicted.is_empty() {
+    // The notes say why nothing was analyzed; the empty-scan hint would contradict them.
+    let any_left_out = !(conflicted.is_empty() && replaced.is_empty() && abandoned.is_empty());
+    if is_empty_report(&report.summary) && any_left_out {
         lines.push("Nothing else was left to analyze.".to_owned());
         return lines.join("\n") + "\n";
     }
@@ -302,6 +334,48 @@ fn text_report(report: &stealth_engine::Report) -> String {
         lines.extend(by_severity(&report.warnings).into_iter().map(finding_line));
     }
     lines.join("\n") + "\n"
+}
+
+/// Why a note's txs were left out, for one and for several: what follows
+/// "Left out N transaction(s)", and what they may have been seen before.
+struct LeftOutReason {
+    one: &'static str,
+    many: &'static str,
+    before_one: &'static str,
+    before_many: &'static str,
+}
+
+/// A note naming the wallet txs a scan left out, one per line, and why.
+fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReason) {
+    if items.is_empty() {
+        return;
+    }
+    let (count, why, part, may, before, them) = if items.len() == 1 {
+        (
+            "1 transaction".to_owned(),
+            reason.one,
+            "it is",
+            "It",
+            reason.before_one,
+            "it",
+        )
+    } else {
+        let count = format!("{} transactions", items.len());
+        (
+            count,
+            reason.many,
+            "they are",
+            "They",
+            reason.before_many,
+            "them",
+        )
+    };
+    lines.push(format!(
+        "Left out {count} {why}, so {part} not part of the wallet's history. {may} may still \
+         have been seen by the network before {before}; Stealth does not analyze {them}."
+    ));
+    lines.extend(items.iter().map(|item| format!("  {item}")));
+    lines.push(String::new());
 }
 
 fn finding_line(f: &Finding) -> String {

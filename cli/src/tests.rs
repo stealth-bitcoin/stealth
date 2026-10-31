@@ -399,6 +399,107 @@ mod ordering {
         assert!(!text.contains("unused address"), "{text}");
     }
 
+    const REPLACEMENT: &str = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
+
+    fn replaced(txid: &str, by: &str) -> stealth_engine::types::ReplacedTx {
+        stealth_engine::types::ReplacedTx {
+            txid: txid.parse().unwrap(),
+            replaced_by: by.parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn the_text_report_names_a_replaced_tx_and_its_replacement() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.replaced_txids = vec![replaced(CONFLICTED, REPLACEMENT)];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction the wallet replaced, so it is not part of the wallet's \
+                 history. It may still have been seen by the network before it was replaced; \
+                 Stealth does not analyze it.\n  {CONFLICTED} was replaced by {REPLACEMENT}, \
+                 which is not confirmed yet\n"
+            )),
+            "{text}"
+        );
+        assert!(
+            position(&text, REPLACEMENT) < position(&text, "No privacy issues found."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_replaced_note_counts_several() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.replaced_txids = vec![
+            replaced(CONFLICTED, REPLACEMENT),
+            replaced(REPLACEMENT, CONFLICTED),
+        ];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(
+                "Left out 2 transactions the wallet replaced, so they are not part of the \
+                 wallet's history. They may still have been seen by the network before they \
+                 were replaced; Stealth does not analyze them.\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_text_report_names_abandoned_txs() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.abandoned_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction that was abandoned in the wallet, so it is not part of \
+                 the wallet's history. It may still have been seen by the network before it was \
+                 abandoned; Stealth does not analyze it.\n  {CONFLICTED}\n"
+            )),
+            "{text}"
+        );
+        clean
+            .stats
+            .abandoned_txids
+            .push(REPLACEMENT.parse().unwrap());
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 2 transactions that were abandoned in the wallet, so they are not part \
+                 of the wallet's history. They may still have been seen by the network before \
+                 they were abandoned; Stealth does not analyze them.\n  {CONFLICTED}\n  \
+                 {REPLACEMENT}\n"
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_scan_whose_every_tx_was_replaced_or_abandoned_gives_no_empty_scan_hint() {
+        for (replaced_txids, abandoned_txids) in [
+            (vec![replaced(CONFLICTED, REPLACEMENT)], Vec::new()),
+            (Vec::new(), vec![CONFLICTED.parse().unwrap()]),
+        ] {
+            let stats = stealth_engine::types::Stats {
+                transactions_analyzed: 0,
+                addresses_seen: 1,
+                utxos_current: 0,
+                addresses_without_history: 0,
+                conflicted_txids: Vec::new(),
+                replaced_txids,
+                abandoned_txids,
+            };
+            let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
+            assert!(text.contains(CONFLICTED), "{text}");
+            assert!(
+                text.ends_with("\n\nNothing else was left to analyze.\n"),
+                "{text}"
+            );
+            assert!(!text.contains("No transactions found"), "{text}");
+        }
+    }
+
     #[test]
     fn a_report_without_conflicted_txs_has_no_note() {
         let text = text_report(&report(Vec::new(), Vec::new()));
