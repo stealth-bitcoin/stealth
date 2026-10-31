@@ -100,10 +100,21 @@ fn spend_of(
     }
 }
 
+/// Dust spending findings from a partial scan, which knows only the given addresses.
 fn dust_spending(history: WalletHistory) -> Vec<Finding> {
+    dust_spending_in(history, true)
+}
+
+/// Dust spending findings from a wallet or descriptor scan, which knows the wallet.
+fn dust_spending_full(history: WalletHistory) -> Vec<Finding> {
+    dust_spending_in(history, false)
+}
+
+fn dust_spending_in(history: WalletHistory, partial: bool) -> Vec<Finding> {
+    let mut graph = TxGraph::from_wallet_history(history);
+    graph.partial_scan = partial;
     let mut findings = Vec::new();
-    TxGraph::from_wallet_history(history)
-        .detect_dust_spending(&DetectorThresholds::default(), &mut findings);
+    graph.detect_dust_spending(&DetectorThresholds::default(), &mut findings);
     findings
 }
 
@@ -128,7 +139,7 @@ fn a_strangers_input_does_not_make_one_address_dust_spending_in_a_descriptor_sca
     let mut history = spend_of(&[(&a, 546), (&a, 44_980), (&stranger, 30_000)], &[&a]);
     // A ranged descriptor derived `a`, so the scan knows the wallet's other addresses.
     history.ranged_addresses = HashSet::from([a.clone()]);
-    let findings = dust_spending(history);
+    let findings = dust_spending_full(history);
     assert!(findings.is_empty(), "{findings:?}");
 }
 
@@ -597,7 +608,7 @@ fn a_wallet_scan_does_not_count_a_stranger_next_to_dust_at_a_non_ranged_own_addr
     let mut history = spend_of(&[(&a, 600), (&a, 20_000), (&wpkh(200), 30_000)], &[&a]);
     // The wallet has a ranged descriptor, but `a` comes from an imported, non-ranged one.
     history.ranged_addresses = HashSet::from([wpkh(99)]);
-    let findings = dust_spending(history);
+    let findings = dust_spending_full(history);
     assert!(findings.is_empty(), "{findings:?}");
 }
 
@@ -620,7 +631,7 @@ fn a_full_scan_does_not_let_a_strangers_coin_be_the_normal_one() {
     let (a, b) = (wpkh(1), wpkh(200));
     let mut history = spend_of(&[(&a, 600), (&b, 50_000)], &[&a]);
     history.ranged_addresses = HashSet::from([a.clone()]);
-    let findings = dust_spending(history);
+    let findings = dust_spending_full(history);
     assert!(findings.is_empty(), "{findings:?}");
 }
 
@@ -660,4 +671,86 @@ fn two_unattributed_addresses_get_the_plural_dust_wording() {
         "{}",
         findings[0].description
     );
+}
+
+/// Replaces the outputs of the spend built by [`spend_of`].
+fn with_outputs(mut history: WalletHistory, vout: Vec<TxOutput>) -> WalletHistory {
+    if let Some(spend) = history.transactions.get_mut(&txid(100)) {
+        spend.vout = vout;
+    }
+    history
+}
+
+/// 600 and 20,000 sats at `a` spent with 30,000 sats from each of `n` unattributed addresses.
+fn dust_with_strangers(a: &Address<NetworkUnchecked>, n: u8) -> WalletHistory {
+    let strangers: Vec<_> = (0..n).map(|i| wpkh(150 + i)).collect();
+    let mut coins = vec![(a, 600), (a, 20_000)];
+    coins.extend(strangers.iter().map(|s| (s, 30_000)));
+    spend_of(&coins, &[a])
+}
+
+/// Equal outputs, one per input, as a CoinJoin round pays them.
+fn equal_outputs(n: u32) -> Vec<TxOutput> {
+    (0..n)
+        .map(|i| out(i, &wpkh(220 + i as u8), 25_000))
+        .collect()
+}
+
+#[test]
+fn a_coinjoin_shaped_spend_in_a_partial_scan_ties_no_unattributed_address() {
+    let a = wpkh(1);
+    let findings = dust_spending(with_outputs(dust_with_strangers(&a, 8), equal_outputs(10)));
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn equal_outputs_with_two_unattributed_inputs_are_not_coinjoin_shaped() {
+    let a = wpkh(1);
+    let findings = dust_spending(with_outputs(dust_with_strangers(&a, 2), equal_outputs(4)));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+}
+
+#[test]
+fn many_unattributed_inputs_without_equal_outputs_still_count() {
+    let a = wpkh(1);
+    let mut vout = equal_outputs(10);
+    for (i, o) in vout.iter_mut().enumerate() {
+        o.value = Amount::from_sat(25_000 + i as u64);
+    }
+    let findings = dust_spending(with_outputs(dust_with_strangers(&a, 8), vout));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+}
+
+#[test]
+fn a_long_list_of_unattributed_addresses_is_capped_in_the_description() {
+    let a = wpkh(1);
+    let findings = dust_spending(dust_with_strangers(&a, 8));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert!(
+        f.description
+            .contains(" and 3 more, if those addresses are yours"),
+        "{}",
+        f.description
+    );
+    let listed = wpkh(155).assume_checked_ref().to_string();
+    assert!(!f.description.contains(&listed), "{}", f.description);
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(
+        details["possibly_joined_addresses"]
+            .as_array()
+            .map(Vec::len),
+        Some(8)
+    );
+}
+
+#[test]
+fn a_full_scan_with_only_non_ranged_descriptors_does_not_count_strangers() {
+    let a = wpkh(1);
+    // No ranged descriptor, but the user gave the scan their keys.
+    let findings = dust_spending_full(spend_of(
+        &[(&a, 600), (&a, 20_000), (&wpkh(200), 30_000)],
+        &[&a],
+    ));
+    assert!(findings.is_empty(), "{findings:?}");
 }

@@ -567,6 +567,40 @@ fn a_wallet_scan_does_not_count_a_strangers_coin_in_the_merge() {
     );
 }
 
+#[test]
+fn a_descriptor_scan_of_a_single_key_does_not_count_a_strangers_coin() {
+    let (node, a, _, _) = dust_merged_with_a_third_coin(false);
+    let info: serde_json::Value = node_wallet(&node, "alice")
+        .call("getaddressinfo", &[serde_json::json!(a.to_string())])
+        .unwrap();
+    // A non-ranged descriptor of the key behind `a`: the user gave the scan their key.
+    let single_key = info["desc"].as_str().expect("descriptor").to_owned();
+    assert!(!single_key.contains('*'), "{single_key}");
+    let gateway = gateway_for(&node);
+    let engine = AnalysisEngine::new(&gateway, EngineSettings::default());
+
+    let report = engine.analyze(ScanTarget::Descriptor(single_key)).unwrap();
+    for kind in [
+        VulnerabilityType::DustSpending,
+        VulnerabilityType::ToxicChange,
+    ] {
+        assert!(
+            !has_finding(&report, kind),
+            "{kind:?}: {:?}",
+            report.findings
+        );
+    }
+
+    // The address alone says nothing of the wallet's other addresses.
+    let report = engine
+        .analyze(ScanTarget::Descriptor(format!("addr({a})")))
+        .unwrap();
+    assert_eq!(
+        finding_of(&report, VulnerabilityType::DustSpending).severity,
+        stealth_engine::Severity::Medium
+    );
+}
+
 // ─── 13. Dust Attack Detection ─────────────────────────────────────────────
 //
 // Dust-attack detection is folded into the Dust detector: when a dust

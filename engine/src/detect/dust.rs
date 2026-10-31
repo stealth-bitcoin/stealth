@@ -6,6 +6,7 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, OutPoint, Txid};
 use serde_json::json;
 
+use super::list_addresses;
 use crate::config::DetectorThresholds;
 use crate::gateway::DecodedTransaction;
 use crate::graph::TxGraph;
@@ -449,7 +450,7 @@ impl TxGraph {
             for ia in &input_addrs {
                 if !self.is_ours(&ia.address) {
                     // In a partial scan an unattributed coin may be the user's normal coin.
-                    if ia.value > normal_min && self.unattributed(&ia.address) {
+                    if ia.value > normal_min && self.unattributed(txid, &ia.address) {
                         normal_inputs.push(ia);
                     }
                     continue;
@@ -486,7 +487,7 @@ impl TxGraph {
                 if !possible.is_empty() {
                     description.push_str(&format!(
                         "; this ties the dust to {}, if {} yours",
-                        possible.join(", "),
+                        list_addresses(&possible),
                         if possible.len() == 1 {
                             "that address is"
                         } else {

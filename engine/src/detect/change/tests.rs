@@ -557,7 +557,7 @@ fn toxic_findings_with(
     extra: Vec<Coin>,
     also_ours: &[&Address<NetworkUnchecked>],
 ) -> Vec<Finding> {
-    toxic_run(toxic_history(
+    toxic_run_partial(toxic_history(
         change_sats,
         big_sats,
         a,
@@ -567,10 +567,21 @@ fn toxic_findings_with(
     ))
 }
 
+/// Toxic change findings from a wallet or descriptor scan, which knows the wallet.
 fn toxic_run(history: WalletHistory) -> Vec<Finding> {
+    toxic_run_in(history, false)
+}
+
+/// Toxic change findings from a partial scan, which knows only the given addresses.
+fn toxic_run_partial(history: WalletHistory) -> Vec<Finding> {
+    toxic_run_in(history, true)
+}
+
+fn toxic_run_in(history: WalletHistory, partial: bool) -> Vec<Finding> {
+    let mut graph = TxGraph::from_wallet_history(history);
+    graph.partial_scan = partial;
     let mut findings = Vec::new();
-    TxGraph::from_wallet_history(history)
-        .detect_toxic_change(&DetectorThresholds::default(), &mut findings);
+    graph.detect_toxic_change(&DetectorThresholds::default(), &mut findings);
     findings
 }
 
@@ -867,4 +878,78 @@ fn a_known_tie_with_only_an_unattributed_larger_coin_is_medium() {
         "{:?}",
         findings[0]
     );
+}
+
+/// 600 sats of change at `a` spent with 50,000 sats at `a` and 30,000 sats from each of `n`
+/// unattributed addresses, into `vout`.
+fn toxic_with_strangers(
+    a: &Address<NetworkUnchecked>,
+    n: u8,
+    vout: Option<Vec<TxOutput>>,
+) -> WalletHistory {
+    let strangers = (0..n).map(|i| coin(&wpkh(150 + i), 30_000)).collect();
+    let mut history = toxic_history(600, 50_000, a, a, strangers, &[]);
+    if let (Some(vout), Some(spend)) = (vout, history.transactions.get_mut(&txid(100))) {
+        spend.vout = vout;
+    }
+    history
+}
+
+fn equal_outputs(n: u32) -> Vec<TxOutput> {
+    (0..n)
+        .map(|i| out(i, &wpkh(220 + i as u8), 25_000))
+        .collect()
+}
+
+#[test]
+fn change_in_a_coinjoin_shaped_round_ties_no_unattributed_address() {
+    let a = wpkh(1);
+    let findings = toxic_run_partial(toxic_with_strangers(&a, 8, Some(equal_outputs(10))));
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn equal_outputs_with_two_unattributed_inputs_still_tie_them() {
+    let a = wpkh(1);
+    let findings = toxic_run_partial(toxic_with_strangers(&a, 2, Some(equal_outputs(4))));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+}
+
+#[test]
+fn a_coinjoin_shaped_round_lets_no_unattributed_coin_be_the_larger_one() {
+    let a = wpkh(1);
+    // Only the change is the user's; every larger coin is a participant's.
+    let strangers = (0..8).map(|i| coin(&wpkh(150 + i), 30_000)).collect();
+    let mut history = toxic_history(600, 3_000, &a, &a, strangers, &[]);
+    if let Some(spend) = history.transactions.get_mut(&txid(100)) {
+        spend.vout = equal_outputs(10);
+    }
+    let findings = toxic_run_partial(history);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn a_long_list_of_tied_addresses_is_capped_in_the_description() {
+    let a = wpkh(1);
+    let findings = toxic_run_partial(toxic_with_strangers(&a, 8, None));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert!(
+        f.description
+            .contains(" and 3 more to the change's address"),
+        "{}",
+        f.description
+    );
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(
+        details["possibly_tied_addresses"].as_array().map(Vec::len),
+        Some(8)
+    );
+}
+
+#[test]
+fn a_full_scan_with_only_non_ranged_descriptors_does_not_count_strangers() {
+    let a = wpkh(1);
+    let findings = toxic_run(toxic_with_strangers(&a, 1, None));
+    assert!(findings.is_empty(), "{findings:?}");
 }

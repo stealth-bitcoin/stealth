@@ -6,6 +6,7 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::Address;
 use serde_json::json;
 
+use super::list_addresses;
 use crate::config::DetectorThresholds;
 use crate::graph::TxGraph;
 use crate::types::*;
@@ -231,7 +232,11 @@ impl TxGraph {
                 }
                 let larger = child_inputs.iter().filter(|ci| ci.value > toxic_upper);
                 let own_larger = larger.clone().any(|ci| self.is_ours(&ci.address));
-                if !own_larger && !larger.clone().any(|ci| self.unattributed(&ci.address)) {
+                if !own_larger
+                    && !larger
+                        .clone()
+                        .any(|ci| self.unattributed(&child_txid, &ci.address))
+                {
                     continue;
                 }
                 // Only addresses other than the change's are newly tied to it.
@@ -247,19 +252,19 @@ impl TxGraph {
                 let ties = match (tied.is_empty(), possibly_tied.is_empty()) {
                     (false, true) => format!(
                         "which ties {} to the change's address {}",
-                        tied.join(", "),
+                        list_addresses(&tied),
                         out.address.assume_checked_ref()
                     ),
                     (false, false) => format!(
                         "which ties {} to the change's address {}; it also ties {} to it, {}",
-                        tied.join(", "),
+                        list_addresses(&tied),
                         out.address.assume_checked_ref(),
-                        possibly_tied.join(", "),
+                        list_addresses(&possibly_tied),
                         if_yours
                     ),
                     _ => format!(
                         "which ties {} to the change's address {}, {}",
-                        possibly_tied.join(", "),
+                        list_addresses(&possibly_tied),
                         out.address.assume_checked_ref(),
                         if_yours
                     ),
