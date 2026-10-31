@@ -125,16 +125,11 @@ enum Moment {
     #[default]
     Scanning,
     Asking(mpsc::Sender<Reply>),
-    /// Answered no: the scan is unloading its wallet on its way to the error.
-    Stopping {
-        ignored_one: bool,
-    },
 }
 
 /// What Ctrl-C does: while the question waits it answers no, so the scan
-/// stops the usual way and unloads its wallet; after a no the first one is
-/// ignored, so the error with the count can print, and the next exits; at any
-/// other moment it exits at once. Whichever of the typed answer and an
+/// stops the usual way and unloads its wallet; at any other moment, after a
+/// no included, it exits at once. Whichever of the typed answer and an
 /// interrupt comes first answers the question.
 #[derive(Debug, Default)]
 struct Interrupts {
@@ -145,13 +140,11 @@ impl Interrupts {
     /// Whether the process should exit now.
     fn interrupt(&self) -> bool {
         let mut moment = self.moment();
-        match &mut *moment {
+        match std::mem::take(&mut *moment) {
             Moment::Asking(reply) => {
                 let _ = reply.send(Reply::Interrupted);
-                *moment = Moment::Stopping { ignored_one: false };
                 false
             }
-            Moment::Stopping { ignored_one } => std::mem::replace(ignored_one, true),
             Moment::Scanning => true,
         }
     }
@@ -160,19 +153,10 @@ impl Interrupts {
         *self.moment() = Moment::Asking(reply);
     }
 
-    /// Records the typed answer, unless an interrupt answered first; says
-    /// whether it did.
-    fn answer(&self, go_on: bool) -> bool {
-        let mut moment = self.moment();
-        if !matches!(*moment, Moment::Asking(_)) {
-            return false;
-        }
-        *moment = if go_on {
-            Moment::Scanning
-        } else {
-            Moment::Stopping { ignored_one: false }
-        };
-        true
+    /// Takes the question for the typed answer, unless an interrupt answered
+    /// first; says whether it did.
+    fn answer(&self) -> bool {
+        matches!(std::mem::take(&mut *self.moment()), Moment::Asking(_))
     }
 
     #[cfg(test)]
@@ -205,7 +189,7 @@ fn terminal_ask<R: BufRead, W: Write>(
             let mut line = String::new();
             let _ = input().read_line(&mut line);
             let go_on = is_yes(&line);
-            if reader.answer(go_on) {
+            if reader.answer() {
                 let _ = reply.send(Reply::Answered(go_on));
             }
         });
@@ -706,44 +690,53 @@ fn finding_line(f: &Finding) -> String {
 }
 
 fn print_usage() {
-    eprintln!("stealth-cli – Bitcoin UTXO privacy vulnerability scanner\n");
-    eprintln!("USAGE:");
-    eprintln!("  stealth-cli scan [OPTIONS]\n");
-    eprintln!("SCAN INPUT (one required, mutually exclusive):");
-    eprintln!("  --descriptor <DESC>      Output descriptor OR bare extended public key");
-    eprintln!("  --descriptors <FILE>     JSON array of descriptors");
-    eprintln!("  --utxos <FILE>           JSON array of {{txid,vout,...}}");
-    eprintln!("                           May be combined with --descriptors, which then");
-    eprintln!("                           act as ownership context for the analysis\n");
-    eprintln!("DESCRIPTOR OPTIONS:");
-    eprintln!("  --cache-wallet           Keep a persistent watch-only wallet keyed to");
-    eprintln!("                           the descriptors so repeat scans skip the full");
-    eprintln!("                           rescan (default: off, wallet is discarded).");
-    eprintln!("                           Trade-off: this writes the viewing key (xpub)");
-    eprintln!("                           into Core's wallet DB in plaintext and leaves a");
-    eprintln!("                           durable _stealth_cache_<hash> wallet revealing");
-    eprintln!("                           the descriptors were scanned. Use only on a");
-    eprintln!("                           node you trust.\n");
-    eprintln!("HISTORY LIMIT:");
-    eprintln!("  --max-txs <N>            Stop before loading a wallet history of more");
-    eprintln!("                           than N transactions (default: 5000). Loading a");
-    eprintln!("                           large history can take long and put a heavy");
-    eprintln!("                           load on the node. In a terminal the scan asks");
-    eprintln!("                           whether to go on instead of stopping; Ctrl-C");
-    eprintln!("                           there counts as no.");
-    eprintln!("  --no-limits              Lift the limit\n");
-    eprintln!("RPC CONNECTION:");
-    eprintln!("  --rpc-url <URL>          bitcoind RPC endpoint");
-    eprintln!("  --rpc-user <USER>        RPC username");
-    eprintln!("  --rpc-cookie <PATH>      Path to .cookie file (recommended)\n");
-    eprintln!("  Env vars: STEALTH_RPC_URL, STEALTH_RPC_USER,");
-    eprintln!("            STEALTH_RPC_PASS, STEALTH_RPC_COOKIE\n");
-    eprintln!("OUTPUT:");
-    eprintln!("  --format <text|json>     Output format (default: text)\n");
-    eprintln!("EXIT CODES:");
-    eprintln!("  0  scan completed, no findings");
-    eprintln!("  1  scan completed, findings present");
-    eprintln!("  2  error");
+    eprint!("{}", usage());
+}
+
+fn usage() -> String {
+    [
+        "stealth-cli – Bitcoin UTXO privacy vulnerability scanner\n",
+        "USAGE:",
+        "  stealth-cli scan [OPTIONS]\n",
+        "SCAN INPUT (one required, mutually exclusive):",
+        "  --descriptor <DESC>      Output descriptor OR bare extended public key",
+        "  --descriptors <FILE>     JSON array of descriptors",
+        "  --utxos <FILE>           JSON array of {txid,vout,...}",
+        "                           May be combined with --descriptors, which then",
+        "                           act as ownership context for the analysis\n",
+        "DESCRIPTOR OPTIONS:",
+        "  --cache-wallet           Keep a persistent watch-only wallet keyed to",
+        "                           the descriptors so repeat scans skip the full",
+        "                           rescan (default: off, wallet is discarded).",
+        "                           Trade-off: this writes the viewing key (xpub)",
+        "                           into Core's wallet DB in plaintext and leaves a",
+        "                           durable _stealth_cache_<hash> wallet revealing",
+        "                           the descriptors were scanned. Use only on a",
+        "                           node you trust.\n",
+        "HISTORY LIMIT:",
+        "  --max-txs <N>            Stop before loading a history of more than N",
+        "                           transactions (default: 5000): the wallet's history,",
+        "                           or in UTXO mode, the history of the pasted outputs'",
+        "                           addresses. Loading a large history can take long",
+        "                           and put a heavy load on the node. In a terminal",
+        "                           the scan asks whether to go on instead of",
+        "                           stopping; Ctrl-C there counts as no.",
+        "  --no-limits              Lift the limit\n",
+        "RPC CONNECTION:",
+        "  --rpc-url <URL>          bitcoind RPC endpoint",
+        "  --rpc-user <USER>        RPC username",
+        "  --rpc-cookie <PATH>      Path to .cookie file (recommended)\n",
+        "  Env vars: STEALTH_RPC_URL, STEALTH_RPC_USER,",
+        "            STEALTH_RPC_PASS, STEALTH_RPC_COOKIE\n",
+        "OUTPUT:",
+        "  --format <text|json>     Output format (default: text)\n",
+        "EXIT CODES:",
+        "  0  scan completed, no findings",
+        "  1  scan completed, findings present",
+        "  2  error",
+    ]
+    .join("\n")
+        + "\n"
 }
 
 #[cfg(test)]

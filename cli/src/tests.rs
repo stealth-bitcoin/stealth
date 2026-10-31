@@ -856,11 +856,7 @@ mod history_limit {
             "an answered interrupt does not exit"
         );
         assert!(asking.join().unwrap().is_err());
-        assert!(
-            !interrupts.interrupt(),
-            "the next interrupt must not hide the stop's error"
-        );
-        assert!(interrupts.interrupt(), "the one after that exits");
+        assert!(interrupts.interrupt(), "the next interrupt exits");
     }
 
     #[test]
@@ -883,10 +879,8 @@ mod history_limit {
     }
 
     #[test]
-    fn after_a_typed_no_one_interrupt_is_ignored_and_the_next_exits() {
-        let interrupts = interrupts_after_answering("n\n");
-        assert!(!interrupts.interrupt());
-        assert!(interrupts.interrupt());
+    fn after_a_typed_no_the_next_interrupt_exits() {
+        assert!(interrupts_after_answering("n\n").interrupt());
     }
 
     #[test]
@@ -894,7 +888,7 @@ mod history_limit {
         let interrupts = Interrupts::default();
         let (reply, _answer) = std::sync::mpsc::channel();
         interrupts.begin_asking(reply);
-        assert!(interrupts.answer(true), "the typed answer came first");
+        assert!(interrupts.answer(), "the typed answer came first");
         assert!(interrupts.interrupt(), "an interrupt in the gap exits");
     }
 
@@ -904,10 +898,9 @@ mod history_limit {
         let (reply, answer) = std::sync::mpsc::channel();
         interrupts.begin_asking(reply);
         assert!(!interrupts.interrupt());
-        assert!(!interrupts.answer(true), "the interrupt answered first");
+        assert!(!interrupts.answer(), "the interrupt answered first");
         assert!(matches!(answer.try_recv(), Ok(Reply::Interrupted)));
-        assert!(!interrupts.interrupt(), "one ignored after the no");
-        assert!(interrupts.interrupt());
+        assert!(interrupts.interrupt(), "the next interrupt exits");
     }
 
     #[test]
@@ -967,5 +960,24 @@ mod history_limit {
         };
         let ask: AskToGoOn = Arc::new(|_, _, _| true);
         assert!(opts.history_limit(Some(ask)).ask.is_none());
+    }
+}
+
+mod usage {
+    use crate::*;
+
+    #[test]
+    fn max_txs_says_whose_history_it_limits() {
+        let text = usage();
+        let flag = text.find("--max-txs <N>").expect("--max-txs in the help");
+        let entry = &text[flag..text[flag..]
+            .find("--no-limits")
+            .map_or(text.len(), |end| flag + end)];
+        let entry = entry.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(entry.contains("the wallet's history"), "{entry}");
+        assert!(
+            entry.contains("in UTXO mode, the history of the pasted outputs' addresses"),
+            "{entry}"
+        );
     }
 }
