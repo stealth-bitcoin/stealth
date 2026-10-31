@@ -7,10 +7,10 @@ afterEach(cleanup)
 
 // Mirrors Report::new in model/src/types.rs: a scan is clean only when it
 // analyzed something and found nothing.
-function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0, conflicted = [], replaced = [], abandoned = [] } = {}) {
+function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0, conflicted = [], replaced = [], abandoned = [], unavailable = [] } = {}) {
   const analyzedNothing = txs === 0
   return {
-    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved, conflicted_txids: conflicted, mempool_conflicted_txids: replaced, abandoned_txids: abandoned },
+    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved, conflicted_txids: conflicted, mempool_conflicted_txids: replaced, abandoned_txids: abandoned, unavailable_txids: unavailable },
     findings,
     warnings,
     summary: {
@@ -476,5 +476,36 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
     delete report.stats.abandoned_txids
     show(report)
     expect(screen.queryByText(/replaced|abandoned/i)).toBeNull()
+  })
+})
+
+describe('ReportScreen — unconfirmed transactions the node no longer has', () => {
+  const original = '515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb'
+  const other = 'a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab'
+  const show = (report) => render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+
+  it('names one and says why it was left out', () => {
+    show(makeReport({ txs: 2, unavailable: [original] }))
+    expect(screen.getByText(/left out 1 transaction that is unconfirmed and that this node no longer has \(it may have expired or been evicted from the mempool, or never been broadcast\)\. it may still confirm; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+  })
+
+  it('counts several', () => {
+    show(makeReport({ txs: 2, unavailable: [original, other] }))
+    expect(screen.getByText(/left out 2 transactions that are unconfirmed and that this node no longer has \(they may have expired or been evicted from the mempool, or never been broadcast\)\. they may still confirm; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
+    expect(screen.getByText(other)).toBeTruthy()
+  })
+
+  it('gives no empty-scan hint when every transaction was left out this way', () => {
+    show(makeReport({ txs: 0, unavailable: [original] }))
+    expect(screen.getByText(/nothing else was left to analyze/i)).toBeTruthy()
+    expect(screen.queryByText(/no transactions found for this input/i)).toBeNull()
+  })
+
+  it('says nothing when the report predates the field', () => {
+    const report = makeReport({ txs: 2 })
+    delete report.stats.unavailable_txids
+    show(report)
+    expect(screen.queryByText(/no longer has/i)).toBeNull()
   })
 })

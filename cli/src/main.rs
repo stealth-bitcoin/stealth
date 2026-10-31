@@ -263,8 +263,8 @@ fn text_report(report: &stealth_engine::Report) -> String {
                   with another one",
             many: "Core reports as conflicted: each, or a transaction it depends on, conflicts \
                    with another one",
-            before_one: "it became conflicted",
-            before_many: "they became conflicted",
+            before_one: Some("it became conflicted"),
+            before_many: Some("they became conflicted"),
         },
     );
     let in_mempool_conflict: Vec<String> = stats
@@ -284,8 +284,8 @@ fn text_report(report: &stealth_engine::Report) -> String {
             settled: false,
             one: "that conflicts, or depends on one that conflicts, with a transaction in the mempool",
             many: "that conflict, or depend on ones that conflict, with transactions in the mempool",
-            before_one: "the conflicting one reached the mempool",
-            before_many: "the conflicting ones reached the mempool",
+            before_one: Some("the conflicting one reached the mempool"),
+            before_many: Some("the conflicting ones reached the mempool"),
         },
     );
     let abandoned: Vec<String> = stats
@@ -300,14 +300,35 @@ fn text_report(report: &stealth_engine::Report) -> String {
             settled: false,
             one: "that was abandoned in the wallet",
             many: "that were abandoned in the wallet",
-            before_one: "it was abandoned",
-            before_many: "they were abandoned",
+            before_one: Some("it was abandoned"),
+            before_many: Some("they were abandoned"),
+        },
+    );
+
+    let unavailable: Vec<String> = stats
+        .unavailable_txids
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    left_out_note(
+        &mut lines,
+        &unavailable,
+        &LeftOutReason {
+            settled: false,
+            one: "that is unconfirmed and that this node no longer has (it may have expired or \
+                  been evicted from the mempool, or never been broadcast)",
+            many: "that are unconfirmed and that this node no longer has (they may have expired \
+                   or been evicted from the mempool, or never been broadcast)",
+            before_one: None,
+            before_many: None,
         },
     );
 
     // The notes say why nothing was analyzed; the empty-scan hint would contradict them.
-    let any_left_out =
-        !(conflicted.is_empty() && in_mempool_conflict.is_empty() && abandoned.is_empty());
+    let any_left_out = !(conflicted.is_empty()
+        && in_mempool_conflict.is_empty()
+        && abandoned.is_empty()
+        && unavailable.is_empty());
     if is_empty_report(&report.summary) && any_left_out {
         lines.push("Nothing else was left to analyze.".to_owned());
         return lines.join("\n") + "\n";
@@ -347,8 +368,9 @@ struct LeftOutReason {
     settled: bool,
     one: &'static str,
     many: &'static str,
-    before_one: &'static str,
-    before_many: &'static str,
+    /// What the network may have seen the tx before, when it was broadcast.
+    before_one: Option<&'static str>,
+    before_many: Option<&'static str>,
 }
 
 /// A note naming the wallet txs a scan left out, one per line, and why.
@@ -383,9 +405,11 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
             ". {may} may still confirm; until then {part} not part of the history the wallet sees."
         )
     };
+    let seen = before.map_or(String::new(), |before| {
+        format!(" {may} may still have been seen by the network before {before};")
+    });
     lines.push(format!(
-        "Left out {count} {why}{standing} {may} may still have been seen by the network before \
-         {before}; Stealth does not analyze {them}."
+        "Left out {count} {why}{standing}{seen} Stealth does not analyze {them}."
     ));
     lines.extend(items.iter().map(|item| format!("  {item}")));
     lines.push(String::new());

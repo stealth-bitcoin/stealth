@@ -531,6 +531,50 @@ mod ordering {
     }
 
     #[test]
+    fn the_text_report_names_unconfirmed_txs_the_node_no_longer_has() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.unavailable_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction that is unconfirmed and that this node no longer has (it \
+                 may have expired or been evicted from the mempool, or never been broadcast). It \
+                 may still confirm; until then it is not part of the history the wallet sees. \
+                 Stealth does not analyze it.\n  {CONFLICTED}\n"
+            )),
+            "{text}"
+        );
+        clean
+            .stats
+            .unavailable_txids
+            .push(REPLACEMENT.parse().unwrap());
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 2 transactions that are unconfirmed and that this node no longer has \
+                 (they may have expired or been evicted from the mempool, or never been \
+                 broadcast). They may still confirm; until then they are not part of the history \
+                 the wallet sees. Stealth does not analyze them.\n  {CONFLICTED}\n  \
+                 {REPLACEMENT}\n"
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_scan_whose_every_tx_was_unavailable_gives_no_empty_scan_hint() {
+        let mut stats = report(Vec::new(), Vec::new()).stats;
+        stats.transactions_analyzed = 0;
+        stats.unavailable_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
+        assert!(
+            text.ends_with("\n\nNothing else was left to analyze.\n"),
+            "{text}"
+        );
+        assert!(!text.contains("No transactions found"), "{text}");
+    }
+
+    #[test]
     fn a_report_without_conflicted_txs_has_no_note() {
         let text = text_report(&report(Vec::new(), Vec::new()));
         assert!(!text.contains("conflicted"), "{text}");

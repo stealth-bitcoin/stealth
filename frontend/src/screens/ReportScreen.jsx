@@ -154,6 +154,14 @@ const LEFT_OUT = {
     beforeOne: 'it was abandoned',
     beforeMany: 'they were abandoned',
   },
+  // A tx never broadcast was not seen, so this note says nothing about the network.
+  unavailable: {
+    settled: false,
+    one: 'that is unconfirmed and that this node no longer has (it may have expired or been evicted from the mempool, or never been broadcast)',
+    many: 'that are unconfirmed and that this node no longer has (they may have expired or been evicted from the mempool, or never been broadcast)',
+    beforeOne: null,
+    beforeMany: null,
+  },
 }
 
 function LeftOutNote({ items, reason }) {
@@ -167,9 +175,9 @@ function LeftOutNote({ items, reason }) {
         {reason.settled
           ? `, so ${one ? 'it is' : 'they are'} not part of the wallet's history.`
           : `. ${one ? 'It' : 'They'} may still confirm; until then ${one ? 'it is' : 'they are'} not part of the history the wallet sees.`}{' '}
-        {one ? 'It' : 'They'} may still have been seen by the network
-        before {one ? reason.beforeOne : reason.beforeMany}; Stealth does not
-        analyze {one ? 'it' : 'them'}.
+        {reason.beforeOne &&
+          `${one ? 'It' : 'They'} may still have been seen by the network before ${one ? reason.beforeOne : reason.beforeMany}; `}
+        Stealth does not analyze {one ? 'it' : 'them'}.
       </p>
       <ul className={styles.txidList}>
         {items.map((item) => (
@@ -188,7 +196,9 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
     (r) => `${r.txid}: it, or a transaction it depends on, conflicts with ${r.conflicts_with}, which is in the mempool and not confirmed yet`,
   )
   const abandoned = stats.abandoned_txids ?? []
-  const anyLeftOut = conflicted.length + inMempoolConflict.length + abandoned.length > 0
+  const unavailable = stats.unavailable_txids ?? []
+  const anyLeftOut =
+    conflicted.length + inMempoolConflict.length + abandoned.length + unavailable.length > 0
   const emptyScan = summary.analyzed_nothing && findings.length === 0 && warnings.length === 0
 
   return (
@@ -254,6 +264,7 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
         <LeftOutNote items={conflicted} reason={LEFT_OUT.conflicted} />
         <LeftOutNote items={inMempoolConflict} reason={LEFT_OUT.mempoolConflicted} />
         <LeftOutNote items={abandoned} reason={LEFT_OUT.abandoned} />
+        <LeftOutNote items={unavailable} reason={LEFT_OUT.unavailable} />
 
         {/* Nothing-analyzed banner; the notes above already say why, when they are shown */}
         {emptyScan && anyLeftOut && (
