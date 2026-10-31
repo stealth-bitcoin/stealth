@@ -88,8 +88,8 @@ pasted outputs plus that history, and runs the detectors. When the node cannot
 serve the history, the scan completes on the pasted outputs alone and
 `stats.addresses_without_history` says how many addresses that affected.
 
-**Transactions left out:** some wallet transactions are left out of the
-analysis in any scan and listed in `stats`, as hex txids:
+**Transactions left out:** a scan leaves some wallet transactions out of the
+analysis and lists them in `stats`, as hex txids:
 `conflicted_txids` for those Core reports at negative confirmations (it, or a
 transaction it depends on, conflicts with another one), `mempool_conflicted_txids`
 for unconfirmed ones a transaction in the mempool conflicts with, such as the
@@ -110,7 +110,10 @@ answers with any error other than not found. `mempoolconflicts`,
 which `mempool_conflicted_txids` relies on, appeared in Bitcoin Core 28.0; on
 an older node an unmined fee bump's original lands in `unavailable_txids`. A
 scan that hits an unconfirmed transaction the node does not have while the
-node is still loading its mempool fails, asking to scan again later. A fresh scan wallet
+node is still loading its mempool fails, asking to scan again later; otherwise
+those transactions are fetched once more and only what is still missing is
+listed. This adds a `getmempoolinfo` call, made only when an unconfirmed
+transaction is missing; a node that refuses it is treated as having loaded. A fresh scan wallet
 only sees the active chain and the mempool, so through this API the lists can
 be non-empty only for a scan with `cache_wallet`, whose wallet was watching
 when these transactions were in the mempool.
