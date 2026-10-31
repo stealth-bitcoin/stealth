@@ -722,12 +722,12 @@ fn big_tx(id: u32, vins: &[(u32, u32)], vouts: Vec<TxOutput>) -> DecodedTransact
 
 #[test]
 fn many_chains_merging_into_one_tail_are_one_finding() {
-    // T1 to T4000 form one chain; each T(i) from T2 on also spends the change
-    // of its own one-input peel S(i), so 4,000 chains share T(i).. as a tail.
+    // T1 to T8000 form one chain; each T(i) from T2 on also spends the change
+    // of its own one-input peel S(i), so 8,000 chains share T(i).. as a tail.
     // A covering pass that does not stop at covered txs takes far longer.
-    const N: u32 = 4_000;
+    const N: u32 = 8_000;
     let thresholds = DetectorThresholds {
-        peel_chain_max_hops: 10_000,
+        peel_chain_max_hops: 20_000,
         ..DetectorThresholds::default()
     };
     let (t, s, g) = (|i: u32| i, |i: u32| 100_000 + i, |i: u32| 200_000 + i);
