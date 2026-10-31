@@ -421,6 +421,152 @@ fn a_utxo_scan_sees_dust_given_away_alone_through_the_address_history() {
     );
 }
 
+/// Alice leaves 600 sats of change at `a`, then spends it with 20,000 sats at `a` and a
+/// 30,000-sat coin of `third` (hers or Bob's), and receives 50,000 sats at `a`. Returns the
+/// node, the address of the third coin, and that last coin as a pasted UTXO.
+fn dust_merged_with_a_third_coin(
+    third_is_alices: bool,
+) -> (Node, Address, Address, stealth_engine::engine::UtxoInput) {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let a = alice.new_address().unwrap();
+
+    let first = fund_coins_at(&node, &alice, vec![a.clone()], 100_000);
+    spend_raw(
+        &node,
+        &alice,
+        &first,
+        &[
+            Output::new(bob.new_address().unwrap(), Amount::from_sat(89_400)),
+            Output::new(a.clone(), Amount::from_sat(600)),
+        ],
+        &da,
+    );
+    let change = alice
+        .list_unspent()
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|u| (u.amount * 1e8).round() as u64 == 600)
+        .map(|u| Input {
+            txid: u.txid.parse().unwrap(),
+            vout: u.vout as u64,
+            sequence: None,
+        })
+        .expect("the 600-sat change");
+    let mid = fund_coins_at(&node, &alice, vec![a.clone()], 20_000).remove(0);
+    let (owner, third) = if third_is_alices {
+        (&alice, alice.new_address().unwrap())
+    } else {
+        (&bob, bob.new_address().unwrap())
+    };
+    let other = fund_coins_at(&node, owner, vec![third.clone()], 30_000).remove(0);
+    spend(
+        &node,
+        &[&alice, &bob],
+        &[change, mid, other],
+        &[Output::new(
+            node.client.new_address().unwrap(),
+            Amount::from_sat(40_000),
+        )],
+    );
+
+    let last = fund_coins_at(&node, &alice, vec![a.clone()], 50_000).remove(0);
+    let pasted = stealth_engine::engine::UtxoInput {
+        txid: last.txid,
+        vout: last.vout as u32,
+        value: None,
+        address: None,
+    };
+    (node, a, third, pasted)
+}
+
+/// The finding of `vtype` in `report`, which must be there.
+fn finding_of(
+    report: &stealth_engine::Report,
+    vtype: VulnerabilityType,
+) -> &stealth_engine::Finding {
+    report
+        .findings
+        .iter()
+        .find(|f| f.vulnerability_type == vtype)
+        .unwrap_or_else(|| panic!("no {vtype:?}: {:?}", report.findings))
+}
+
+#[test]
+fn a_utxo_scan_reports_dust_merged_with_a_coin_it_cannot_attribute() {
+    let (node, a, b, pasted) = dust_merged_with_a_third_coin(true);
+    let gateway = gateway_for(&node);
+    let report = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted]))
+        .unwrap();
+
+    let dust = finding_of(&report, VulnerabilityType::DustSpending);
+    assert_eq!(dust.severity, stealth_engine::Severity::Medium, "{dust:?}");
+    assert!(
+        dust.description.contains(&format!(
+            "this ties the dust to {b}, if that address is yours"
+        )),
+        "{}",
+        dust.description
+    );
+    let toxic = finding_of(&report, VulnerabilityType::ToxicChange);
+    assert_eq!(
+        toxic.severity,
+        stealth_engine::Severity::Medium,
+        "{toxic:?}"
+    );
+    assert!(
+        toxic.description.contains(&format!(
+            "which ties {b} to the change's address {a}, if that address is yours"
+        )),
+        "{}",
+        toxic.description
+    );
+
+    // The wallet scan knows the third coin is Alice's, so the ties are certain.
+    let report = scan_wallet(&gateway, "alice");
+    let dust = finding_of(&report, VulnerabilityType::DustSpending);
+    assert_eq!(dust.severity, stealth_engine::Severity::High, "{dust:?}");
+    let toxic = finding_of(&report, VulnerabilityType::ToxicChange);
+    assert_eq!(toxic.severity, stealth_engine::Severity::High, "{toxic:?}");
+    assert!(
+        toxic
+            .description
+            .contains(&format!("which ties {b} to the change's address {a}")),
+        "{}",
+        toxic.description
+    );
+}
+
+#[test]
+fn a_wallet_scan_does_not_count_a_strangers_coin_in_the_merge() {
+    let (node, _, _, pasted) = dust_merged_with_a_third_coin(false);
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    for kind in [
+        VulnerabilityType::DustSpending,
+        VulnerabilityType::ToxicChange,
+    ] {
+        assert!(
+            !has_finding(&report, kind),
+            "{kind:?}: {:?}",
+            report.findings
+        );
+    }
+    // A UTXO scan cannot tell Bob's coin from one of Alice's other addresses.
+    let report = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted]))
+        .unwrap();
+    assert_eq!(
+        finding_of(&report, VulnerabilityType::DustSpending).severity,
+        stealth_engine::Severity::Medium
+    );
+}
+
 // ─── 13. Dust Attack Detection ─────────────────────────────────────────────
 //
 // Dust-attack detection is folded into the Dust detector: when a dust

@@ -122,14 +122,49 @@ fn dust_spent_with_a_coin_at_its_own_address_links_nothing_new() {
 }
 
 #[test]
-fn a_strangers_input_does_not_make_one_address_dust_spending() {
+fn a_strangers_input_does_not_make_one_address_dust_spending_in_a_descriptor_scan() {
     let a = wpkh(1);
     let stranger = wpkh(200);
-    let findings = dust_spending(spend_of(
-        &[(&a, 546), (&a, 44_980), (&stranger, 30_000)],
-        &[&a],
-    ));
+    let mut history = spend_of(&[(&a, 546), (&a, 44_980), (&stranger, 30_000)], &[&a]);
+    // A ranged descriptor derived `a`, so the scan knows the wallet's other addresses.
+    history.ranged_addresses = HashSet::from([a.clone()]);
+    let findings = dust_spending(history);
     assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn a_partial_scan_counts_an_unattributed_input_as_possibly_another_address() {
+    let a = wpkh(1);
+    let b = wpkh(200);
+    let findings = dust_spending(spend_of(&[(&a, 600), (&a, 20_000), (&b, 30_000)], &[&a]));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert_eq!(f.severity, Severity::Medium, "{f:?}");
+    let b_text = b.assume_checked_ref().to_string();
+    assert!(
+        f.description.contains(&format!(
+            "this ties the dust to {b_text}, if that address is yours"
+        )),
+        "{}",
+        f.description
+    );
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(
+        details["possibly_joined_addresses"],
+        serde_json::json!([b_text])
+    );
+    assert_eq!(details["dust_inputs"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn a_known_other_address_keeps_dust_spending_high_in_a_partial_scan() {
+    let (a, b, c) = (wpkh(1), wpkh(2), wpkh(200));
+    let findings = dust_spending(spend_of(
+        &[(&a, 600), (&a, 20_000), (&b, 5_000), (&c, 30_000)],
+        &[&a, &b],
+    ));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].severity, Severity::High);
 }
 
 #[test]

@@ -457,24 +457,49 @@ impl TxGraph {
                 }
             }
 
-            // Dust is newly tied only to own addresses other than its own.
-            let own: Vec<_> = input_addrs
-                .iter()
-                .filter(|ia| self.is_ours(&ia.address))
-                .collect();
-            dust_inputs.retain(|d| own.iter().any(|o| o.address != d.address));
+            // Dust is newly tied only to addresses other than its own.
+            let mut certain = false;
+            let mut possible: Vec<String> = Vec::new();
+            dust_inputs.retain(|d| {
+                let (own, unattributed) = self.joined_addresses(txid, &d.address);
+                certain |= !own.is_empty();
+                for address in &unattributed {
+                    if !possible.contains(address) {
+                        possible.push(address.clone());
+                    }
+                }
+                !own.is_empty() || !unattributed.is_empty()
+            });
             if !dust_inputs.is_empty() && !normal_inputs.is_empty() {
+                let mut description = format!(
+                    "TX {} spends {} dust input(s) alongside {} normal input(s)",
+                    txid,
+                    dust_inputs.len(),
+                    normal_inputs.len()
+                );
+                if !certain {
+                    description.push_str(&format!(
+                        "; this ties the dust to {}, if {} yours",
+                        possible.join(", "),
+                        if possible.len() == 1 {
+                            "that address is"
+                        } else {
+                            "those addresses are"
+                        }
+                    ));
+                }
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::DustSpending,
-                    severity: Severity::High,
-                    description: format!(
-                        "TX {} spends {} dust input(s) alongside {} normal input(s)",
-                        txid,
-                        dust_inputs.len(),
-                        normal_inputs.len()
-                    ),
+                    // A tie only to addresses the scan cannot attribute may not be the user's.
+                    severity: if certain {
+                        Severity::High
+                    } else {
+                        Severity::Medium
+                    },
+                    description,
                     details: Some(json!({
                         "txid": txid,
+                        "possibly_joined_addresses": possible,
                         "dust_inputs": dust_inputs.iter().map(|d| {
                             json!({"address": d.address.assume_checked_ref().to_string(), "sats": d.value.to_sat()})
                         }).collect::<Vec<_>>(),

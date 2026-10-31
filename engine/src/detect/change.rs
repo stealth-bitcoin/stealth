@@ -236,30 +236,49 @@ impl TxGraph {
                 if !own.iter().any(|ci| ci.value > toxic_upper) {
                     continue;
                 }
-                // Only own addresses other than the change's are newly tied to it.
-                let mut tied: Vec<String> = Vec::new();
-                for ci in own.iter().filter(|ci| ci.address != out.address) {
-                    let address = ci.address.assume_checked_ref().to_string();
-                    if !tied.contains(&address) {
-                        tied.push(address);
-                    }
-                }
-                if tied.is_empty() {
+                // Only addresses other than the change's are newly tied to it.
+                let (tied, possibly_tied) = self.joined_addresses(&child_txid, &out.address);
+                if tied.is_empty() && possibly_tied.is_empty() {
                     continue;
                 }
+                let if_yours = if possibly_tied.len() == 1 {
+                    "if that address is yours"
+                } else {
+                    "if those addresses are yours"
+                };
+                let ties = match (tied.is_empty(), possibly_tied.is_empty()) {
+                    (false, true) => format!(
+                        "which ties {} to the change's address {}",
+                        tied.join(", "),
+                        out.address.assume_checked_ref()
+                    ),
+                    (false, false) => format!(
+                        "which ties {} to the change's address {}; it also ties {} to it, {}",
+                        tied.join(", "),
+                        out.address.assume_checked_ref(),
+                        possibly_tied.join(", "),
+                        if_yours
+                    ),
+                    _ => format!(
+                        "which ties {} to the change's address {}, {}",
+                        possibly_tied.join(", "),
+                        out.address.assume_checked_ref(),
+                        if_yours
+                    ),
+                };
 
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::ToxicChange,
-                    severity: Severity::High,
+                    // A tie only to addresses the scan cannot attribute may not be the user's.
+                    severity: if tied.is_empty() {
+                        Severity::Medium
+                    } else {
+                        Severity::High
+                    },
                     description: format!(
                         "Toxic change ({} sats) from TX {}:{} was later spent with a larger \
-                         coin in TX {}, which ties {} to the change's address {}",
-                        sats,
-                        txid,
-                        out.index,
-                        child_txid,
-                        tied.join(", "),
-                        out.address.assume_checked_ref(),
+                         coin in TX {}, {}",
+                        sats, txid, out.index, child_txid, ties
                     ),
                     details: Some(json!({
                         "source_txid": txid.to_string(),
@@ -269,6 +288,7 @@ impl TxGraph {
                         "spending_txid": child_txid.to_string(),
                         "total_inputs_in_child": child_inputs.len(),
                         "tied_addresses": tied,
+                        "possibly_tied_addresses": possibly_tied,
                     })),
                     correction: Some(format!(
                         "Freeze small change like this in your wallet from now on and never \

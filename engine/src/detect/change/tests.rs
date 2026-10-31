@@ -557,6 +557,32 @@ fn toxic_findings_with(
     extra: Vec<Coin>,
     also_ours: &[&Address<NetworkUnchecked>],
 ) -> Vec<Finding> {
+    toxic_run(toxic_history(
+        change_sats,
+        big_sats,
+        a,
+        big,
+        extra,
+        also_ours,
+    ))
+}
+
+fn toxic_run(history: WalletHistory) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    TxGraph::from_wallet_history(history)
+        .detect_toxic_change(&DetectorThresholds::default(), &mut findings);
+    findings
+}
+
+/// The history behind [`toxic_findings_with`], from a scan that knows only the given addresses.
+fn toxic_history(
+    change_sats: u64,
+    big_sats: u64,
+    a: &Address<NetworkUnchecked>,
+    big: &Address<NetworkUnchecked>,
+    extra: Vec<Coin>,
+    also_ours: &[&Address<NetworkUnchecked>],
+) -> WalletHistory {
     let mut coins = vec![coin(a, change_sats), coin(big, big_sats)];
     coins.extend(extra);
     let mut ours = vec![a, big];
@@ -578,10 +604,7 @@ fn toxic_findings_with(
             coinbase: false,
         });
     }
-    let mut findings = Vec::new();
-    TxGraph::from_wallet_history(history)
-        .detect_toxic_change(&DetectorThresholds::default(), &mut findings);
-    findings
+    history
 }
 
 #[test]
@@ -598,10 +621,59 @@ fn small_change_merged_with_a_coin_at_its_own_address_links_nothing_new() {
 }
 
 #[test]
-fn a_strangers_input_does_not_make_one_address_toxic() {
+fn a_strangers_input_does_not_make_one_address_toxic_in_a_descriptor_scan() {
     let a = wpkh(1);
-    let findings = toxic_findings(&a, &a, vec![coin(&wpkh(200), 30_000)], &[]);
+    let mut history = toxic_history(600, 50_000, &a, &a, vec![coin(&wpkh(200), 30_000)], &[]);
+    // A ranged descriptor derived `a`, so the scan knows the wallet's other addresses.
+    history.ranged_addresses = HashSet::from([a.clone()]);
+    let findings = toxic_run(history);
     assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn a_partial_scan_names_an_unattributed_input_as_possibly_tied() {
+    let a = wpkh(1);
+    let b = wpkh(200);
+    let text = |x: &Address<NetworkUnchecked>| x.assume_checked_ref().to_string();
+    let findings = toxic_findings(&a, &a, vec![coin(&b, 30_000)], &[]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert_eq!(f.severity, crate::types::Severity::Medium, "{f:?}");
+    assert!(
+        f.description.contains(&format!(
+            "which ties {} to the change's address {}, if that address is yours",
+            text(&b),
+            text(&a)
+        )),
+        "{}",
+        f.description
+    );
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(details["tied_addresses"], serde_json::json!([]));
+    assert_eq!(
+        details["possibly_tied_addresses"],
+        serde_json::json!([text(&b)])
+    );
+}
+
+#[test]
+fn a_partial_scan_keeps_a_known_tie_high_and_adds_the_unattributed_one() {
+    let (a, b, c) = (wpkh(1), wpkh(2), wpkh(200));
+    let text = |x: &Address<NetworkUnchecked>| x.assume_checked_ref().to_string();
+    let findings = toxic_findings(&a, &b, vec![coin(&c, 30_000)], &[]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert_eq!(f.severity, crate::types::Severity::High, "{f:?}");
+    assert!(
+        f.description.contains(&format!(
+            "which ties {} to the change's address {}; it also ties {} to it, if that address is yours",
+            text(&b),
+            text(&a),
+            text(&c)
+        )),
+        "{}",
+        f.description
+    );
 }
 
 #[test]
