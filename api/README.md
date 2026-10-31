@@ -35,6 +35,17 @@ STEALTH_RPC_COOKIE=~/.bitcoin/.cookie \
 
 Configure the listen address with `STEALTH_API_BIND` (default `127.0.0.1:20899`).
 
+Browsers may only call the API from loopback origins (`http://localhost`,
+`http://127.0.0.1` and `http://[::1]`, on any port), which covers the
+frontend's Vite dev server. To allow another web origin, pass it with
+`--allow-origin` (repeatable) or list it in `STEALTH_API_ALLOW_ORIGINS`
+(comma-separated). Each value is an exact origin, `scheme://host[:port]` with no
+path; the API refuses to start on a malformed one.
+
+```bash
+cargo run --bin stealth-api -- --allow-origin https://wallet.example.org
+```
+
 If you see `Connection refused (os error 111)`, either:
 1. an old `stealth-api` process is still running, or
 2. `bitcoind` RPC is not reachable on the detected/configured URL.
@@ -93,6 +104,7 @@ curl 'http://localhost:20899/api/wallet/scan' \
 | Variable | Description |
 |----------|-------------|
 | `STEALTH_API_BIND` | Listen address (default `127.0.0.1:20899`) |
+| `STEALTH_API_ALLOW_ORIGINS` | Extra web origins allowed by CORS, comma-separated (loopback origins are always allowed; same as repeating `--allow-origin`) |
 | `STEALTH_RPC_URL` | bitcoind RPC endpoint (overrides auto-detection) |
 | `STEALTH_RPC_USER` | RPC username (otherwise read from `bitcoin.conf` when available) |
 | `STEALTH_RPC_PASS` | RPC password (otherwise read from `bitcoin.conf` when available) |
