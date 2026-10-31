@@ -618,3 +618,74 @@ fn txs_expired_from_the_mempool_are_left_out_as_unavailable() {
     assert_eq!(cached.stats.unavailable_txids, vec![payment]);
     assert_eq!(cached.stats.transactions_analyzed, 0);
 }
+
+/// Spend `wallet`'s output `outpoint` worth `sats` to `to`, minus a 20,000-sat fee.
+fn spend_output(
+    wallet: &corepc_node::Client,
+    outpoint: (Txid, u32),
+    sats: u64,
+    to: &Address,
+) -> Txid {
+    let raw = wallet
+        .create_raw_transaction(
+            &[Input {
+                txid: outpoint.0,
+                vout: outpoint.1 as u64,
+                sequence: None,
+            }],
+            &[Output::new(to.clone(), Amount::from_sat(sats - 20_000))],
+        )
+        .unwrap();
+    let signed = wallet
+        .sign_raw_transaction_with_wallet(&raw.transaction().unwrap())
+        .unwrap();
+    let tx = signed.into_model().unwrap().tx;
+    wallet.send_raw_transaction(&tx).unwrap();
+    tx.compute_txid()
+}
+
+/// r is paid by mid out of an unconfirmed output from s; s then double-spends
+/// that output's source. r's wallet holds neither s's txs nor a conflict, so
+/// the payment can never confirm and is listed as unavailable.
+#[test]
+fn a_payment_whose_outside_parent_was_double_spent_is_left_out_as_unavailable() {
+    let node = node();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let (s, _) = fund_sender(&node, &miner, "s", 1_000_000);
+    let funding = s.list_unspent().unwrap().0.remove(0);
+    let funding: (Txid, u32) = (funding.txid.parse().unwrap(), funding.vout as u32);
+    let mid = node.create_wallet("mid").unwrap();
+    let r = node.create_wallet("r").unwrap();
+    let to_r = r.new_address().unwrap();
+    let gateway = gateway_for(&node);
+    let settings = EngineSettings {
+        persist_scan_wallet: true,
+        ..EngineSettings::default()
+    };
+    let descriptor = format!("addr({to_r})");
+    let cached_scan = || {
+        AnalysisEngine::new(&gateway, settings.clone())
+            .analyze(ScanTarget::Descriptor(descriptor.clone()))
+    };
+    cached_scan().expect("first scan");
+
+    let q = spend_output(&s, funding, 1_000_000, &mid.new_address().unwrap());
+    let payment = spend_output(&mid, (q, 0), 980_000, &to_r);
+    spend_output(&s, funding, 1_000_000 - 30_000, &s.new_address().unwrap());
+
+    let entry: Value = r
+        .call("gettransaction", &[json!(payment.to_string())])
+        .unwrap();
+    assert_eq!(entry["confirmations"], json!(0), "{entry}");
+    assert_eq!(entry["mempoolconflicts"], json!([]), "{entry}");
+
+    for when in ["in the mempool", "mined"] {
+        let report = scan_wallet(&gateway, "r");
+        assert_eq!(report.stats.unavailable_txids, vec![payment], "{when}");
+        assert!(report.stats.mempool_conflicted_txids.is_empty(), "{when}");
+        let cached = cached_scan().expect("cached scan");
+        assert_eq!(cached.stats.unavailable_txids, vec![payment], "{when}");
+        mine(&node, 1, &miner);
+    }
+}
