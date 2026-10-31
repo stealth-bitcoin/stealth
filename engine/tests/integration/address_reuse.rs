@@ -196,3 +196,37 @@ fn change_from_another_address_landing_on_a_used_one_says_so() {
         "{reuse}"
     );
 }
+
+#[test]
+fn change_to_a_fresh_address_paid_again_later_keeps_the_plain_correction() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let funded = alice.new_address().unwrap();
+    node.client
+        .send_to_address(&funded, Amount::ONE_BTC)
+        .unwrap();
+    mine(&node, 1, &da);
+    let fresh = alice.new_address().unwrap();
+    let payee = bob.new_address().unwrap();
+    spend_all(&alice, |sats| {
+        vec![
+            Output::new(payee.clone(), Amount::from_sat(30_000_000)),
+            Output::new(fresh.clone(), Amount::from_sat(sats - 30_000_000)),
+        ]
+    });
+    mine(&node, 1, &da);
+    node.client
+        .send_to_address(&fresh, Amount::ONE_BTC)
+        .unwrap();
+    mine(&node, 1, &da);
+
+    let report = scan_wallet(&gateway_for(&node), "alice");
+    let reuse = reuse_correction(&report, &fresh);
+    assert!(
+        reuse.starts_with("Generate a fresh address for every payment received."),
+        "{reuse}"
+    );
+}

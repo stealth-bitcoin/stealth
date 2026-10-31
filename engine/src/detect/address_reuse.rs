@@ -35,15 +35,27 @@ impl TxGraph {
                 } else {
                     "receive"
                 };
-                // One of the reuses is the change of a payment the user made.
-                let change_back = reuse_txids.iter().any(|t| {
-                    self.get_input_addresses(t)
+                // More confirmations means an earlier block; equal counts leave the order unknown.
+                let confirmations = |t: &Txid| {
+                    entries
                         .iter()
-                        .any(|ia| self.is_ours(&ia.address))
-                        && self
-                            .get_output_addresses(t)
+                        .find(|e| e.txid == *t)
+                        .map_or(0, |e| e.confirmations)
+                };
+                // A payment the user made sent its change back to the coin's own address,
+                // or onto this address after it had received in an earlier block.
+                let change_back = reuse_txids.iter().any(|t| {
+                    let inputs = self.get_input_addresses(t);
+                    let pays_out = self
+                        .get_output_addresses(t)
+                        .iter()
+                        .any(|o| !self.is_ours(&o.address));
+                    let back_to_input = inputs.iter().any(|ia| ia.address == *addr);
+                    let after_a_receive = inputs.iter().any(|ia| self.is_ours(&ia.address))
+                        && reuse_txids
                             .iter()
-                            .any(|o| !self.is_ours(&o.address))
+                            .any(|r| confirmations(r) > confirmations(t));
+                    pays_out && (back_to_input || after_a_receive)
                 });
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::AddressReuse,

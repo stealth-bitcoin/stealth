@@ -137,6 +137,34 @@ fn utxo_scan_counts_address_reuse_from_the_chain_not_from_the_pasted_outputs() {
 }
 
 #[test]
+fn utxo_scan_gives_the_change_advice_for_change_back_to_the_input_address() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let funded = alice.new_address().unwrap();
+    let reused = pay_with_change_back_to_input(&node, &alice, funded).to_string();
+
+    let gateway = gateway_for(&node);
+    let engine = AnalysisEngine::new(&gateway, EngineSettings::default());
+    let report = engine
+        .analyze(ScanTarget::Utxos(utxo_inputs_for(&alice)))
+        .expect("utxo scan failed");
+    let reuse: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.vulnerability_type == VulnerabilityType::AddressReuse)
+        .filter(|f| f.details.as_ref().unwrap()["address"] == reused.as_str())
+        .collect();
+    assert_eq!(reuse.len(), 1, "{:?}", report.findings);
+    let correction = reuse[0].correction.as_deref().unwrap();
+    assert!(
+        correction.starts_with("Change came back to this address from your own spends"),
+        "{correction}"
+    );
+}
+
+#[test]
 fn utxo_scan_on_a_node_without_wallet_support_reports_the_history_caveat() {
     let exe = corepc_node::exe_path().expect("bitcoind not found");
     let mut conf = corepc_node::Conf::default();
