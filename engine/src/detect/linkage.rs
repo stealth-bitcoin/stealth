@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::{Address, Txid};
 use serde_json::json;
 
 use crate::config::DetectorThresholds;
@@ -94,6 +96,9 @@ impl TxGraph {
 
             // Trace each input one hop back to find funding sources.
             let mut funding_sources: HashMap<String, HashSet<String>> = HashMap::new();
+            // Per input: funding tx plus its parents, its own address and its payers, coinbase flag.
+            let mut ancestries: Vec<(HashSet<Txid>, HashSet<Address<NetworkUnchecked>>, bool)> =
+                Vec::new();
             for ia in &our_in {
                 let parent_tx = match self.fetch_tx(&ia.funding_txid) {
                     Some(t) => t,
@@ -111,47 +116,68 @@ impl TxGraph {
                 let ftxid = ia.funding_txid.to_string();
                 let key = format!("{}:{}", &ftxid[..16], ia.funding_vout);
                 funding_sources.insert(key, gp_sources);
+
+                let mut txs: HashSet<Txid> = parent_tx
+                    .vin
+                    .iter()
+                    .filter(|v| !v.coinbase)
+                    .map(|v| v.previous_txid)
+                    .collect();
+                txs.insert(ia.funding_txid);
+                let mut addrs: HashSet<Address<NetworkUnchecked>> = self
+                    .get_input_addresses(&ia.funding_txid)
+                    .into_iter()
+                    .map(|p| p.address)
+                    .collect();
+                addrs.insert(ia.address.clone());
+                let coinbase = parent_tx.vin.iter().any(|v| v.coinbase);
+                ancestries.push((txs, addrs, coinbase));
             }
 
-            let all_sources: Vec<&HashSet<String>> = funding_sources.values().collect();
-            if all_sources.len() >= 2 {
-                let mut merged = false;
-                'outer: for i in 0..all_sources.len() {
-                    for j in (i + 1)..all_sources.len() {
-                        if all_sources[i].is_disjoint(all_sources[j]) {
-                            merged = true;
-                            break 'outer;
+            // Inputs whose ancestries share a tx, an address or a coinbase origin are one chain.
+            let mut chain: Vec<usize> = (0..ancestries.len()).collect();
+            for i in 0..ancestries.len() {
+                for j in (i + 1)..ancestries.len() {
+                    let ((txs_a, addrs_a, cb_a), (txs_b, addrs_b, cb_b)) =
+                        (&ancestries[i], &ancestries[j]);
+                    let linked = !txs_a.is_disjoint(txs_b)
+                        || !addrs_a.is_disjoint(addrs_b)
+                        || (*cb_a && *cb_b);
+                    if linked && chain[i] != chain[j] {
+                        let (from, to) = (chain[j], chain[i]);
+                        for c in chain.iter_mut().filter(|c| **c == from) {
+                            *c = to;
                         }
                     }
                 }
+            }
+            let chains = chain.iter().collect::<HashSet<_>>().len();
 
-                if merged {
-                    findings.push(Finding {
-                        vulnerability_type: VulnerabilityType::ClusterMerge,
-                        severity: Severity::High,
-                        description: format!(
-                            "TX {} merges UTXOs from {} different funding chains",
-                            txid,
-                            funding_sources.len()
-                        ),
-                        details: Some(json!({
-                            "txid": txid,
-                            "funding_sources": funding_sources.iter()
-                                .map(|(k, v)| {
-                                    let mut sources: Vec<String> = v.iter().cloned().collect();
-                                    sources.sort_unstable();
-                                    (k.clone(), sources)
-                                })
-                                .collect::<BTreeMap<_, _>>(),
-                        })),
-                        correction: Some(
-                            "Use coin control to spend UTXOs from only one funding source \
-                             per transaction. Keep UTXOs received from different counterparties \
-                             in separate wallets."
-                                .into(),
-                        ),
-                    });
-                }
+            if chains >= 2 {
+                findings.push(Finding {
+                    vulnerability_type: VulnerabilityType::ClusterMerge,
+                    severity: Severity::High,
+                    description: format!(
+                        "TX {} merges UTXOs from {} different funding chains",
+                        txid, chains
+                    ),
+                    details: Some(json!({
+                        "txid": txid,
+                        "funding_sources": funding_sources.iter()
+                            .map(|(k, v)| {
+                                let mut sources: Vec<String> = v.iter().cloned().collect();
+                                sources.sort_unstable();
+                                (k.clone(), sources)
+                            })
+                            .collect::<BTreeMap<_, _>>(),
+                    })),
+                    correction: Some(
+                        "Use coin control to spend UTXOs from only one funding source \
+                         per transaction. Keep UTXOs received from different counterparties \
+                         in separate wallets."
+                            .into(),
+                    ),
+                });
             }
         }
     }
