@@ -304,7 +304,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
                 "that conflict, or depend on ones that conflict, with transactions in the mempool"
             },
             before_one: Some("the conflicting one reached the mempool"),
-            if_broadcast: false,
+            if_broadcast: true,
             before_many: Some(if one_conflict {
                 "the conflicting one reached the mempool"
             } else {

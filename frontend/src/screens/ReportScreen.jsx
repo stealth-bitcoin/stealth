@@ -150,6 +150,8 @@ const LEFT_OUT = {
     many: 'that conflict, or depend on ones that conflict, with transactions in the mempool',
     beforeOne: 'the conflicting one reached the mempool',
     beforeMany: 'the conflicting ones reached the mempool',
+    // A wallet tx may be double-spent before it was ever broadcast.
+    ifBroadcast: true,
   },
   // Several left out against one mempool tx.
   mempoolConflictedWithOne: {
@@ -158,6 +160,7 @@ const LEFT_OUT = {
     many: 'that conflict, or depend on ones that conflict, with a transaction in the mempool',
     beforeOne: 'the conflicting one reached the mempool',
     beforeMany: 'the conflicting one reached the mempool',
+    ifBroadcast: true,
   },
   abandoned: {
     settled: false,

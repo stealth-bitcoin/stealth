@@ -429,8 +429,9 @@ mod ordering {
             text.contains(&format!(
                 "Left out 1 transaction that conflicts, or depends on one that conflicts, with \
                  a transaction in the mempool. It may still confirm; until then it is not part \
-                 of the history the wallet sees. It may still have been seen by the network \
-                 before the conflicting one reached the mempool; Stealth does not analyze it.\n  \
+                 of the history the wallet sees. If it was broadcast, it may have been seen by \
+                 the network before the conflicting one reached the mempool; Stealth does not \
+                 analyze it.\n  \
                  {CONFLICTED}: it, or a transaction it depends on, conflicts with {REPLACEMENT}, \
                  which is in the mempool and not confirmed yet\n"
             )),
@@ -474,9 +475,9 @@ mod ordering {
             text.contains(
                 "Left out 2 transactions that conflict, or depend on ones that conflict, with \
                  transactions in the mempool. They may still confirm; until then they are not \
-                 part of the history the wallet sees. They may still have been seen by the \
-                 network before the conflicting ones reached the mempool; Stealth does not \
-                 analyze them.\n"
+                 part of the history the wallet sees. If they were broadcast, they may have been \
+                 seen by the network before the conflicting ones reached the mempool; Stealth \
+                 does not analyze them.\n"
             ),
             "{text}"
         );
@@ -496,9 +497,9 @@ mod ordering {
             text.contains(
                 "Left out 2 transactions that conflict, or depend on ones that conflict, with \
                  a transaction in the mempool. They may still confirm; until then they are not \
-                 part of the history the wallet sees. They may still have been seen by the \
-                 network before the conflicting one reached the mempool; Stealth does not \
-                 analyze them.\n"
+                 part of the history the wallet sees. If they were broadcast, they may have been \
+                 seen by the network before the conflicting one reached the mempool; Stealth \
+                 does not analyze them.\n"
             ),
             "{text}"
         );
