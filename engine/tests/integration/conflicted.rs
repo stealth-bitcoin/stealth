@@ -81,3 +81,75 @@ fn a_cached_descriptor_scan_names_the_conflicted_tx_it_left_out() {
     assert_eq!(report.stats.transactions_analyzed, 2);
     assert_eq!(report.stats.conflicted_txids, vec![original]);
 }
+
+/// Alice pays bob, spends that payment's unconfirmed change, then a double
+/// spend of the payment's input is mined. Core reports both at negative
+/// depth; only the payment lists a wallet conflict.
+#[test]
+fn a_tx_spending_a_conflicted_one_is_left_out_and_named_too() {
+    let node = node();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let (alice, _) = fund_sender(&node, &miner, "alice", 1_000_000);
+    let bob = node.create_wallet("bob").unwrap().new_address().unwrap();
+    let funding = alice.list_unspent().unwrap().0.remove(0);
+
+    let send = |sats: u64| -> Txid {
+        let txid: String = alice
+            .call(
+                "sendtoaddress",
+                &[
+                    json!(bob.to_string()),
+                    json!(Amount::from_sat(sats).to_btc()),
+                ],
+            )
+            .expect("sendtoaddress");
+        txid.parse().unwrap()
+    };
+    let payment = send(100_000);
+    let child = send(200_000);
+    let decoded = gateway_for(&node).get_transaction(child).unwrap();
+    assert!(
+        decoded.vin.iter().any(|i| i.previous_txid == payment),
+        "the second send must spend the first one's change"
+    );
+
+    // A higher-fee spend of the payment's input evicts both and is mined.
+    let back = alice.new_address().unwrap();
+    let raw = alice
+        .create_raw_transaction(
+            &[Input {
+                txid: funding.txid.parse().unwrap(),
+                vout: funding.vout as u64,
+                sequence: None,
+            }],
+            &[Output::new(back, Amount::from_sat(1_000_000 - 50_000))],
+        )
+        .unwrap();
+    let tx = raw.transaction().unwrap();
+    let signed = alice.sign_raw_transaction_with_wallet(&tx).unwrap();
+    alice
+        .send_raw_transaction(&signed.into_model().unwrap().tx)
+        .unwrap();
+    mine(&node, 1, &miner);
+
+    let child_entry: Value = alice
+        .call("gettransaction", &[json!(child.to_string())])
+        .expect("gettransaction");
+    assert!(
+        child_entry["confirmations"].as_i64().unwrap() < 0,
+        "{child_entry}"
+    );
+    assert_eq!(child_entry["walletconflicts"], json!([]), "{child_entry}");
+
+    let history = gateway_for(&node)
+        .scan_wallet("alice")
+        .expect("a conflicted descendant must not fail the scan");
+    let graph = TxGraph::from_wallet_history(history);
+    assert!(!graph.our_txids.contains(&payment));
+    assert!(!graph.our_txids.contains(&child));
+    let report = graph.detect_all(&Default::default(), None, None);
+    let mut expected = vec![payment, child];
+    expected.sort_by_key(Txid::to_string);
+    assert_eq!(report.stats.conflicted_txids, expected);
+}

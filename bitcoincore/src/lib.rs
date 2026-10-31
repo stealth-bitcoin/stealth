@@ -1385,7 +1385,7 @@ fn parse_txid(method: &str, s: &str) -> Result<Txid, AnalysisError> {
 }
 
 /// Core reports a conflicted wallet tx, one that conflicts with another
-/// transaction, at negative depth.
+/// transaction or spends one that does, at negative depth.
 fn is_conflicted(confirmations: Option<i64>) -> bool {
     confirmations.is_some_and(|count| count < 0)
 }

@@ -338,14 +338,31 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 1 transaction Core reports as conflicted: it conflicts with \
-                 another transaction, so it is not part of the wallet's history.\n  {CONFLICTED}\n"
+                "Left out 1 transaction Core reports as conflicted: it, or a transaction \
+                 it spends, conflicts with another one, so it is not part of the wallet's \
+                 history.\n  {CONFLICTED}\n"
             )),
             "{text}"
         );
         assert!(
             position(&text, CONFLICTED) < position(&text, "No privacy issues found."),
             "the note comes before the verdict:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_conflicted_note_counts_several() {
+        let other = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.conflicted_txids = vec![CONFLICTED.parse().unwrap(), other.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 2 transactions Core reports as conflicted: each, or a transaction \
+                 it spends, conflicts with another one, so they are not part of the wallet's \
+                 history.\n  {CONFLICTED}\n  {other}\n"
+            )),
+            "{text}"
         );
     }
 

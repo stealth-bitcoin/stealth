@@ -259,7 +259,7 @@ pub struct WalletHistory {
     #[serde(default, with = "serde_addr_set")]
     pub ranged_addresses: HashSet<Address<NetworkUnchecked>>,
     /// Wallet transactions Core reports as conflicted (negative confirmations):
-    /// they conflict with another transaction, so they are left out above.
+    /// each, or a tx it spends, conflicts with another one, so they are left out above.
     #[serde(default)]
     pub conflicted_txids: BTreeSet<Txid>,
 }
