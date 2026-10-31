@@ -56,7 +56,7 @@ fn a_history_above_max_txs_stops_with_the_count_and_the_flags() {
     assert_eq!(stopped.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("5 transactions"), "{stderr}");
     assert!(stderr.contains("limit of 3"), "{stderr}");
-    assert!(stderr.contains("--max-txs 5"), "{stderr}");
+    assert!(stderr.contains("--max-txs with at least 5,"), "{stderr}");
     assert!(stderr.contains("--no-limits"), "{stderr}");
     assert!(stopped.stdout.is_empty());
     assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());

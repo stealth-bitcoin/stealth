@@ -773,9 +773,13 @@ mod history_limit {
         });
         assert!(message.contains("12345 transactions"), "{message}");
         assert!(message.contains("limit of 5000"), "{message}");
-        let no_limits = message.find("--no-limits").expect("--no-limits");
-        let max_txs = message.find("--max-txs 12345").expect("--max-txs");
-        assert!(no_limits < max_txs, "--no-limits comes first: {message}");
+        assert!(
+            message.ends_with(
+                "; to scan it anyway, pass --no-limits, or --max-txs with at least 12345, \
+                 higher if the history may grow"
+            ),
+            "{message}"
+        );
     }
 
     #[test]

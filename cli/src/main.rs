@@ -82,8 +82,8 @@ fn scan_error(error: AnalysisError) -> String {
     match error {
         AnalysisError::HistoryTooLarge { tx_count, .. } => {
             format!(
-                "{error}; to scan it anyway, pass --no-limits, or --max-txs {tx_count} to raise \
-                 the limit"
+                "{error}; to scan it anyway, pass --no-limits, or --max-txs with at least \
+                 {tx_count}, higher if the history may grow"
             )
         }
         other => other.to_string(),
