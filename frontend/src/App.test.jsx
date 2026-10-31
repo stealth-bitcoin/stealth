@@ -220,6 +220,39 @@ describe('App scan flow', () => {
       expect(screen.getByText(/no privacy issues found/i)).toBeTruthy()
     })
 
+    it('honours a cancel sent before the poll saw the stop', async () => {
+      queueJobs(job('rescanning'))
+      cancelScan.mockResolvedValue()
+      render(<App />)
+      await submitScan()
+      await tick()
+
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      await act(async () => {})
+      queueJobs(tooLarge())
+      await tick()
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(screen.getByPlaceholderText(/paste a descriptor/i)).toBeTruthy()
+      expect(screen.queryByRole('alert')).toBeNull()
+    })
+
+    it('lets the scan sent again from the confirm step be cancelled', async () => {
+      queueJobs(tooLarge())
+      cancelScan.mockResolvedValue()
+      render(<App />)
+      await submitScan()
+      await tick()
+
+      startScan.mockResolvedValue('scan-2')
+      fireEvent.click(screen.getByRole('button', { name: /scan anyway/i }))
+      await act(async () => {})
+      const cancel = screen.getByRole('button', { name: /^cancel$/i })
+      expect(cancel.disabled).toBe(false)
+      fireEvent.click(cancel)
+      await act(async () => {})
+      expect(cancelScan).toHaveBeenCalledWith('scan-2')
+    })
+
     it('goes back to the input without sending anything when cancelled', async () => {
       queueJobs(tooLarge())
       render(<App />)

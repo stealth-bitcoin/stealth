@@ -124,6 +124,15 @@ describe('LoadingScreen', () => {
       expect(screen.queryByText(/starting scan/i)).toBeNull()
     })
 
+    it('stops the scanner rings while it waits for an answer', () => {
+      const rings = (container) => container.querySelectorAll('[class*="ring"]').length
+      const { container, unmount } = render(<LoadingScreen state="rescanning" />)
+      expect(rings(container)).toBe(3)
+      unmount()
+      const waiting = render(<LoadingScreen limitExceeded={LIMIT} />)
+      expect(rings(waiting.container)).toBe(0)
+    })
+
     it('scans anyway or cancels', () => {
       const onScanAnyway = vi.fn()
       const onDismiss = vi.fn()

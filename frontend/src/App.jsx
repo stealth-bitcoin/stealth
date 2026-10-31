@@ -16,7 +16,9 @@ export default function App() {
   const [report, setReport] = useState(null)
   const [error, setError] = useState(null)
   const [limitExceeded, setLimitExceeded] = useState(null)
+  const [attempt, setAttempt] = useState(0)
   const pollFailures = useRef(0)
+  const cancelSent = useRef(false)
 
   useEffect(() => {
     if (!scanId) return undefined
@@ -43,6 +45,10 @@ export default function App() {
         setReport(next.report)
         setScreen('report')
         setScanId(null)
+      } else if (next.state === 'failed' && next.limit_exceeded && cancelSent.current) {
+        // The user already asked to stop; there is nothing left to confirm.
+        setScreen('input')
+        setScanId(null)
       } else if (next.state === 'failed' && next.limit_exceeded) {
         setLimitExceeded(next.limit_exceeded)
         setScanId(null)
@@ -68,6 +74,8 @@ export default function App() {
     setReport(null)
     setError(null)
     setLimitExceeded(null)
+    cancelSent.current = false
+    setAttempt((n) => n + 1)
     setScreen('loading')
     try {
       setScanId(await startScan(nextScan.body))
@@ -79,7 +87,12 @@ export default function App() {
   }
 
   function handleCancel() {
-    if (scanId) return cancelScan(scanId)
+    if (!scanId) return undefined
+    cancelSent.current = true
+    return cancelScan(scanId).catch((err) => {
+      cancelSent.current = false
+      throw err
+    })
   }
 
   function handleScanAnyway() {
@@ -100,6 +113,7 @@ export default function App() {
     if (screen === 'loading') {
       return (
         <LoadingScreen
+          key={attempt}
           text={scan?.text}
           kind={scan?.kind}
           state={job?.state}
