@@ -445,10 +445,16 @@ impl TxGraph {
 
             let mut dust_inputs = Vec::new();
             let mut normal_inputs = Vec::new();
+            let mut own_normal = false;
             for ia in &input_addrs {
                 if !self.is_ours(&ia.address) {
+                    // In a partial scan an unattributed coin may be the user's normal coin.
+                    if ia.value > normal_min && self.unattributed(&ia.address) {
+                        normal_inputs.push(ia);
+                    }
                     continue;
                 }
+                own_normal |= ia.value > normal_min;
                 let amt = ia.value;
                 if amt <= dust {
                     dust_inputs.push(ia);
@@ -477,7 +483,7 @@ impl TxGraph {
                     dust_inputs.len(),
                     normal_inputs.len()
                 );
-                if !certain {
+                if !possible.is_empty() {
                     description.push_str(&format!(
                         "; this ties the dust to {}, if {} yours",
                         possible.join(", "),
@@ -491,7 +497,7 @@ impl TxGraph {
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::DustSpending,
                     // A tie only to addresses the scan cannot attribute may not be the user's.
-                    severity: if certain {
+                    severity: if certain && own_normal {
                         Severity::High
                     } else {
                         Severity::Medium

@@ -229,11 +229,9 @@ impl TxGraph {
                 if child_inputs.len() < 2 {
                     continue;
                 }
-                let own: Vec<_> = child_inputs
-                    .iter()
-                    .filter(|ci| self.is_ours(&ci.address))
-                    .collect();
-                if !own.iter().any(|ci| ci.value > toxic_upper) {
+                let larger = child_inputs.iter().filter(|ci| ci.value > toxic_upper);
+                let own_larger = larger.clone().any(|ci| self.is_ours(&ci.address));
+                if !own_larger && !larger.clone().any(|ci| self.unattributed(&ci.address)) {
                     continue;
                 }
                 // Only addresses other than the change's are newly tied to it.
@@ -270,10 +268,10 @@ impl TxGraph {
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::ToxicChange,
                     // A tie only to addresses the scan cannot attribute may not be the user's.
-                    severity: if tied.is_empty() {
-                        Severity::Medium
-                    } else {
+                    severity: if !tied.is_empty() && own_larger {
                         Severity::High
+                    } else {
+                        Severity::Medium
                     },
                     description: format!(
                         "Toxic change ({} sats) from TX {}:{} was later spent with a larger \

@@ -68,15 +68,24 @@ impl TxGraph {
         Report::new(stats, findings, warnings)
     }
 
+    /// The scan was given no ranged descriptor (a UTXO scan without ownership descriptors, or
+    /// a single-address scan), so it knows only some of the wallet's addresses.
+    fn partial_scan(&self) -> bool {
+        self.ranged_addrs.is_empty()
+    }
+
+    /// In a partial scan, an input address the scan cannot tell apart from one of the user's.
+    fn unattributed(&self, address: &Address<NetworkUnchecked>) -> bool {
+        self.partial_scan() && !self.is_ours(address)
+    }
+
     /// Addresses of `txid`'s inputs, other than `address`, that the spend ties to it: the
-    /// wallet's own, then, when no ranged descriptor derived `address` (a UTXO or single-address
-    /// scan, which knows only some of the wallet's addresses), those it cannot attribute.
+    /// wallet's own, then, in a partial scan, those it cannot attribute.
     fn joined_addresses(
         &self,
         txid: &Txid,
         address: &Address<NetworkUnchecked>,
     ) -> (Vec<String>, Vec<String>) {
-        let partial = !self.ranged_addrs.contains(address);
         let (mut own, mut unattributed) = (Vec::new(), Vec::new());
         for input in self.get_input_addresses(txid) {
             if input.address == *address {
@@ -84,7 +93,7 @@ impl TxGraph {
             }
             let list = if self.is_ours(&input.address) {
                 &mut own
-            } else if partial {
+            } else if self.unattributed(&input.address) {
                 &mut unattributed
             } else {
                 continue;

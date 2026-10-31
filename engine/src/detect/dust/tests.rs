@@ -590,3 +590,74 @@ fn attack_dust_spent_alone_into_an_op_return_and_a_payment_keeps_critical() {
     let findings = spent_dust(9, &[], vec![op_return(0), out(1, &wpkh(150), 400)]);
     assert_moved_elsewhere(&findings, 9);
 }
+
+#[test]
+fn a_wallet_scan_does_not_count_a_stranger_next_to_dust_at_a_non_ranged_own_address() {
+    let a = wpkh(1);
+    let mut history = spend_of(&[(&a, 600), (&a, 20_000), (&wpkh(200), 30_000)], &[&a]);
+    // The wallet has a ranged descriptor, but `a` comes from an imported, non-ranged one.
+    history.ranged_addresses = HashSet::from([wpkh(99)]);
+    let findings = dust_spending(history);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn a_partial_scan_lets_an_unattributed_coin_be_the_normal_one() {
+    let (a, b) = (wpkh(1), wpkh(200));
+    let findings = dust_spending(spend_of(&[(&a, 600), (&b, 50_000)], &[&a]));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert_eq!(f.severity, Severity::Medium, "{f:?}");
+    assert!(
+        f.description.contains("if that address is yours"),
+        "{}",
+        f.description
+    );
+}
+
+#[test]
+fn a_full_scan_does_not_let_a_strangers_coin_be_the_normal_one() {
+    let (a, b) = (wpkh(1), wpkh(200));
+    let mut history = spend_of(&[(&a, 600), (&b, 50_000)], &[&a]);
+    history.ranged_addresses = HashSet::from([a.clone()]);
+    let findings = dust_spending(history);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn a_known_tie_with_only_an_unattributed_normal_coin_is_medium() {
+    let (a, b, c) = (wpkh(1), wpkh(2), wpkh(200));
+    let findings = dust_spending(spend_of(&[(&a, 600), (&b, 5_000), (&c, 50_000)], &[&a, &b]));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].severity, Severity::Medium, "{:?}", findings[0]);
+    let c_text = c.assume_checked_ref().to_string();
+    assert!(
+        findings[0].description.contains(&format!(
+            "this ties the dust to {c_text}, if that address is yours"
+        )),
+        "{}",
+        findings[0].description
+    );
+}
+
+#[test]
+fn two_unattributed_addresses_get_the_plural_dust_wording() {
+    let a = wpkh(1);
+    let findings = dust_spending(spend_of(
+        &[
+            (&a, 600),
+            (&a, 20_000),
+            (&wpkh(200), 30_000),
+            (&wpkh(201), 30_000),
+        ],
+        &[&a],
+    ));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0]
+            .description
+            .contains("if those addresses are yours"),
+        "{}",
+        findings[0].description
+    );
+}

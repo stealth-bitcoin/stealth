@@ -798,3 +798,73 @@ fn toxic_change_at_a_script_type_the_coordinator_refuses_gets_no_coinjoin_mentio
     let correction = findings[0].correction.as_deref().expect("a correction");
     assert!(correction.contains("WabiSabi"), "{correction}");
 }
+
+#[test]
+fn a_wallet_scan_does_not_count_a_stranger_next_to_change_at_a_non_ranged_own_address() {
+    let a = wpkh(1);
+    let mut history = toxic_history(600, 50_000, &a, &a, vec![coin(&wpkh(200), 30_000)], &[]);
+    // The wallet has a ranged descriptor, but `a` comes from an imported, non-ranged one.
+    history.ranged_addresses = HashSet::from([wpkh(99)]);
+    let findings = toxic_run(history);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn a_partial_scan_lets_an_unattributed_coin_be_the_larger_one() {
+    let (a, b) = (wpkh(1), wpkh(200));
+    let findings = toxic_findings_with(600, 3_000, &a, &a, vec![coin(&b, 50_000)], &[]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert_eq!(f.severity, crate::types::Severity::Medium, "{f:?}");
+    assert!(
+        f.description.contains("if that address is yours"),
+        "{}",
+        f.description
+    );
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(
+        details["possibly_tied_addresses"],
+        serde_json::json!([b.assume_checked_ref().to_string()])
+    );
+}
+
+#[test]
+fn a_full_scan_does_not_let_a_strangers_coin_be_the_larger_one() {
+    let (a, b) = (wpkh(1), wpkh(200));
+    let mut history = toxic_history(600, 3_000, &a, &a, vec![coin(&b, 50_000)], &[]);
+    history.ranged_addresses = HashSet::from([a.clone()]);
+    let findings = toxic_run(history);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn two_unattributed_addresses_get_the_plural_wording() {
+    let a = wpkh(1);
+    let findings = toxic_findings(
+        &a,
+        &a,
+        vec![coin(&wpkh(200), 30_000), coin(&wpkh(201), 30_000)],
+        &[],
+    );
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0]
+            .description
+            .contains("if those addresses are yours"),
+        "{}",
+        findings[0].description
+    );
+}
+
+#[test]
+fn a_known_tie_with_only_an_unattributed_larger_coin_is_medium() {
+    let (a, b, c) = (wpkh(1), wpkh(2), wpkh(200));
+    let findings = toxic_findings_with(600, 3_000, &a, &b, vec![coin(&c, 50_000)], &[]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(
+        findings[0].severity,
+        crate::types::Severity::Medium,
+        "{:?}",
+        findings[0]
+    );
+}
