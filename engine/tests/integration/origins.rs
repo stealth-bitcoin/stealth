@@ -565,3 +565,62 @@ fn a_sweep_to_a_ranged_receive_address_beside_a_fixed_one_is_silent() {
     let details = flagged[0].details.as_ref().expect("details");
     assert_eq!(details["consolidation_inputs"], 3);
 }
+
+#[test]
+fn paying_from_three_of_our_coins_with_change_is_our_consolidation() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+
+    // The coin left in the wallet is the change of a payment from three own coins.
+    let inputs = fund_coins(&node, &alice, 3, 300_000);
+    let outputs = [
+        Output::new(bob.new_address().unwrap(), Amount::from_sat(500_000)),
+        Output::new(change_address(&alice), Amount::from_sat(390_000)),
+    ];
+    spend(&node, &[&alice], &inputs, &outputs);
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    let details = consolidation_finding(&report)
+        .details
+        .clone()
+        .expect("details");
+    assert_eq!(details["our_inputs_in_consolidation"], 3);
+    assert!(!has_warning(&report, VulnerabilityType::Consolidation));
+}
+
+#[test]
+fn unresolved_inputs_on_a_change_address_get_the_unchecked_wording() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let mut inputs = fund_coins(&node, &bob, 3, 300_000);
+    inputs.extend(fund_coins(&node, &alice, 1, 300_000));
+    merge_into(
+        &node,
+        &[&bob, &alice],
+        &inputs,
+        change_address(&alice),
+        1_200_000,
+    );
+
+    // Depth 0 leaves bob's funding transactions unfetched.
+    let gateway = gateway_for(&node).with_max_ancestor_depth(0);
+    let report = scan_wallet(&gateway, "alice");
+    assert_consolidation_warning(&report, 1, 0, 3);
+    let warning = report
+        .warnings
+        .iter()
+        .find(|w| w.vulnerability_type == VulnerabilityType::Consolidation)
+        .expect("warning");
+    assert!(
+        !warning.description.contains("another account"),
+        "{}",
+        warning.description
+    );
+}

@@ -90,7 +90,8 @@ impl TxGraph {
                     utxo.vout,
                     utxo.amount.to_btc()
                 );
-                let (description, correction) = if on_change {
+                // Unfetched inputs leave nothing to attribute, so say only that.
+                let (description, correction) = if on_change && unresolved == 0 {
                     (
                         format!(
                             "{coin} sits on your change address and came from a {n_in}-input \
