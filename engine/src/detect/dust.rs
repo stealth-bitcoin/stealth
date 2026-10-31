@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use bitcoin::address::NetworkUnchecked;
-use bitcoin::{Address, Amount, Txid};
+use bitcoin::{Address, Amount, OutPoint, Txid};
 use serde_json::json;
 
 use crate::config::DetectorThresholds;
@@ -35,31 +35,63 @@ impl TxGraph {
             }
         }
 
-        // Own dust outputs outside the UTXO list: spent only when a known
-        // transaction spends them, otherwise still unspent (a frozen coin,
-        // or one left out of a pasted UTXO list).
-        let txids = self.ordered_txids();
+        // Own dust outside the UTXO list: spent when the history shows the
+        // spend, otherwise whatever the node said, or unknown without an answer.
+        for (txid, out) in self.dust_outside_utxos(dust) {
+            let key = (txid, out.index);
+            let unspent = if self.spending_index.contains_key(&key) {
+                Some(false)
+            } else {
+                self.chain_unspent.get(&key).copied()
+            };
+            let finding = match unspent {
+                Some(true) => Self::unspent_dust_finding,
+                Some(false) => Self::spent_dust_finding,
+                None => Self::unknown_dust_finding,
+            };
+            findings.push(finding(
+                self,
+                &txid,
+                out.index,
+                &out.address,
+                out.value,
+                thresholds,
+            ));
+        }
+    }
+
+    /// Own outputs at or under `dust` that are not in the UTXO list, once each.
+    fn dust_outside_utxos(&self, dust: Amount) -> Vec<(Txid, OutputInfo)> {
         let current_keys: HashSet<(Txid, u32)> =
             self.utxos.iter().map(|u| (u.txid, u.vout)).collect();
         let mut seen = HashSet::new();
-        for txid in &txids {
-            let outputs = self.get_output_addresses(txid);
-            for out in &outputs {
-                if out.value > dust || !self.is_ours(&out.address) {
-                    continue;
+        let mut found = Vec::new();
+        for txid in self.ordered_txids() {
+            for out in self.get_output_addresses(&txid) {
+                let key = (txid, out.index);
+                if out.value <= dust
+                    && self.is_ours(&out.address)
+                    && !current_keys.contains(&key)
+                    && seen.insert(key)
+                {
+                    found.push((txid, out));
                 }
-                let key = (*txid, out.index);
-                if current_keys.contains(&key) || !seen.insert(key) {
-                    continue;
-                }
-                let finding = if self.spending_index.contains_key(&key) {
-                    self.spent_dust_finding(txid, out.index, &out.address, out.value, thresholds)
-                } else {
-                    self.unspent_dust_finding(txid, out.index, &out.address, out.value, thresholds)
-                };
-                findings.push(finding);
             }
         }
+        found
+    }
+
+    /// Outpoints of own dust outside the UTXO list whose spend the history
+    /// does not show; only the node can say whether they are unspent.
+    pub(crate) fn dust_needing_chain_status(
+        &self,
+        thresholds: &DetectorThresholds,
+    ) -> Vec<OutPoint> {
+        self.dust_outside_utxos(thresholds.dust)
+            .into_iter()
+            .filter(|(txid, out)| !self.spending_index.contains_key(&(*txid, out.index)))
+            .map(|(txid, out)| OutPoint::new(txid, out.index))
+            .collect()
     }
 
     fn unspent_dust_finding(
@@ -185,6 +217,61 @@ impl TxGraph {
             correction: Some(
                 "This dust has already been spent. Going forward, reject \
                  unsolicited dust by enabling automatic dust rejection."
+                    .into(),
+            ),
+        }
+    }
+
+    fn unknown_dust_finding(
+        &self,
+        txid: &Txid,
+        vout: u32,
+        address: &Address<NetworkUnchecked>,
+        amt: Amount,
+        thresholds: &DetectorThresholds,
+    ) -> Finding {
+        let attack = self.dust_attack_evidence(txid, thresholds);
+        let severity = if attack.is_some() {
+            Severity::Critical
+        } else {
+            Severity::Low
+        };
+        let mut details = json!({
+            "status": "unknown",
+            "address": address.assume_checked_ref().to_string(),
+            "sats": amt.to_sat(),
+            "txid": txid,
+            "vout": vout,
+        });
+        if let Some(ev) = attack.as_ref() {
+            details["dust_attack"] = ev.clone();
+        }
+        let description = if attack.is_some() {
+            format!(
+                "Dust output {}:{} at {} ({} sats, spend status unknown) — parent TX {} matches a dust-attack pattern",
+                txid,
+                vout,
+                address.assume_checked_ref(),
+                amt.to_sat(),
+                txid,
+            )
+        } else {
+            format!(
+                "Dust output {}:{} at {} ({} sats, spend status unknown)",
+                txid,
+                vout,
+                address.assume_checked_ref(),
+                amt.to_sat(),
+            )
+        };
+        Finding {
+            vulnerability_type: VulnerabilityType::Dust,
+            severity,
+            description,
+            details: Some(details),
+            correction: Some(
+                "The node could not say whether this output is still unspent. \
+                 Check it in your wallet before relying on this entry."
                     .into(),
             ),
         }

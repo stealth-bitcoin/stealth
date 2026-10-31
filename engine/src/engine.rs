@@ -81,7 +81,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .gateway
             .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let graph = TxGraph::from_wallet_history(history);
+        let mut graph = TxGraph::from_wallet_history(history);
+        self.ask_dust_status(&mut graph);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -96,7 +97,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let mut history = self.resolve_utxo_history(&utxos)?;
         let addresses_without_history = self.merge_address_history(&mut history)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let graph = TxGraph::from_wallet_history(history);
+        let mut graph = TxGraph::from_wallet_history(history);
+        self.ask_dust_status(&mut graph);
         let mut report = graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -104,6 +106,22 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         );
         report.stats.addresses_without_history = addresses_without_history;
         Ok(report)
+    }
+
+    /// Own dust outside the UTXO list whose spend the history does not show
+    /// is looked up on the node; an output it cannot answer for stays unknown.
+    fn ask_dust_status(&self, graph: &mut TxGraph) {
+        let outpoints = graph.dust_needing_chain_status(&self.settings.config.thresholds);
+        if outpoints.is_empty() {
+            return;
+        }
+        if let Ok(answers) = self.gateway.outputs_unspent(&outpoints) {
+            for (op, unspent) in answers {
+                if let Ok(unspent) = unspent {
+                    graph.chain_unspent.insert((op.txid, op.vout), unspent);
+                }
+            }
+        }
     }
 
     /// A pasted output names its address; the chain knows the rest of that

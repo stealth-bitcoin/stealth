@@ -39,6 +39,9 @@ pub struct TxGraph {
     /// the scan knows only fixed scripts, so it cannot vouch for whose the
     /// coin's unrecognised inputs are.
     pub ranged_addrs: HashSet<Address<NetworkUnchecked>>,
+    /// The node's answer on whether an output is unspent, for own outputs
+    /// whose status the history does not settle. Filled by the engine.
+    pub chain_unspent: HashMap<(Txid, u32), bool>,
 }
 
 /// A UTXO entry from `listunspent`.
@@ -239,6 +242,7 @@ impl TxGraph {
             output_cache,
             spending_index,
             ranged_addrs: history.ranged_addresses,
+            chain_unspent: HashMap::new(),
         }
     }
 }

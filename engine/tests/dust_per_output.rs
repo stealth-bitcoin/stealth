@@ -13,7 +13,7 @@ use stealth_engine::gateway::{
     DecodedTransaction, DescriptorType, TxInputRef, TxOutput, Utxo, WalletHistory,
     WalletTxCategory, WalletTxEntry,
 };
-use stealth_engine::{Finding, TxGraph, VulnerabilityType};
+use stealth_engine::{Finding, Severity, TxGraph, VulnerabilityType};
 
 fn txid(n: u64) -> Txid {
     format!("{:0<64x}", n).parse().expect("valid txid hex")
@@ -198,10 +198,8 @@ fn toxic_change_findings_name_their_output() {
     assert_ne!(toxic[0].details, toxic[1].details);
 }
 
-/// The parent's outputs stay unspent (no child tx), with only `listed`
-/// vouts in the UTXO list. `descriptor` marks `own` through wallet
-/// receive entries instead of derived addresses.
-fn unspent_history(listed: &[u32], descriptor: bool) -> WalletHistory {
+/// No child tx spends the parent; only `listed` vouts are in the UTXO list.
+fn unspent_history(listed: &[u32]) -> WalletHistory {
     let mut h = history(true);
     let (parent, child) = (txid(PARENT), txid(CHILD));
     let own = tr(1);
@@ -218,28 +216,60 @@ fn unspent_history(listed: &[u32], descriptor: bool) -> WalletHistory {
             script_type: DescriptorType::P2tr,
         })
         .collect();
-    if descriptor {
-        h.derived_addresses.clear();
-        h.wallet_txs
-            .push(entry(parent, Some(&own), WalletTxCategory::Receive, 1_200));
-    }
     h
 }
 
 #[test]
-fn unspent_dust_missing_from_pasted_utxos_is_not_called_spent() {
+fn dust_outside_the_utxo_list_with_no_known_spend_is_unknown() {
     assert_eq!(
-        parent_dust(unspent_history(&[1], false)),
-        vec![("unspent".to_string(), 0), ("unspent".to_string(), 1)],
+        parent_dust(unspent_history(&[1])),
+        vec![("unknown".to_string(), 0), ("unspent".to_string(), 1)],
     );
 }
 
+const ATTACK: u64 = 0x50;
+
+/// An unsolicited tx paying 500 sats to ten distinct addresses, one ours,
+/// with the coin neither listed nor spent in the history.
+fn attack_graph(chain_unspent: Option<bool>) -> TxGraph {
+    let own = tr(1);
+    let attack = txid(ATTACK);
+    let mut outputs = vec![out(0, &own, 500)];
+    outputs.extend((1..10u8).map(|n| out(u32::from(n), &tr(100 + n), 500)));
+    let history = WalletHistory {
+        wallet_txs: vec![entry(attack, Some(&own), WalletTxCategory::Receive, 500)],
+        utxos: Vec::new(),
+        transactions: HashMap::from([(attack, tx(attack, vec![vin(txid(0x12), 0)], outputs))]),
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::from([own]),
+        ranged_addresses: HashSet::new(),
+    };
+    let mut graph = TxGraph::from_wallet_history(history);
+    if let Some(unspent) = chain_unspent {
+        graph.chain_unspent.insert((attack, 0), unspent);
+    }
+    graph
+}
+
 #[test]
-fn frozen_dust_left_out_of_listunspent_is_not_called_spent() {
-    assert_eq!(
-        parent_dust(unspent_history(&[], true)),
-        vec![("unspent".to_string(), 0), ("unspent".to_string(), 1)],
-    );
+fn dust_attack_outside_the_utxo_list_stays_critical_with_evidence() {
+    for (chain_unspent, status) in [
+        (Some(true), "unspent"),
+        (Some(false), "spent"),
+        (None, "unknown"),
+    ] {
+        let report =
+            attack_graph(chain_unspent).detect_all(&DetectorThresholds::default(), None, None);
+        let dust = report
+            .findings
+            .iter()
+            .find(|f| f.vulnerability_type == VulnerabilityType::Dust)
+            .expect("dust finding");
+        let details = dust.details.as_ref().expect("dust details");
+        assert_eq!(details["status"].as_str(), Some(status));
+        assert_eq!(dust.severity, Severity::Critical, "{status}");
+        assert!(details["dust_attack"].is_object(), "{status}");
+    }
 }
 
 fn parent_dust_descriptions(history: WalletHistory) -> Vec<String> {
@@ -260,7 +290,7 @@ fn parent_dust_descriptions(history: WalletHistory) -> Vec<String> {
 #[test]
 fn dust_descriptions_name_their_output() {
     let parent = txid(PARENT);
-    for history in [history(true), unspent_history(&[0, 1], false)] {
+    for history in [history(true), unspent_history(&[0, 1])] {
         let descriptions = parent_dust_descriptions(history);
         assert_eq!(descriptions.len(), 2);
         assert!(descriptions[0].contains(&format!("{parent}:0")));

@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::{Address, Amount, Txid};
+use bitcoin::{Address, Amount, OutPoint, Txid};
 use ini::Ini;
 use reqwest::blocking::{Client, Response};
 use reqwest::StatusCode;
@@ -20,7 +20,7 @@ use stealth_model::descriptor::is_ranged;
 use stealth_model::error::AnalysisError;
 use stealth_model::gateway::{
     BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, TxFetchResults,
-    TxInputRef, TxOutput, Utxo, WalletHistory, WalletTxCategory, WalletTxEntry,
+    TxInputRef, TxOutput, UnspentResults, Utxo, WalletHistory, WalletTxCategory, WalletTxEntry,
 };
 use stealth_model::progress::{ScanPhase, ScanProgress};
 use stealth_model::types::btc_to_amount;
@@ -404,6 +404,24 @@ impl BitcoinCoreRpc {
         }
         envelopes.sort_by_key(|envelope| envelope.id);
         Ok(envelopes)
+    }
+
+    /// Like [`call_batch`](Self::call_batch), one answer per call, where a
+    /// null result is an answer (`None`), as `gettxout` gives for a spent
+    /// output.
+    fn call_batch_nullable<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params_list: &[Vec<Value>],
+    ) -> Result<Vec<Result<Option<T>, AnalysisError>>, AnalysisError> {
+        Ok(self
+            .call_batch(method, params_list)?
+            .into_iter()
+            .map(|envelope| match envelope.error {
+                Some(error) => Err(RpcError::Node(method.to_string(), error).into()),
+                None => Ok(envelope.result),
+            })
+            .collect())
     }
 
     fn decode_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
@@ -1219,6 +1237,22 @@ impl BlockchainGateway for BitcoinCoreRpc {
 
     fn get_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
         self.decode_transactions(txids)
+    }
+
+    fn outputs_unspent(&self, outpoints: &[OutPoint]) -> Result<UnspentResults, AnalysisError> {
+        if outpoints.is_empty() {
+            return Ok(Vec::new());
+        }
+        let params: Vec<Vec<Value>> = outpoints
+            .iter()
+            .map(|op| vec![json!(op.txid.to_string()), json!(op.vout), json!(true)])
+            .collect();
+        let answers = self.call_batch_nullable::<Value>("gettxout", &params)?;
+        Ok(outpoints
+            .iter()
+            .copied()
+            .zip(answers.into_iter().map(|a| a.map(|txout| txout.is_some())))
+            .collect())
     }
 
     fn set_progress_sink(&self, sink: ScanProgress) {
