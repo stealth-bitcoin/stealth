@@ -396,13 +396,13 @@ describe('ReportScreen — conflicted transactions left out', () => {
 
   it('names the conflicted transaction and says why it was left out', () => {
     render(<ReportScreen report={makeReport({ txs: 2, conflicted: [original] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
-    expect(screen.getByText(/left out 1 transaction core reports as conflicted: it, or a transaction it depends on, conflicts with another one, so it is not part of the wallet's history/i)).toBeTruthy()
+    expect(screen.getByText(/left out 1 transaction core reports as conflicted: it, or a transaction it depends on, conflicts with another one, so it is not part of the wallet's history\. it may still have been seen by the network before it was replaced; stealth does not analyze it\./i)).toBeTruthy()
     expect(screen.getByText(original)).toBeTruthy()
   })
 
   it('names every one of several', () => {
     render(<ReportScreen report={makeReport({ txs: 2, conflicted: [original, other] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
-    expect(screen.getByText(/left out 2 transactions core reports as conflicted: each, or a transaction it depends on, conflicts with another one, so they are not part of the wallet's history/i)).toBeTruthy()
+    expect(screen.getByText(/left out 2 transactions core reports as conflicted: each, or a transaction it depends on, conflicts with another one, so they are not part of the wallet's history\. they may still have been seen by the network before they were replaced; stealth does not analyze them\./i)).toBeTruthy()
     expect(screen.getByText(original)).toBeTruthy()
     expect(screen.getByText(other)).toBeTruthy()
   })

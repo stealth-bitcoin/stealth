@@ -253,11 +253,19 @@ fn text_report(report: &stealth_engine::Report) -> String {
         let one = conflicted.len() == 1;
         lines.push(format!(
             "Left out {} transaction{} Core reports as conflicted: {}, or a transaction \
-             it depends on, conflicts with another one, so {} not part of the wallet's history.",
+             it depends on, conflicts with another one, so {} not part of the wallet's history. \
+             {}",
             conflicted.len(),
             if one { "" } else { "s" },
             if one { "it" } else { "each" },
             if one { "it is" } else { "they are" },
+            if one {
+                "It may still have been seen by the network before it was replaced; \
+                 Stealth does not analyze it."
+            } else {
+                "They may still have been seen by the network before they were replaced; \
+                 Stealth does not analyze them."
+            },
         ));
         lines.extend(conflicted.iter().map(|txid| format!("  {txid}")));
         lines.push(String::new());

@@ -340,7 +340,8 @@ mod ordering {
             text.contains(&format!(
                 "Left out 1 transaction Core reports as conflicted: it, or a transaction \
                  it depends on, conflicts with another one, so it is not part of the wallet's \
-                 history.\n  {CONFLICTED}\n"
+                 history. It may still have been seen by the network before it was replaced; \
+                 Stealth does not analyze it.\n  {CONFLICTED}\n"
             )),
             "{text}"
         );
@@ -360,7 +361,8 @@ mod ordering {
             text.contains(&format!(
                 "Left out 2 transactions Core reports as conflicted: each, or a transaction \
                  it depends on, conflicts with another one, so they are not part of the wallet's \
-                 history.\n  {CONFLICTED}\n  {other}\n"
+                 history. They may still have been seen by the network before they were \
+                 replaced; Stealth does not analyze them.\n  {CONFLICTED}\n  {other}\n"
             )),
             "{text}"
         );
