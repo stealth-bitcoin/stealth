@@ -197,3 +197,73 @@ fn toxic_change_findings_name_their_output() {
     assert_ne!(toxic[0].description, toxic[1].description);
     assert_ne!(toxic[0].details, toxic[1].details);
 }
+
+/// The parent's outputs stay unspent (no child tx), with only `listed`
+/// vouts in the UTXO list. `descriptor` marks `own` through wallet
+/// receive entries instead of derived addresses.
+fn unspent_history(listed: &[u32], descriptor: bool) -> WalletHistory {
+    let mut h = history(true);
+    let (parent, child) = (txid(PARENT), txid(CHILD));
+    let own = tr(1);
+    h.transactions.remove(&child);
+    h.wallet_txs.retain(|e| e.txid != child);
+    h.utxos = listed
+        .iter()
+        .map(|&vout| Utxo {
+            txid: parent,
+            vout,
+            address: Some(own.clone()),
+            amount: Amount::from_sat(600),
+            confirmations: 3,
+            script_type: DescriptorType::P2tr,
+        })
+        .collect();
+    if descriptor {
+        h.derived_addresses.clear();
+        h.wallet_txs
+            .push(entry(parent, Some(&own), WalletTxCategory::Receive, 1_200));
+    }
+    h
+}
+
+#[test]
+fn unspent_dust_missing_from_pasted_utxos_is_not_called_spent() {
+    assert_eq!(
+        parent_dust(unspent_history(&[1], false)),
+        vec![("unspent".to_string(), 0), ("unspent".to_string(), 1)],
+    );
+}
+
+#[test]
+fn frozen_dust_left_out_of_listunspent_is_not_called_spent() {
+    assert_eq!(
+        parent_dust(unspent_history(&[], true)),
+        vec![("unspent".to_string(), 0), ("unspent".to_string(), 1)],
+    );
+}
+
+fn parent_dust_descriptions(history: WalletHistory) -> Vec<String> {
+    let parent = txid(PARENT).to_string();
+    let mut found: Vec<String> = findings(history, VulnerabilityType::Dust)
+        .into_iter()
+        .filter(|f| {
+            f.details
+                .as_ref()
+                .is_some_and(|d| d["txid"].as_str() == Some(parent.as_str()))
+        })
+        .map(|f| f.description)
+        .collect();
+    found.sort();
+    found
+}
+
+#[test]
+fn dust_descriptions_name_their_output() {
+    let parent = txid(PARENT);
+    for history in [history(true), unspent_history(&[0, 1], false)] {
+        let descriptions = parent_dust_descriptions(history);
+        assert_eq!(descriptions.len(), 2);
+        assert!(descriptions[0].contains(&format!("{parent}:0")));
+        assert!(descriptions[1].contains(&format!("{parent}:1")));
+    }
+}
