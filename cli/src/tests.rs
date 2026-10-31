@@ -853,18 +853,38 @@ mod history_limit {
         );
         assert!(asking.join().unwrap().is_err());
         assert!(
-            !interrupts.cancelled(),
-            "the stop path handles it, not a cancel"
+            !interrupts.interrupt(),
+            "a second interrupt must not hide the stop's error"
         );
     }
 
     #[test]
-    fn an_interrupt_outside_the_question_cancels_and_a_second_one_exits() {
-        let interrupts = Interrupts::default();
-        assert!(!interrupts.interrupt());
-        assert!(interrupts.cancelled());
-        assert!(interrupts.progress.cancel_requested());
-        assert!(interrupts.interrupt());
+    fn an_interrupt_outside_the_question_exits_at_once() {
+        assert!(Interrupts::default().interrupt());
+    }
+
+    fn interrupts_after_answering(typed: &'static str) -> Arc<Interrupts> {
+        let interrupts = Arc::new(Interrupts::default());
+        let limit = HistoryLimit {
+            ask: Some(terminal_ask(
+                move || typed.as_bytes(),
+                io::sink,
+                Arc::clone(&interrupts),
+            )),
+            ..HistoryLimit::at_most(3)
+        };
+        let _ = limit.check(5);
+        interrupts
+    }
+
+    #[test]
+    fn after_a_typed_no_interrupts_wait_for_the_error() {
+        assert!(!interrupts_after_answering("n\n").interrupt());
+    }
+
+    #[test]
+    fn after_a_yes_an_interrupt_exits_at_once() {
+        assert!(interrupts_after_answering("y\n").interrupt());
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::{env, fs, thread};
 
@@ -11,7 +10,6 @@ use stealth_engine::engine::{
     DEFAULT_MAX_WALLET_TXS,
 };
 use stealth_engine::error::{AnalysisError, HistoryOf};
-use stealth_engine::progress::ScanProgress;
 use stealth_engine::types::{Finding, Summary};
 
 fn main() -> ExitCode {
@@ -50,7 +48,7 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     let gateway = opts.build_gateway()?;
     let target = opts.scan_target()?;
 
-    // Without a handler Ctrl-C ends the process before the scan wallet is unloaded.
+    // Ctrl-C at the question must not end the process before the scan wallet is unloaded.
     let interrupts = Arc::new(Interrupts::default());
     let handler = Arc::clone(&interrupts);
     let _ = ctrlc::set_handler(move || {
@@ -63,13 +61,8 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
         .then(|| terminal_ask(|| io::stdin().lock(), io::stderr, Arc::clone(&interrupts)));
     let mut settings = opts.engine_settings()?;
     settings.history_limit = opts.history_limit(ask);
-    settings.progress = Some(interrupts.progress.clone());
     let engine = AnalysisEngine::new(&gateway, settings);
-    let result = engine.analyze(target);
-    if interrupts.cancelled() {
-        return Err("scan interrupted".to_owned());
-    }
-    let report = result.map_err(scan_error)?;
+    let report = engine.analyze(target).map_err(scan_error)?;
 
     match opts.format.as_deref() {
         Some("text") | None => print_text_report(&report),
@@ -126,38 +119,48 @@ enum Reply {
     Interrupted,
 }
 
+/// Where the scan is, for Ctrl-C.
+#[derive(Debug, Default)]
+enum Moment {
+    #[default]
+    Scanning,
+    Asking(mpsc::Sender<Reply>),
+    /// Answered no: the scan is unloading its wallet on its way to the error.
+    Stopping,
+}
+
 /// What Ctrl-C does: while the question waits it answers no, so the scan
-/// stops the usual way and unloads its wallet; otherwise it cancels the scan,
-/// and a second one exits at once.
+/// stops the usual way and unloads its wallet; after a no it is ignored until
+/// the error prints; at any other moment it exits at once.
 #[derive(Debug, Default)]
 struct Interrupts {
-    waiting: Mutex<Option<mpsc::Sender<Reply>>>,
-    progress: ScanProgress,
-    seen: AtomicBool,
+    moment: Mutex<Moment>,
 }
 
 impl Interrupts {
     /// Whether the process should exit now.
     fn interrupt(&self) -> bool {
-        if let Some(reply) = self.waiting().take() {
-            let _ = reply.send(Reply::Interrupted);
-            return false;
+        let mut moment = self.moment();
+        match std::mem::replace(&mut *moment, Moment::Stopping) {
+            Moment::Asking(reply) => {
+                let _ = reply.send(Reply::Interrupted);
+                false
+            }
+            Moment::Stopping => false,
+            Moment::Scanning => {
+                *moment = Moment::Scanning;
+                true
+            }
         }
-        self.progress.request_cancel();
-        self.seen.swap(true, Ordering::Relaxed)
-    }
-
-    fn cancelled(&self) -> bool {
-        self.progress.cancel_requested()
     }
 
     #[cfg(test)]
     fn waiting_for_an_answer(&self) -> bool {
-        self.waiting().is_some()
+        matches!(*self.moment(), Moment::Asking(_))
     }
 
-    fn waiting(&self) -> MutexGuard<'_, Option<mpsc::Sender<Reply>>> {
-        self.waiting
+    fn moment(&self) -> MutexGuard<'_, Moment> {
+        self.moment
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -173,7 +176,7 @@ fn terminal_ask<R: BufRead, W: Write>(
     let input = Arc::new(input);
     Arc::new(move |of, tx_count, limit| {
         let (reply, answer) = mpsc::channel();
-        *interrupts.waiting() = Some(reply.clone());
+        *interrupts.moment() = Moment::Asking(reply.clone());
         show_question(of, tx_count, limit, &mut output());
         let input = Arc::clone(&input);
         // Read apart so an interrupt can answer instead; a read left blocked ends with the process.
@@ -182,9 +185,13 @@ fn terminal_ask<R: BufRead, W: Write>(
             let _ = input().read_line(&mut line);
             let _ = reply.send(Reply::Line(line));
         });
-        let got = answer.recv();
-        interrupts.waiting().take();
-        matches!(got, Ok(Reply::Line(line)) if is_yes(&line))
+        let go_on = matches!(answer.recv(), Ok(Reply::Line(line)) if is_yes(&line));
+        *interrupts.moment() = if go_on {
+            Moment::Scanning
+        } else {
+            Moment::Stopping
+        };
+        go_on
     })
 }
 
