@@ -103,8 +103,8 @@ Stealth currently runs **16 detectors** in `stealth-engine`.
 | --- | ------------------------ | ---------------- | ------------------------------------------------------ |
 | 1   | `ADDRESS_REUSE`          | HIGH             | Same receive address used across multiple transactions |
 | 2   | `CIOH`                   | HIGH - CRITICAL  | Multi-input ownership linkage                          |
-| 3   | `DUST`                   | MEDIUM - CRITICAL | Dust outputs received/spent (escalated to CRITICAL when the parent matches a dust-attack pattern) |
-| 4   | `DUST_SPENDING`          | HIGH             | Dust merged with normal inputs                         |
+| 3   | `DUST`                   | LOW - CRITICAL   | Dust outputs received/spent (escalated to CRITICAL when the parent matches a dust-attack pattern) |
+| 4   | `DUST_SPENDING`          | HIGH (MEDIUM in partial scans) | Dust merged with normal inputs           |
 | 5   | `CHANGE_DETECTION`       | MEDIUM           | Identifiable change output patterns                    |
 | 6   | `CONSOLIDATION`          | MEDIUM           | Consolidation transactions linking clusters            |
 | 7   | `SCRIPT_TYPE_MIXING`     | HIGH             | Mixed script types that fingerprint wallet behavior    |
@@ -116,7 +116,7 @@ Stealth currently runs **16 detectors** in `stealth-engine`.
 | 13  | `PEEL_CHAIN`             | HIGH - CRITICAL  | Repeated peeling flow across hops                      |
 | 14  | `DETERMINISTIC_LINK`     | HIGH             | Deterministic input-output mapping                     |
 | 15  | `UNNECESSARY_INPUT`      | MEDIUM           | Extra inputs increasing CIOH exposure                  |
-| 16  | `TOXIC_CHANGE`           | HIGH             | Toxic change consolidation patterns                    |
+| 16  | `TOXIC_CHANGE`           | HIGH (MEDIUM in partial scans) | Toxic change consolidation patterns      |
 
 ### Warning types
 

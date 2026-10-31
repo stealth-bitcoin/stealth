@@ -16,8 +16,8 @@ Primary public scanning API: `TxGraph::detect_all(...)`.
 | --- | --------------------------------------- | ---------------- |
 | 1   | Address reuse                           | HIGH             |
 | 2   | Common-input-ownership heuristic (CIOH) | HIGH – CRITICAL  |
-| 3   | Dust UTXO reception                     | MEDIUM – HIGH    |
-| 4   | Dust spent alongside normal inputs      | HIGH             |
+| 3   | Dust UTXO reception                     | LOW – CRITICAL   |
+| 4   | Dust spent alongside normal inputs      | HIGH (MEDIUM in partial scans) |
 | 5   | Identifiable change outputs             | MEDIUM           |
 | 6   | UTXOs born from consolidation txs       | MEDIUM           |
 | 7   | Mixed script types in inputs            | HIGH             |
@@ -30,7 +30,7 @@ Primary public scanning API: `TxGraph::detect_all(...)`.
 | 14  | Peel chain                              | HIGH – CRITICAL  |
 | 15  | Deterministic input-output link         | HIGH             |
 | 16  | Unnecessary input                       | MEDIUM           |
-| 17  | Toxic change                            | HIGH             |
+| 17  | Toxic change                            | HIGH (MEDIUM in partial scans) |
 
 ## Prerequisites
 
