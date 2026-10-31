@@ -14,10 +14,12 @@ use crate::types::*;
 /// How to get rid of a live dust coin without linking it, given after "freeze it".
 const FEE_ONLY_SPEND: &str = "To get rid of it, spend it alone as fee: one coin per transaction, \
      with a single input and one 0-value OP_RETURN output carrying 4 bytes of data, sent when \
-     mempool fee rates are low enough for it to confirm (a 546-sat coin pays about 6 to 7 sat/vB from a native segwit or \
-     taproot address, about 5 from wrapped segwit and about 3 from legacy). \
-     If the coin holds an ordinals inscription or runes, spending it as fee loses them: \
-     an ordinals inscription goes to the miner and runes are burned; either way they are lost.";
+     mempool fee rates are low enough for it to confirm (a 546-sat coin pays about 6 to 7 sat/vB \
+     from a native segwit or taproot address, about 5 from wrapped segwit and about 3 from \
+     legacy). Send each one apart from the others, at different times and not in the same \
+     block, since transactions of the same shape sent together can be grouped. If the coin \
+     holds an ordinals inscription or runes, spending it as fee loses them: an ordinals \
+     inscription goes to the miner and runes are burned; either way they are lost.";
 
 impl TxGraph {
     // ── 3. Dust UTXO Detection ─────────────────────────────────────────────

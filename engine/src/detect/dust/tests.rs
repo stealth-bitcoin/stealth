@@ -212,6 +212,8 @@ fn unspent_dust_advice_freezes_first_then_offers_a_standard_fee_only_spend() {
          about 5 from wrapped segwit and about 3 from legacy",
         // With no runestone or other output, runes are burned, not paid to the miner.
         "an ordinals inscription goes to the miner and runes are burned; either way they are lost",
+        // Same-shape transactions sent together can be grouped.
+        "each one apart from the others, at different times and not in the same block",
     ] {
         assert!(correction.contains(needle), "{needle}: {correction}");
     }
@@ -522,5 +524,11 @@ fn attack_dust_paid_to_an_output_with_no_address_but_a_value_keeps_critical() {
     let mut p2pk = op_return(1);
     p2pk.value = Amount::from_sat(20_000);
     let findings = spent_dust(9, &[(&a, 50_000)], vec![out(0, &a, 29_000), p2pk]);
+    assert_moved_elsewhere(&findings, 9);
+}
+
+#[test]
+fn attack_dust_spent_alone_into_an_op_return_and_a_payment_keeps_critical() {
+    let findings = spent_dust(9, &[], vec![op_return(0), out(1, &wpkh(150), 400)]);
     assert_moved_elsewhere(&findings, 9);
 }
