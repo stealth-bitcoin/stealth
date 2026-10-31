@@ -130,6 +130,25 @@ function effectiveKind(kind, descriptor) {
   return kind
 }
 
+function ConflictedNote({ txids }) {
+  if (txids.length === 0) return null
+  const one = txids.length === 1
+  return (
+    <div className={styles.scopeNote}>
+      <p className={styles.noteText}>
+        Left out {txids.length} {one ? 'transaction' : 'transactions'} Core reports as
+        conflicted: {one ? 'it conflicts' : 'each conflicts'} with another
+        transaction, so {one ? 'it is' : 'they are'} not part of the wallet's history.
+      </p>
+      <ul className={styles.txidList}>
+        {txids.map((txid) => (
+          <li key={txid} className={styles.txid}>{txid}</li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 export default function ReportScreen({ report, descriptor, kind: rawKind, onReset }) {
   const { stats, findings, warnings, summary } = report
   const kind = effectiveKind(rawKind, descriptor)
@@ -192,6 +211,9 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
             only the outputs you pasted.
           </div>
         )}
+
+        {/* Conflicted transactions left out */}
+        <ConflictedNote txids={stats.conflicted_txids ?? []} />
 
         {/* Nothing-analyzed banner */}
         {summary.analyzed_nothing && findings.length === 0 && warnings.length === 0 && (

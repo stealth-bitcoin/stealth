@@ -160,6 +160,22 @@
   margin-bottom: 28px;
 }
 
+.noteText {
+  margin: 0;
+}
+
+.txidList {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.txid {
+  font-family: var(--font-data);
+  font-size: 12px;
+  word-break: break-all;
+}
+
 /* Nothing-analyzed banner */
 .emptyBanner {
   background: var(--surface);

@@ -7,10 +7,10 @@ afterEach(cleanup)
 
 // Mirrors Report::new in model/src/types.rs: a scan is clean only when it
 // analyzed something and found nothing.
-function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0 } = {}) {
+function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0, conflicted = [] } = {}) {
   const analyzedNothing = txs === 0
   return {
-    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved },
+    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved, conflicted_txids: conflicted },
     findings,
     warnings,
     summary: {
@@ -387,5 +387,33 @@ describe('ReportScreen — history the node could not serve', () => {
     render(<ReportScreen report={makeReport({ txs: 2, findings: [reuse] })} descriptor={two} kind="utxos" onReset={() => {}} />)
     expect(screen.queryByText(/could not serve/i)).toBeNull()
     expect(screen.queryByText(/you pasted/i)).toBeNull()
+  })
+})
+
+describe('ReportScreen — conflicted transactions left out', () => {
+  const original = '515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb'
+  const other = 'a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab'
+
+  it('names the conflicted transaction and says why it was left out', () => {
+    render(<ReportScreen report={makeReport({ txs: 2, conflicted: [original] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.getByText(/left out 1 transaction core reports as conflicted: it conflicts with another transaction, so it is not part of the wallet's history/i)).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+  })
+
+  it('names every one of several', () => {
+    render(<ReportScreen report={makeReport({ txs: 2, conflicted: [original, other] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.getByText(/left out 2 transactions core reports as conflicted: each conflicts with another transaction, so they are not part/i)).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+    expect(screen.getByText(other)).toBeTruthy()
+  })
+
+  it('says nothing when no transaction was left out, or the report predates the field', () => {
+    const report = makeReport({ txs: 2 })
+    render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.queryByText(/conflicted/i)).toBeNull()
+    cleanup()
+    delete report.stats.conflicted_txids
+    render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.queryByText(/conflicted/i)).toBeNull()
   })
 })
