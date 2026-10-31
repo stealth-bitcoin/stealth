@@ -58,7 +58,7 @@ fn tx(id: Txid, vin: Vec<TxInputRef>, vout: Vec<TxOutput>) -> DecodedTransaction
 
 // We receive a sweep of two addressless outputs (P2PK, bare multisig) and one
 // output at someone else's address; every funding transaction is known.
-fn sweep_of_addressless_prevouts(ranged: bool) -> WalletHistory {
+fn sweep_of_addressless_prevouts(ranged: bool, internal: bool) -> WalletHistory {
     let ours = wpkh(1);
     let (funding_a, funding_b, sweep) = (txid(0xa1), txid(0xa2), txid(0xc0));
     let transactions = [
@@ -96,7 +96,11 @@ fn sweep_of_addressless_prevouts(ranged: bool) -> WalletHistory {
             script_type: DescriptorType::P2wpkh,
         }],
         transactions: transactions.into_iter().map(|t| (t.txid, t)).collect(),
-        internal_addresses: HashSet::new(),
+        internal_addresses: if internal {
+            HashSet::from([wpkh(1)])
+        } else {
+            HashSet::new()
+        },
         derived_addresses: HashSet::new(),
         ranged_addresses: if ranged {
             HashSet::from([wpkh(1)])
@@ -106,9 +110,9 @@ fn sweep_of_addressless_prevouts(ranged: bool) -> WalletHistory {
     }
 }
 
-// `ranged` says whether our coin's address came from a ranged descriptor.
-fn scan(ranged: bool) -> Report {
-    TxGraph::from_wallet_history(sweep_of_addressless_prevouts(ranged)).detect_all(
+// `ranged`/`internal`: whether our coin's address came from a ranged / change descriptor.
+fn scan(ranged: bool, internal: bool) -> Report {
+    TxGraph::from_wallet_history(sweep_of_addressless_prevouts(ranged, internal)).detect_all(
         &Default::default(),
         None,
         None,
@@ -126,12 +130,12 @@ fn consolidation_count(report: &Report) -> usize {
 
 #[test]
 fn addressless_known_prevouts_are_not_unresolved_in_a_full_scan() {
-    assert_eq!(consolidation_count(&scan(true)), 0);
+    assert_eq!(consolidation_count(&scan(true, false)), 0);
 }
 
 #[test]
 fn addressless_known_prevouts_count_as_unrecognised() {
-    let report = scan(false);
+    let report = scan(false, false);
     assert_eq!(consolidation_count(&report), 1);
     let warning = report
         .warnings
@@ -143,4 +147,30 @@ fn addressless_known_prevouts_count_as_unrecognised() {
     assert_eq!(details["our_inputs_in_consolidation"], 0);
     assert_eq!(details["unrecognised_inputs"], 3);
     assert_eq!(details["unresolved_inputs"], 0);
+}
+
+fn consolidation_warning(report: &Report) -> &stealth_engine::Finding {
+    report
+        .warnings
+        .iter()
+        .find(|w| w.vulnerability_type == VulnerabilityType::Consolidation)
+        .expect("expected a consolidation warning")
+}
+
+#[test]
+fn a_ranged_change_address_names_the_possible_causes() {
+    let report = scan(true, true);
+    let description = &consolidation_warning(&report).description;
+    assert!(
+        description.contains("another account or script type"),
+        "{description}"
+    );
+}
+
+#[test]
+fn a_fixed_change_address_gets_the_plain_wording() {
+    let report = scan(false, true);
+    let description = &consolidation_warning(&report).description;
+    assert!(description.contains("cannot tell whose"), "{description}");
+    assert!(!description.contains("another account"), "{description}");
 }

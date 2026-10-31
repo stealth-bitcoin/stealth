@@ -90,19 +90,20 @@ impl TxGraph {
                     utxo.vout,
                     utxo.amount.to_btc()
                 );
-                // Unfetched inputs leave nothing to attribute, so say only that.
-                let (description, correction) = if on_change && unresolved == 0 {
+                // Only a ranged change address with every input fetched points at our wallet.
+                let (description, correction) = if on_change && vouched && unresolved == 0 {
                     (
                         format!(
                             "{coin} sits on your change address and came from a {n_in}-input \
                              consolidation; this scan recognises {ours} of its inputs as yours \
                              and cannot tell whose the others are. Either your wallet merged \
-                             coins from another account or script type, or this was a \
-                             collaborative transaction (Payjoin, CoinJoin, dual-funded channel) \
-                             whose other inputs belong to others"
+                             coins from another account or script type, or coins of this wallet \
+                             beyond the scanned derivation range, or this was a collaborative \
+                             transaction (Payjoin, CoinJoin, dual-funded channel) whose other \
+                             inputs belong to others"
                         ),
-                        "If these inputs were yours, from another account or script type: \
-                         avoid merging many coins in one transaction; consolidate through a \
+                        "If these inputs were yours, from another account, script type or \
+                         beyond the scanned derivation range: avoid merging many coins in one transaction; consolidate through a \
                          CoinJoin, or inside a Payjoin (BIP-78) payment so the merge looks like \
                          an ordinary spend.",
                     )

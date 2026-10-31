@@ -624,3 +624,56 @@ fn unresolved_inputs_on_a_change_address_get_the_unchecked_wording() {
         warning.description
     );
 }
+
+// A watch-only wallet imports one fixed address, which then receives bob's sweep.
+fn watch_a_fixed_address_receiving_a_sweep(node: &Node) {
+    let da = node.client.new_address().unwrap();
+    mine(node, 110, &da);
+    node.client
+        .call::<serde_json::Value>(
+            "createwallet",
+            &[
+                serde_json::json!("watch"),
+                serde_json::json!(true),
+                serde_json::json!(true),
+            ],
+        )
+        .unwrap();
+    let watch = corepc_node::Client::new_with_auth(
+        &node.rpc_url_with_wallet("watch"),
+        corepc_node::client::client_sync::Auth::CookieFile(node.params.cookie_file.clone()),
+    )
+    .unwrap();
+    let carol = node.create_wallet("carol").unwrap();
+    let watched = carol.new_address().unwrap();
+    let info: serde_json::Value = node
+        .client
+        .call(
+            "getdescriptorinfo",
+            &[serde_json::json!(format!("addr({watched})"))],
+        )
+        .unwrap();
+    let imported: serde_json::Value = watch
+        .call(
+            "importdescriptors",
+            &[serde_json::json!([{
+                "desc": info["descriptor"],
+                "timestamp": "now",
+            }])],
+        )
+        .unwrap();
+    assert_eq!(imported[0]["success"], true, "{imported}");
+
+    let bob = node.create_wallet("bob").unwrap();
+    let inputs = fund_coins(node, &bob, 4, 300_000);
+    merge_into(node, &[&bob], &inputs, watched, 1_200_000);
+}
+
+#[test]
+fn wallet_scan_warns_on_a_sweep_to_an_imported_fixed_address() {
+    let node = node();
+    watch_a_fixed_address_receiving_a_sweep(&node);
+
+    let gateway = gateway_for(&node);
+    assert_consolidation_warning(&scan_wallet(&gateway, "watch"), 0, 4, 0);
+}

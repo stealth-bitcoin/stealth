@@ -350,6 +350,7 @@ pub fn assert_change_address_wording(warning: &stealth_engine::Finding) {
     for part in [
         "your change address",
         "another account or script type",
+        "beyond the scanned derivation range",
         "collaborative transaction (Payjoin, CoinJoin, dual-funded channel)",
     ] {
         assert!(
@@ -360,7 +361,10 @@ pub fn assert_change_address_wording(warning: &stealth_engine::Finding) {
     }
     let correction = warning.correction.as_deref().unwrap_or_default();
     assert!(
-        correction.starts_with("If these inputs were yours, from another account or script type:"),
+        correction.starts_with(
+            "If these inputs were yours, from another account, script type or beyond the \
+             scanned derivation range:"
+        ),
         "{correction}"
     );
 }
