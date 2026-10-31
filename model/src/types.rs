@@ -198,6 +198,10 @@ pub struct Stats {
     /// has them, sorted by their displayed hex.
     #[serde(default)]
     pub unavailable_txids: Vec<Txid>,
+    /// Coinbases left out because their block is no longer in the chain,
+    /// sorted by their displayed hex.
+    #[serde(default)]
+    pub orphaned_txids: Vec<Txid>,
 }
 
 /// A wallet transaction a tx in the mempool conflicts with. That tx may not be
@@ -265,6 +269,7 @@ mod summary_tests {
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
             unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         }
     }
 
@@ -298,6 +303,7 @@ mod summary_tests {
         assert!(older.mempool_conflicted_txids.is_empty());
         assert!(older.abandoned_txids.is_empty());
         assert!(older.unavailable_txids.is_empty());
+        assert!(older.orphaned_txids.is_empty());
 
         let other = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
         with.mempool_conflicted_txids = vec![MempoolConflict {

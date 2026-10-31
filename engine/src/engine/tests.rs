@@ -1020,7 +1020,9 @@ fn a_utxo_scan_names_the_replaced_and_abandoned_txs_of_the_address_history() {
     history.left_out.mempool_conflicted = [(txid(40), txid(41))].into();
     history.left_out.abandoned = [txid(42)].into();
     history.left_out.unavailable = [txid(43)].into();
+    history.left_out.orphaned = [txid(44)].into();
     let report = scan(&FakeGateway::new(Ok(history)));
+    assert_eq!(report.stats.orphaned_txids, [txid(44)]);
     assert_eq!(report.stats.unavailable_txids, [txid(43)]);
     assert_eq!(report.stats.mempool_conflicted_txids.len(), 1);
     assert_eq!(report.stats.abandoned_txids, [txid(42)]);

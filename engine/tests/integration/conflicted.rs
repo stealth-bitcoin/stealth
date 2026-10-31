@@ -689,3 +689,35 @@ fn a_payment_whose_outside_parent_was_double_spent_is_left_out_as_unavailable() 
         mine(&node, 1, &miner);
     }
 }
+
+/// A block mined to the wallet is invalidated: its coinbase shows as an
+/// orphan, which Core also marks abandoned.
+#[test]
+fn a_coinbase_from_a_block_no_longer_in_the_chain_is_left_out_as_orphaned() {
+    let node = node();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let alice = node.create_wallet("alice").unwrap();
+    let hashes: Vec<String> = node
+        .client
+        .call(
+            "generatetoaddress",
+            &[json!(1), json!(alice.new_address().unwrap().to_string())],
+        )
+        .unwrap();
+    let block: Value = node.client.call("getblock", &[json!(hashes[0])]).unwrap();
+    let coinbase: Txid = block["tx"][0].as_str().unwrap().parse().unwrap();
+    let _: Value = node
+        .client
+        .call("invalidateblock", &[json!(hashes[0])])
+        .unwrap();
+
+    let entry: Value = alice
+        .call("gettransaction", &[json!(coinbase.to_string())])
+        .unwrap();
+    assert_eq!(entry["details"][0]["category"], json!("orphan"), "{entry}");
+
+    let report = scan_wallet(&gateway_for(&node), "alice");
+    assert_eq!(report.stats.orphaned_txids, vec![coinbase]);
+    assert!(report.stats.abandoned_txids.is_empty());
+}

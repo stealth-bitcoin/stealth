@@ -87,6 +87,8 @@ impl TxGraph {
         abandoned_txids.sort_by_cached_key(Txid::to_string);
         let mut unavailable_txids: Vec<Txid> = self.left_out.unavailable.iter().copied().collect();
         unavailable_txids.sort_by_cached_key(Txid::to_string);
+        let mut orphaned_txids: Vec<Txid> = self.left_out.orphaned.iter().copied().collect();
+        orphaned_txids.sort_by_cached_key(Txid::to_string);
 
         let stats = Stats {
             transactions_analyzed: self.our_txids.len(),
@@ -97,6 +99,7 @@ impl TxGraph {
             mempool_conflicted_txids,
             abandoned_txids,
             unavailable_txids,
+            orphaned_txids,
         };
 
         Report::new(stats, findings, warnings)

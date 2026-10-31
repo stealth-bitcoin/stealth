@@ -277,6 +277,9 @@ pub struct LeftOut {
     /// evicted from the mempool, abandoned in another wallet, or never broadcast.
     #[serde(default)]
     pub unavailable: BTreeSet<Txid>,
+    /// Coinbases from a block no longer in the chain.
+    #[serde(default)]
+    pub orphaned: BTreeSet<Txid>,
 }
 
 impl LeftOut {
@@ -285,6 +288,7 @@ impl LeftOut {
         self.mempool_conflicted.extend(other.mempool_conflicted);
         self.abandoned.extend(other.abandoned);
         self.unavailable.extend(other.unavailable);
+        self.orphaned.extend(other.orphaned);
     }
 }
 

@@ -568,6 +568,9 @@ impl BitcoinCoreRpc {
                 .map(String::as_str);
             if is_conflicted(entry.confirmations) {
                 left_out.conflicted.insert(txid()?);
+            } else if unconfirmed && entry.category.as_deref() == Some("orphan") {
+                // Core marks it abandoned too; it is a coinbase from a stale block.
+                left_out.orphaned.insert(txid()?);
             } else if unconfirmed && entry.abandoned == Some(true) {
                 left_out.abandoned.insert(txid()?);
             } else if let (true, Some(by)) = (unconfirmed, conflicts_with) {
@@ -2492,6 +2495,24 @@ mod tests {
             "abandoned": abandoned, "replaced_by_txid": replaced_by,
             "mempoolconflicts": mempool_conflicts, "txid": txid, "vout": 0,
         })
+    }
+
+    #[test]
+    fn a_coinbase_from_a_block_no_longer_in_the_chain_counts_as_orphaned_not_abandoned() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([{
+            "address": ADDR, "amount": 50.0, "category": "orphan", "confirmations": 0,
+            "abandoned": true, "generated": true, "mempoolconflicts": [],
+            "blockhash": TXID, "blockheight": 111, "txid": ORIGINAL, "vout": 0,
+            "walletconflicts": [],
+        }]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert!(kept.is_empty());
+        assert!(left_out.abandoned.is_empty());
+        assert_eq!(
+            left_out.orphaned.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
     }
 
     #[test]

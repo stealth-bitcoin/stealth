@@ -236,6 +236,7 @@ mod ordering {
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
             unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         };
         stealth_engine::Report::new(stats, findings, warnings)
     }
@@ -274,6 +275,7 @@ mod ordering {
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
             unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert_eq!(
@@ -305,6 +307,7 @@ mod ordering {
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
             unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(
             stats,
@@ -332,6 +335,7 @@ mod ordering {
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
             unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert!(text.contains("No privacy issues found."), "{text}");
@@ -391,6 +395,7 @@ mod ordering {
             mempool_conflicted_txids: Vec::new(),
             abandoned_txids: Vec::new(),
             unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert!(text.contains(CONFLICTED), "{text}");
@@ -519,6 +524,7 @@ mod ordering {
                 mempool_conflicted_txids,
                 abandoned_txids,
                 unavailable_txids: Vec::new(),
+                orphaned_txids: Vec::new(),
             };
             let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
             assert!(text.contains(CONFLICTED), "{text}");
