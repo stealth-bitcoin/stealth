@@ -111,8 +111,10 @@ impl TxGraph {
             if our_outputs.is_empty() {
                 continue;
             }
-            // Already reported as a dust attack, which is not a withdrawal.
-            if self.dust_attack_evidence(txid, thresholds).is_some() {
+            // Dust we received here is already reported as a dust attack.
+            if our_outputs.iter().any(|o| o.value <= thresholds.dust)
+                && self.dust_attack_evidence(txid, thresholds).is_some()
+            {
                 continue;
             }
 

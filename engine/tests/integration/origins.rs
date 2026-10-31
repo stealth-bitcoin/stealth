@@ -179,6 +179,61 @@ fn exchange_batch_median_skips_outputs_to_input_address() {
     );
 }
 
+// A payout that sends the wallet a normal amount alongside many dust outputs
+// matches the dust-attack pattern, but the wallet's coin is not dust and gets
+// no dust finding, so the batch signals still decide.
+#[test]
+fn exchange_batch_with_normal_payout_among_dust_still_counts() {
+    let mut recipients = vec![100_000];
+    recipients.extend([330; 11]);
+    let report = exchange_batch_report(&recipients, &[]);
+    assert!(
+        !has_finding(&report, VulnerabilityType::Dust),
+        "the wallet received no dust: {:?}",
+        report.findings
+    );
+    assert!(
+        has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "twelve distinct recipients is a batch: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn exchange_batch_paying_dust_without_attack_pattern_still_counts() {
+    let report = exchange_batch_report(&[800, 100_000, 100_000, 100_000, 100_000], &[]);
+    assert!(
+        has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "a small payout in a five-recipient batch is still a batch: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn dust_class_payout_in_dust_attack_is_not_exchange_origin() {
+    // 800 sats is dust-class but above strict dust; the dust finding still
+    // carries the attack evidence, so no exchange origin.
+    let mut recipients = vec![800];
+    recipients.extend([330; 11]);
+    let report = exchange_batch_report(&recipients, &[]);
+    assert!(
+        report.findings.iter().any(|f| {
+            f.vulnerability_type == VulnerabilityType::Dust
+                && f.details
+                    .as_ref()
+                    .and_then(|d| d.get("dust_attack"))
+                    .is_some()
+        }),
+        "expected a dust-attack finding: {:?}",
+        report.findings
+    );
+    assert!(
+        !has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "dust from a dust attack is not an exchange payout: {:?}",
+        report.findings
+    );
+}
+
 // ─── 11. Tainted UTXOs ─────────────────────────────────────────────────────
 
 #[test]
