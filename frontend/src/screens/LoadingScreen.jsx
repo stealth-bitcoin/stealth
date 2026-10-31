@@ -15,7 +15,7 @@ const formatCount = (n) => Number(n).toLocaleString('en-US')
 
 // Whose history the scan counted, as the API names it in limit_exceeded.of.
 const HISTORY_WORDING = {
-  wallet: { title: 'This wallet has a large history', holds: 'It holds' },
+  wallet: { title: 'This scan has a large history', holds: "This scan's history holds" },
   pasted_addresses: {
     title: "The pasted outputs' addresses have a large history",
     holds: 'Their history holds',

@@ -1103,7 +1103,10 @@ mod usage {
             "{entry}"
         );
         assert!(
-            entry.contains("only when run in the foreground with stdin and stderr on a terminal"),
+            entry.contains(
+                "only when run in the foreground with stdin and stderr on a terminal and \
+                 Ctrl-C not ignored"
+            ),
             "{entry}"
         );
     }

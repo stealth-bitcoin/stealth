@@ -48,9 +48,7 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     let gateway = opts.build_gateway()?;
     let target = opts.scan_target()?;
 
-    // Ctrl-C at the question must not end the process before the scan wallet is
-    // unloaded. A SIGINT ignored from the start (trap '' INT, a supervisor) stays
-    // ignored, and with nothing to answer the question it is not asked.
+    // Ctrl-C at the question answers no; an inherited SIG_IGN stays and means no question.
     let interrupts = Arc::new(Interrupts::default());
     let interruptible = !sigint_ignored();
     if interruptible {
@@ -267,8 +265,7 @@ fn terminal_ask<R: BufRead, W: Write>(
 ) -> AskToGoOn {
     let input = Arc::new(input);
     Arc::new(move |of, tx_count, limit| {
-        // Checked now, after the rescan: a background job reading the terminal
-        // is stopped by SIGTTIN with the wallet loaded.
+        // Checked after the rescan: a background job reading the terminal gets SIGTTIN.
         if !in_the_foreground() {
             return false;
         }
@@ -822,8 +819,8 @@ fn usage() -> String {
         "                           history can take long and put a heavy load on the",
         "                           node. The scan asks whether to go on instead of",
         "                           stopping, but only when run in the foreground",
-        "                           with stdin and stderr on a terminal; Ctrl-C there",
-        "                           counts as no.",
+        "                           with stdin and stderr on a terminal and Ctrl-C",
+        "                           not ignored; Ctrl-C there counts as no.",
         "  --no-limits              Lift the limit\n",
         "RPC CONNECTION:",
         "  --rpc-url <URL>          bitcoind RPC endpoint",
