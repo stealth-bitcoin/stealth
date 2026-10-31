@@ -711,6 +711,11 @@ fn a_coinbase_from_a_block_no_longer_in_the_chain_is_left_out_as_orphaned() {
         .client
         .call("invalidateblock", &[json!(hashes[0])])
         .unwrap();
+    // The wallet learns of the disconnected block asynchronously.
+    let _: Value = node
+        .client
+        .call("syncwithvalidationinterfacequeue", &[])
+        .unwrap();
 
     let entry: Value = alice
         .call("gettransaction", &[json!(coinbase.to_string())])
@@ -744,6 +749,11 @@ fn a_spend_of_a_coinbase_a_reorg_removed_is_listed_as_abandoned() {
     let _: Value = node
         .client
         .call("invalidateblock", &[json!(hashes[0])])
+        .unwrap();
+    // The wallet learns of the disconnected block asynchronously.
+    let _: Value = node
+        .client
+        .call("syncwithvalidationinterfacequeue", &[])
         .unwrap();
 
     let entry: Value = alice
