@@ -77,20 +77,35 @@ impl TxGraph {
                             .into(),
                     ),
                 });
-            } else if self.partial_ownership || unresolved > 0 {
-                // The scan cannot vouch for the other inputs, so it neither blames nor clears.
+            } else {
+                // Only the user's wallet pays its own change chain, so it likely built this merge.
+                let on_change = self.addr_map.get(&utxo.address).is_some_and(|m| m.internal);
+                if !(self.partial_ownership || unresolved > 0 || on_change) {
+                    continue;
+                }
+                let coin = format!(
+                    "UTXO {}:{} ({:.8} BTC)",
+                    utxo.txid,
+                    utxo.vout,
+                    utxo.amount.to_btc()
+                );
+                let description = if on_change {
+                    format!(
+                        "{coin} sits on your change address, so your wallet likely built the \
+                         {n_in}-input consolidation it came from; this scan recognises {ours} of \
+                         its inputs as yours and cannot tell whose the others are (another \
+                         account or script type?)"
+                    )
+                } else {
+                    format!(
+                        "{coin} came from a {n_in}-input consolidation; this scan recognises \
+                         {ours} of its inputs as yours and cannot tell whose the others are"
+                    )
+                };
                 warnings.push(Finding {
                     vulnerability_type: VulnerabilityType::Consolidation,
                     severity: Severity::Low,
-                    description: format!(
-                        "UTXO {}:{} ({:.8} BTC) came from a {}-input consolidation; this scan \
-                         recognises {} of its inputs as yours and cannot tell whose the others are",
-                        utxo.txid,
-                        utxo.vout,
-                        utxo.amount.to_btc(),
-                        n_in,
-                        ours
-                    ),
+                    description,
                     details: Some(details),
                     correction: Some(
                         "If these inputs were yours: avoid merging many coins in one \

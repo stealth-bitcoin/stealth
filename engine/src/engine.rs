@@ -81,7 +81,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .gateway
             .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let partial = !names_a_whole_wallet(&expanded);
+        let partial = !has_ranged_descriptor(&expanded);
         let graph = TxGraph::from_wallet_history(history).with_partial_ownership(partial);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
@@ -101,7 +101,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         for raw in &self.settings.ownership_descriptors {
             ownership.extend(expand_input(raw)?);
         }
-        let partial = !names_a_whole_wallet(&ownership);
+        let partial = !has_ranged_descriptor(&ownership);
         let graph = TxGraph::from_wallet_history(history).with_partial_ownership(partial);
         let mut report = graph.detect_all(
             &self.settings.config.thresholds,
@@ -308,11 +308,11 @@ fn name_pasted_output(error: AnalysisError, utxo: &UtxoInput) -> AnalysisError {
     }
 }
 
-/// True when some descriptor is ranged, so the scan covers a wallet's address
-/// space rather than a fixed set of scripts. In descriptor syntax (BIP 380)
-/// `*` occurs only as a derivation wildcard, never in keys, scripts or the
+/// True when some descriptor is ranged, i.e. derives a chain of addresses
+/// rather than naming fixed scripts. In descriptor syntax (BIP 380) `*`
+/// occurs only as a derivation wildcard, never in keys, scripts or the
 /// checksum, so its presence is the ranged check.
-pub(crate) fn names_a_whole_wallet(descriptors: &[String]) -> bool {
+pub(crate) fn has_ranged_descriptor(descriptors: &[String]) -> bool {
     descriptors.iter().any(|d| d.contains('*'))
 }
 

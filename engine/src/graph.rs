@@ -35,9 +35,9 @@ pub struct TxGraph {
     /// that spends that output. Built once from `input_cache` so child
     /// lookups during detection are O(1) instead of O(N·M).
     pub spending_index: HashMap<(Txid, u32), Txid>,
-    /// True when the scan knows only some of the user's addresses (a UTXO
-    /// scan without ownership descriptors, or `addr()` descriptors only), so
-    /// an input it does not recognise may still be the user's.
+    /// True when no descriptor of the scan is ranged (a UTXO scan without
+    /// ranged ownership descriptors, or fixed scripts such as `addr()`), so
+    /// the scan knows only a few of the user's addresses.
     pub partial_ownership: bool,
 }
 

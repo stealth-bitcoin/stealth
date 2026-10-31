@@ -488,3 +488,59 @@ fn detect_tainted_utxo_merge() {
     let report = scan_wallet_with(&gateway, "alice", Some(&risky_txids), None);
     assert!(has_finding(&report, VulnerabilityType::TaintedUtxoMerge));
 }
+
+// Alice merges one wpkh coin and three taproot coins into `dest`, then the
+// scan sees only her wpkh descriptors, as a zpub scan would.
+fn merge_across_script_types_into(
+    node: &Node,
+    dest: impl Fn(&corepc_node::Client) -> Address,
+) -> stealth_engine::Report {
+    let da = node.client.new_address().unwrap();
+    mine(node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let taproot = (0..3)
+        .map(|_| alice.new_address_with_type(AddressType::Bech32m).unwrap())
+        .collect();
+    let mut inputs = fund_coins_at(node, &alice, vec![alice.new_address().unwrap()], 300_000);
+    inputs.extend(fund_coins_at(node, &alice, taproot, 300_000));
+    merge_into(node, &[&alice], &inputs, dest(&alice), 1_200_000);
+
+    let wpkh: Vec<String> = wallet_descriptors(&alice)
+        .into_iter()
+        .filter(|d| d.starts_with("wpkh("))
+        .collect();
+    assert_eq!(wpkh.len(), 2, "receive and change wpkh descriptors");
+    let gateway = gateway_for(node);
+    AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Descriptors(wpkh))
+        .expect("descriptor scan failed")
+}
+
+#[test]
+fn ranged_scan_warns_when_a_consolidation_pays_our_change_address() {
+    let node = node();
+    let report = merge_across_script_types_into(&node, |alice| {
+        let change: String = alice
+            .call("getrawchangeaddress", &[serde_json::json!("bech32")])
+            .unwrap();
+        change.parse::<Address<_>>().unwrap().assume_checked()
+    });
+    assert_consolidation_warning(&report, 1, 3, 0);
+    let warning = report
+        .warnings
+        .iter()
+        .find(|w| w.vulnerability_type == VulnerabilityType::Consolidation)
+        .expect("warning");
+    assert!(
+        warning.description.contains("your change address"),
+        "{}",
+        warning.description
+    );
+}
+
+#[test]
+fn ranged_scan_is_silent_when_a_consolidation_pays_our_receive_address() {
+    let node = node();
+    let report = merge_across_script_types_into(&node, |alice| alice.new_address().unwrap());
+    assert_no_consolidation(&report);
+}
