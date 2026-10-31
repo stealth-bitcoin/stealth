@@ -12,6 +12,7 @@ keywords = ["bitcoin", "privacy", "cli"]
 exclude = ["tests"]
 
 [dependencies]
+ctrlc = "3.5.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 stealth-bitcoincore = { path = "../bitcoincore" }
@@ -19,6 +20,9 @@ stealth-engine = { workspace = true }
 
 [dev-dependencies]
 corepc-node = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2.191"
 
 [lints.rust]
 missing_debug_implementations = "deny"

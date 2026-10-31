@@ -98,8 +98,9 @@ After the rescan, Stealth counts the transactions in the scan wallet before
 it loads any of them. Above 5,000 it stops and says how many there are, since
 loading them can take long and put a heavy load on the node:
 
-- **CLI:** in a terminal it asks whether to go on. Elsewhere it stops with an
-  error; `--max-txs <n>` sets the limit and `--no-limits` lifts it.
+- **CLI:** in a terminal (stdin and stderr both) it asks whether to go on;
+  Ctrl-C there counts as no. Elsewhere it stops with an error;
+  `--max-txs <n>` sets the limit and `--no-limits` lifts it.
 - **Frontend:** the scan screen shows the count with "Scan anyway" and
   "Cancel".
 - **API:** the job fails with `limit_exceeded` set; send the scan again with

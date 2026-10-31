@@ -1,8 +1,9 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::{env, fs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::{env, fs, thread};
 
 use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc, RpcAuth};
 use stealth_engine::engine::{
@@ -10,6 +11,7 @@ use stealth_engine::engine::{
     DEFAULT_MAX_WALLET_TXS,
 };
 use stealth_engine::error::{AnalysisError, HistoryOf};
+use stealth_engine::progress::ScanProgress;
 use stealth_engine::types::{Finding, Summary};
 
 fn main() -> ExitCode {
@@ -48,10 +50,26 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     let gateway = opts.build_gateway()?;
     let target = opts.scan_target()?;
 
+    // Without a handler Ctrl-C ends the process before the scan wallet is unloaded.
+    let interrupts = Arc::new(Interrupts::default());
+    let handler = Arc::clone(&interrupts);
+    let _ = ctrlc::set_handler(move || {
+        if handler.interrupt() {
+            std::process::exit(130);
+        }
+    });
+
+    let ask = should_ask(io::stdin().is_terminal(), io::stderr().is_terminal())
+        .then(|| terminal_ask(|| io::stdin().lock(), io::stderr, Arc::clone(&interrupts)));
     let mut settings = opts.engine_settings()?;
-    settings.history_limit = opts.history_limit(io::stdin().is_terminal());
+    settings.history_limit = opts.history_limit(ask);
+    settings.progress = Some(interrupts.progress.clone());
     let engine = AnalysisEngine::new(&gateway, settings);
-    let report = engine.analyze(target).map_err(scan_error)?;
+    let result = engine.analyze(target);
+    if interrupts.cancelled() {
+        return Err("scan interrupted".to_owned());
+    }
+    let report = result.map_err(scan_error)?;
 
     match opts.format.as_deref() {
         Some("text") | None => print_text_report(&report),
@@ -79,14 +97,13 @@ fn scan_error(error: AnalysisError) -> String {
     }
 }
 
-/// Asks on `output` whether to load a history above the limit; only a yes goes on.
-fn ask_to_go_on(
-    of: HistoryOf,
-    tx_count: u64,
-    limit: u64,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> bool {
+/// The question is asked only where someone can both read it and answer it.
+fn should_ask(stdin_is_terminal: bool, stderr_is_terminal: bool) -> bool {
+    stdin_is_terminal && stderr_is_terminal
+}
+
+/// Asks on `output` whether to load a history above the limit.
+fn show_question(of: HistoryOf, tx_count: u64, limit: u64, output: &mut impl Write) {
     let whose = match of {
         HistoryOf::Wallet => "This wallet's history",
         HistoryOf::PastedAddresses => "The history of the pasted outputs' addresses",
@@ -97,20 +114,77 @@ fn ask_to_go_on(
          Loading it can take long and put a heavy load on the node. Go on? [y/N] "
     );
     let _ = output.flush();
-    let mut answer = String::new();
-    if input.read_line(&mut answer).is_err() {
-        return false;
-    }
+}
+
+/// Only a yes goes on.
+fn is_yes(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-/// An asker that reads the answer from what `open` hands it each time it asks.
+enum Reply {
+    Line(String),
+    Interrupted,
+}
+
+/// What Ctrl-C does: while the question waits it answers no, so the scan
+/// stops the usual way and unloads its wallet; otherwise it cancels the scan,
+/// and a second one exits at once.
+#[derive(Debug, Default)]
+struct Interrupts {
+    waiting: Mutex<Option<mpsc::Sender<Reply>>>,
+    progress: ScanProgress,
+    seen: AtomicBool,
+}
+
+impl Interrupts {
+    /// Whether the process should exit now.
+    fn interrupt(&self) -> bool {
+        if let Some(reply) = self.waiting().take() {
+            let _ = reply.send(Reply::Interrupted);
+            return false;
+        }
+        self.progress.request_cancel();
+        self.seen.swap(true, Ordering::Relaxed)
+    }
+
+    fn cancelled(&self) -> bool {
+        self.progress.cancel_requested()
+    }
+
+    #[cfg(test)]
+    fn waiting_for_an_answer(&self) -> bool {
+        self.waiting().is_some()
+    }
+
+    fn waiting(&self) -> MutexGuard<'_, Option<mpsc::Sender<Reply>>> {
+        self.waiting
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// An asker that writes the question to `output()` and reads the answer from
+/// `input()`, or takes an interrupt as a no.
 fn terminal_ask<R: BufRead, W: Write>(
-    open: impl Fn() -> (R, W) + Send + Sync + 'static,
+    input: impl Fn() -> R + Send + Sync + 'static,
+    output: impl Fn() -> W + Send + Sync + 'static,
+    interrupts: Arc<Interrupts>,
 ) -> AskToGoOn {
+    let input = Arc::new(input);
     Arc::new(move |of, tx_count, limit| {
-        let (mut input, mut output) = open();
-        ask_to_go_on(of, tx_count, limit, &mut input, &mut output)
+        let (reply, answer) = mpsc::channel();
+        *interrupts.waiting() = Some(reply.clone());
+        show_question(of, tx_count, limit, &mut output());
+        let input = Arc::clone(&input);
+        // Read apart so an interrupt can answer instead; a read left blocked ends with the process.
+        thread::spawn(move || {
+            let mut line = String::new();
+            let _ = input().read_line(&mut line);
+            let _ = reply.send(Reply::Line(line));
+        });
+        let got = answer.recv();
+        interrupts.waiting().take();
+        matches!(got, Ok(Reply::Line(line)) if is_yes(&line))
     })
 }
 
@@ -216,21 +290,21 @@ impl ScanOpts {
         Ok(EngineSettings {
             ownership_descriptors: self.ownership_descriptors()?,
             persist_scan_wallet: self.cache_wallet,
-            history_limit: self.history_limit(false),
+            history_limit: self.history_limit(None),
             ..EngineSettings::default()
         })
     }
 
     /// In a terminal a history above the limit is asked about; elsewhere it stops the scan.
-    fn history_limit(&self, interactive: bool) -> HistoryLimit {
+    /// `ask` decides above the limit; without it the scan stops there.
+    fn history_limit(&self, ask: Option<AskToGoOn>) -> HistoryLimit {
         if self.no_limits {
             return HistoryLimit::unlimited();
         }
-        let mut limit = HistoryLimit::at_most(self.max_txs.unwrap_or(DEFAULT_MAX_WALLET_TXS));
-        if interactive {
-            limit.ask = Some(terminal_ask(|| (io::stdin().lock(), io::stderr())));
+        HistoryLimit {
+            ask,
+            ..HistoryLimit::at_most(self.max_txs.unwrap_or(DEFAULT_MAX_WALLET_TXS))
         }
-        limit
     }
 
     fn ownership_descriptors(&self) -> Result<Vec<String>, String> {
@@ -630,7 +704,8 @@ fn print_usage() {
     eprintln!("                           than N transactions (default: 5000). Loading a");
     eprintln!("                           large history can take long and put a heavy");
     eprintln!("                           load on the node. In a terminal the scan asks");
-    eprintln!("                           whether to go on instead of stopping.");
+    eprintln!("                           whether to go on instead of stopping; Ctrl-C");
+    eprintln!("                           there counts as no.");
     eprintln!("  --no-limits              Lift the limit\n");
     eprintln!("RPC CONNECTION:");
     eprintln!("  --rpc-url <URL>          bitcoind RPC endpoint");

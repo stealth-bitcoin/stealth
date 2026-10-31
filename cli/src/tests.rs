@@ -786,8 +786,8 @@ mod history_limit {
 
     fn answer_about(of: HistoryOf, typed: &str) -> (bool, String) {
         let mut shown = Vec::new();
-        let go_on = ask_to_go_on(of, 12_345, 5_000, &mut typed.as_bytes(), &mut shown);
-        (go_on, String::from_utf8(shown).expect("utf-8"))
+        show_question(of, 12_345, 5_000, &mut shown);
+        (is_yes(typed), String::from_utf8(shown).expect("utf-8"))
     }
 
     fn answer(typed: &str) -> (bool, String) {
@@ -810,10 +810,69 @@ mod history_limit {
 
     /// The asker installed for a terminal, reading `typed` and writing nowhere.
     fn asked_with(typed: &'static str) -> HistoryLimit {
+        let interrupts = Arc::new(Interrupts::default());
         HistoryLimit {
-            ask: Some(terminal_ask(move || (typed.as_bytes(), io::sink()))),
+            ask: Some(terminal_ask(move || typed.as_bytes(), io::sink, interrupts)),
             ..HistoryLimit::at_most(3)
         }
+    }
+
+    /// A reader that blocks until the test ends.
+    struct Silent(std::sync::mpsc::Receiver<()>);
+
+    impl io::Read for Silent {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            let _ = self.0.recv();
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn an_interrupt_while_the_question_waits_is_a_no() {
+        let interrupts = Arc::new(Interrupts::default());
+        let (_keep_blocked, silence) = std::sync::mpsc::channel::<()>();
+        let silence = std::sync::Mutex::new(Some(silence));
+        let limit = HistoryLimit {
+            ask: Some(terminal_ask(
+                move || {
+                    let silence = silence.lock().unwrap().take().expect("asked once");
+                    io::BufReader::new(Silent(silence))
+                },
+                io::sink,
+                Arc::clone(&interrupts),
+            )),
+            ..HistoryLimit::at_most(3)
+        };
+        let asking = std::thread::spawn(move || limit.check(5));
+        while !interrupts.waiting_for_an_answer() {
+            std::thread::yield_now();
+        }
+        assert!(
+            !interrupts.interrupt(),
+            "an answered interrupt does not exit"
+        );
+        assert!(asking.join().unwrap().is_err());
+        assert!(
+            !interrupts.cancelled(),
+            "the stop path handles it, not a cancel"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_outside_the_question_cancels_and_a_second_one_exits() {
+        let interrupts = Interrupts::default();
+        assert!(!interrupts.interrupt());
+        assert!(interrupts.cancelled());
+        assert!(interrupts.progress.cancel_requested());
+        assert!(interrupts.interrupt());
+    }
+
+    #[test]
+    fn only_a_terminal_on_both_stdin_and_stderr_is_asked() {
+        assert!(should_ask(true, true));
+        assert!(!should_ask(true, false));
+        assert!(!should_ask(false, true));
+        assert!(!should_ask(false, false));
     }
 
     #[test]
@@ -847,8 +906,9 @@ mod history_limit {
     #[test]
     fn a_terminal_gets_asked_and_a_pipe_does_not() {
         let opts = ScanOpts::default();
-        assert!(opts.history_limit(true).ask.is_some());
-        assert!(opts.history_limit(false).ask.is_none());
+        let ask: AskToGoOn = Arc::new(|_, _, _| true);
+        assert!(opts.history_limit(Some(ask)).ask.is_some());
+        assert!(opts.history_limit(None).ask.is_none());
     }
 
     #[test]
@@ -857,6 +917,7 @@ mod history_limit {
             no_limits: true,
             ..ScanOpts::default()
         };
-        assert!(opts.history_limit(true).ask.is_none());
+        let ask: AskToGoOn = Arc::new(|_, _, _| true);
+        assert!(opts.history_limit(Some(ask)).ask.is_none());
     }
 }
