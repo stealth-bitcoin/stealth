@@ -37,7 +37,8 @@ impl TxGraph {
                 continue;
             }
 
-            let total_inputs = input_addrs.len();
+            // Count every input, including ones whose prevout address cannot be resolved.
+            let total_inputs = tx.vin.iter().filter(|i| !i.coinbase).count();
             let n_ours = our_inputs.len();
             let n_our_addresses = our_addresses.len();
             let ownership_pct = (n_ours as f64 / total_inputs as f64 * 100.0).round() as u32;

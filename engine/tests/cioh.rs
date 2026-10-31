@@ -238,12 +238,12 @@ fn some_inputs_from_a_stranger_is_high() {
     assert_eq!(findings[0].severity, Severity::High);
 }
 
-#[test]
-fn dust_advice_says_spending_it_links_your_other_addresses() {
-    let a = wpkh(1);
+/// Correction of the Dust finding on a 500-sat coin of `a`, received in a
+/// funding tx that pays `outputs` (output 0 must be the coin of `a`).
+fn dust_correction(a: &Address<NetworkUnchecked>, outputs: Vec<TxOutput>) -> String {
     let funding = txid(0x10);
     let history = WalletHistory {
-        wallet_txs: vec![entry(funding, Some(&a), WalletTxCategory::Receive)],
+        wallet_txs: vec![entry(funding, Some(a), WalletTxCategory::Receive)],
         utxos: vec![Utxo {
             txid: funding,
             vout: 0,
@@ -252,29 +252,77 @@ fn dust_advice_says_spending_it_links_your_other_addresses() {
             confirmations: 3,
             script_type: DescriptorType::P2wpkh,
         }],
-        transactions: [(
-            funding,
-            tx(funding, vec![vin(txid(0xA0), 0)], vec![out(0, &a, 500)]),
-        )]
-        .into_iter()
-        .collect(),
+        transactions: [(funding, tx(funding, vec![vin(txid(0xA0), 0)], outputs))]
+            .into_iter()
+            .collect(),
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([a.clone()]),
     };
-    let report = TxGraph::from_wallet_history(history).detect_all(
-        &DetectorThresholds::default(),
-        None,
-        None,
-    );
-    let correction = report
+    TxGraph::from_wallet_history(history)
+        .detect_all(&DetectorThresholds::default(), None, None)
         .findings
-        .iter()
+        .into_iter()
         .find(|f| f.vulnerability_type == VulnerabilityType::Dust)
-        .and_then(|f| f.correction.as_deref())
-        .expect("dust finding has a correction");
+        .and_then(|f| f.correction)
+        .expect("dust finding has a correction")
+}
+
+#[test]
+fn dust_advice_says_spending_it_links_your_other_addresses() {
+    let a = wpkh(1);
+    let correction = dust_correction(&a, vec![out(0, &a, 500)]);
     assert!(
         correction.contains("links your other addresses to this one"),
         "{correction}"
     );
     assert!(!correction.contains("other inputs"), "{correction}");
+}
+
+#[test]
+fn dust_attack_advice_says_spending_it_links_your_other_addresses() {
+    let a = wpkh(1);
+    // Ten 500-sat outputs to ten distinct addresses: a dust-attack pattern.
+    let mut outputs = vec![out(0, &a, 500)];
+    outputs.extend((1u8..10).map(|n| out(u32::from(n), &wpkh(100 + n), 500)));
+    let correction = dust_correction(&a, outputs);
+    assert!(
+        correction.contains("Freeze it"),
+        "not the attack branch: {correction}"
+    );
+    assert!(
+        correction.contains("links your other addresses to this one"),
+        "{correction}"
+    );
+    assert!(!correction.contains("other UTXOs"), "{correction}");
+}
+
+#[test]
+fn unresolved_input_counts_toward_the_total() {
+    let a = wpkh(1);
+    let b = wpkh(2);
+    let (mut history, spend) = spend_history(&[&a, &b], &[a.clone(), b.clone()]);
+    // A parent that is not loaded, as for a stranger's P2PK or nonstandard prevout.
+    history
+        .transactions
+        .get_mut(&spend)
+        .expect("spend tx is in the history")
+        .vin
+        .push(vin(txid(0xEE), 0));
+    let findings = cioh_findings(history);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let f = &findings[0];
+    assert!(
+        f.description.contains("2 of its 3 inputs are yours"),
+        "{}",
+        f.description
+    );
+    assert!(
+        f.description.contains("(67% ownership)"),
+        "{}",
+        f.description
+    );
+    assert_eq!(f.severity, Severity::High);
+    let details = f.details.as_ref().expect("CIOH finding has details");
+    assert_eq!(details["total_inputs"], 3);
+    assert_eq!(details["ownership_pct"], 67);
 }

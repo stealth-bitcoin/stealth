@@ -73,8 +73,8 @@ impl TxGraph {
                     )
                 };
                 let correction = if attack.is_some() {
-                    "Do NOT spend this dust UTXO — spending it reveals your other UTXOs \
-                     via common-input-ownership. Freeze it in your wallet immediately."
+                    "Do NOT spend this dust UTXO — spending it links your other addresses \
+                     to this one via common-input-ownership. Freeze it in your wallet immediately."
                 } else {
                     "Do not spend this dust output — doing so links your other addresses \
                      to this one via CIOH. Use your wallet's coin freeze feature to \
