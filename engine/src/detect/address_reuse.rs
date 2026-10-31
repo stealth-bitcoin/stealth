@@ -35,11 +35,11 @@ impl TxGraph {
                 } else {
                     "receive"
                 };
-                // The reuse comes from change that a payment from this address sent back to it.
+                // One of the reuses is the change of a payment the user made.
                 let change_back = reuse_txids.iter().any(|t| {
                     self.get_input_addresses(t)
                         .iter()
-                        .any(|ia| ia.address == *addr)
+                        .any(|ia| self.is_ours(&ia.address))
                         && self
                             .get_output_addresses(t)
                             .iter()
@@ -69,8 +69,8 @@ impl TxGraph {
                          and every payment to it lands on a fresh, unrelated address, so \
                          publishing it does not link the payments you receive.",
                         if change_back {
-                            "This address got change back from its own spends: send change \
-                             to a fresh change address instead, as wallets do by default. "
+                            "Change came back to this address from your own spends: send \
+                             change to a fresh change address instead, as wallets do by default. "
                         } else {
                             ""
                         }

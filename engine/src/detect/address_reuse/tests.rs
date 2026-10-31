@@ -13,7 +13,7 @@ use crate::gateway::{
 use crate::graph::TxGraph;
 use crate::types::VulnerabilityType;
 
-const CHANGE_BACK: &str = "This address got change back from its own spends";
+const CHANGE_BACK: &str = "Change came back to this address from your own spends";
 
 fn txid(n: u32) -> Txid {
     format!("{n:064x}").parse().expect("txid")
@@ -64,25 +64,24 @@ fn entry(
     }
 }
 
-/// `reused` is funded, then a spend of that coin pays `vout`, one of which goes back to `reused`.
-/// Returns the reuse correction for `reused`.
+/// `reused` (`wpkh(1)`) is paid once, then a spend of one coin at `spent` pays `vout`.
+/// The wallet owns `reused` and `ours`. Returns the reuse correction for `reused`.
 fn reuse_correction(
+    spent: &Address<NetworkUnchecked>,
     vout: Vec<TxOutput>,
     ours: &[&Address<NetworkUnchecked>],
     parent_loaded: bool,
 ) -> String {
     let reused = wpkh(1);
-    let (fund, spend) = (txid(1), txid(2));
-    let mut wallet_txs = vec![
-        entry(fund, Some(&reused), WalletTxCategory::Receive),
-        entry(spend, None, WalletTxCategory::Send),
-    ];
+    let owned = |a: &Address<NetworkUnchecked>| *a == reused || ours.contains(&a);
+    let (fund, spend, earlier) = (txid(1), txid(2), txid(3));
+    let mut wallet_txs = vec![entry(earlier, Some(&reused), WalletTxCategory::Receive)];
+    if owned(spent) {
+        wallet_txs.push(entry(fund, Some(spent), WalletTxCategory::Receive));
+        wallet_txs.push(entry(spend, None, WalletTxCategory::Send));
+    }
     for o in &vout {
-        if let Some(addr) = o
-            .address
-            .as_ref()
-            .filter(|a| *a == &reused || ours.contains(a))
-        {
+        if let Some(addr) = o.address.as_ref().filter(|a| owned(a)) {
             wallet_txs.push(entry(spend, Some(addr), WalletTxCategory::Receive));
         }
     }
@@ -92,9 +91,15 @@ fn reuse_correction(
         sequence: 0xffff_fffd,
         coinbase: false,
     };
-    let mut transactions = HashMap::from([(spend, tx(spend, vec![input], vout))]);
+    let mut transactions = HashMap::from([
+        (spend, tx(spend, vec![input], vout)),
+        (
+            earlier,
+            tx(earlier, vec![], vec![out(0, Some(&reused), 50_000)]),
+        ),
+    ]);
     if parent_loaded {
-        transactions.insert(fund, tx(fund, vec![], vec![out(0, Some(&reused), 100_000)]));
+        transactions.insert(fund, tx(fund, vec![], vec![out(0, Some(spent), 100_000)]));
     }
     let history = WalletHistory {
         wallet_txs,
@@ -117,6 +122,7 @@ fn reuse_correction(
 #[test]
 fn a_payment_with_change_back_to_its_input_address_gets_the_change_advice() {
     let correction = reuse_correction(
+        &wpkh(1),
         vec![
             out(0, Some(&wpkh(101)), 60_000),
             out(1, Some(&wpkh(1)), 39_000),
@@ -128,8 +134,9 @@ fn a_payment_with_change_back_to_its_input_address_gets_the_change_advice() {
 }
 
 #[test]
-fn an_unloaded_parent_does_not_show_the_spend_came_from_the_address() {
+fn an_unloaded_parent_does_not_show_the_user_made_the_spend() {
     let correction = reuse_correction(
+        &wpkh(1),
         vec![
             out(0, Some(&wpkh(101)), 60_000),
             out(1, Some(&wpkh(1)), 39_000),
@@ -143,6 +150,7 @@ fn an_unloaded_parent_does_not_show_the_spend_came_from_the_address() {
 #[test]
 fn an_output_with_no_address_is_not_a_payment_to_someone() {
     let correction = reuse_correction(
+        &wpkh(1),
         vec![out(0, None, 0), out(1, Some(&wpkh(1)), 99_000)],
         &[],
         true,
@@ -154,8 +162,38 @@ fn an_output_with_no_address_is_not_a_payment_to_someone() {
 fn a_spend_paying_only_the_wallet_gets_no_change_advice() {
     let own = wpkh(2);
     let correction = reuse_correction(
+        &wpkh(1),
         vec![out(0, Some(&own), 60_000), out(1, Some(&wpkh(1)), 39_000)],
         &[&own],
+        true,
+    );
+    assert!(!correction.contains(CHANGE_BACK), "{correction}");
+}
+
+#[test]
+fn change_from_another_own_address_landing_on_the_reused_one_gets_the_change_advice() {
+    let other = wpkh(2);
+    let correction = reuse_correction(
+        &other,
+        vec![
+            out(0, Some(&wpkh(101)), 60_000),
+            out(1, Some(&wpkh(1)), 39_000),
+        ],
+        &[&other],
+        true,
+    );
+    assert!(correction.starts_with(CHANGE_BACK), "{correction}");
+}
+
+#[test]
+fn a_payment_from_someone_else_with_their_change_is_no_change_of_ours() {
+    let correction = reuse_correction(
+        &wpkh(50),
+        vec![
+            out(0, Some(&wpkh(1)), 60_000),
+            out(1, Some(&wpkh(50)), 39_000),
+        ],
+        &[],
         true,
     );
     assert!(!correction.contains(CHANGE_BACK), "{correction}");

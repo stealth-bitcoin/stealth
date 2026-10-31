@@ -57,8 +57,8 @@ fn reuse_from_change_back_to_the_input_address_says_so() {
     let reuse = reuse_correction(&report, &reused);
     assert!(
         reuse.starts_with(
-            "This address got change back from its own spends: send change to a fresh \
-             change address instead, as wallets do by default."
+            "Change came back to this address from your own spends: send change to a \
+             fresh change address instead, as wallets do by default."
         ),
         "{reuse}"
     );
@@ -142,6 +142,57 @@ fn reuse_by_payments_later_spent_to_a_fresh_change_address_keeps_the_plain_corre
     let reuse = reuse_correction(&report, &reused);
     assert!(
         reuse.starts_with("Generate a fresh address for every payment received."),
+        "{reuse}"
+    );
+}
+
+#[test]
+fn change_from_another_address_landing_on_a_used_one_says_so() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let (used, other) = (alice.new_address().unwrap(), alice.new_address().unwrap());
+    node.client.send_to_address(&used, Amount::ONE_BTC).unwrap();
+    mine(&node, 1, &da);
+    let coin_at_used = alice.list_unspent().unwrap().0.remove(0);
+    node.client
+        .send_to_address(&other, Amount::ONE_BTC)
+        .unwrap();
+    mine(&node, 1, &da);
+    let coin = alice
+        .list_unspent()
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|u| u.txid != coin_at_used.txid)
+        .unwrap();
+    let raw = alice
+        .create_raw_transaction(
+            &[Input {
+                txid: coin.txid.parse().unwrap(),
+                vout: coin.vout as u64,
+                sequence: None,
+            }],
+            &[
+                Output::new(bob.new_address().unwrap(), Amount::from_sat(30_000_000)),
+                Output::new(used.clone(), Amount::from_sat(69_990_000)),
+            ],
+        )
+        .unwrap();
+    let signed = alice
+        .sign_raw_transaction_with_wallet(&raw.transaction().unwrap())
+        .unwrap();
+    alice
+        .send_raw_transaction(&signed.into_model().unwrap().tx)
+        .unwrap();
+    mine(&node, 1, &da);
+
+    let report = scan_wallet(&gateway_for(&node), "alice");
+    let reuse = reuse_correction(&report, &used);
+    assert!(
+        reuse.starts_with("Change came back to this address from your own spends"),
         "{reuse}"
     );
 }
