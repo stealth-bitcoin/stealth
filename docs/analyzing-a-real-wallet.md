@@ -33,6 +33,17 @@ txindex=1
 blockfilterindex=1
 ```
 
+Loading a large wallet history makes `bitcoind` grow its memory, and it does
+not give that memory back when Stealth unloads the scan wallet. On a node you
+use for scanning, start `bitcoind` with `MALLOC_ARENA_MAX=1` in its
+environment, which keeps glibc from holding on to freed memory in many
+arenas, and give it a smaller `dbcache` (for example `dbcache=300`) once it
+has finished syncing:
+
+```bash
+MALLOC_ARENA_MAX=1 bitcoind -dbcache=300
+```
+
 ## 2. Get your wallet's public key
 
 Most wallets export an **extended public key** (xpub, or the SLIP-132 variants
@@ -80,6 +91,22 @@ is no wallet birth date to guess.
   stealth-cli scan --descriptor '<your xpub or descriptor>' \
     --rpc-url http://127.0.0.1:8332 --format text
   ```
+
+### Large histories
+
+After the rescan, Stealth counts the transactions in the scan wallet before
+it loads any of them. Above 5,000 it stops and says how many there are, since
+loading them can take long and put a heavy load on the node:
+
+- **CLI:** in a terminal it asks whether to go on. Elsewhere it stops with an
+  error; `--max-txs <n>` sets the limit and `--no-limits` lifts it.
+- **Frontend:** the scan screen shows the count with "Scan anyway" and
+  "Cancel".
+- **API:** the job fails with `limit_exceeded` set; send the scan again with
+  `max_txs` or `no_limits` (see [api/README.md](../api/README.md)).
+
+Going on runs the rescan again. UTXO mode counts the history of the pasted
+outputs' addresses the same way.
 
 ## 4. Fast, specific checks: UTXO mode
 
