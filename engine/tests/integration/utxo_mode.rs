@@ -451,3 +451,34 @@ fn utxo_scan_with_ownership_descriptors_is_silent_on_someone_elses_sweep() {
         .expect("utxo scan failed");
     assert_no_consolidation(&report);
 }
+
+#[test]
+fn utxo_scan_with_address_only_ownership_descriptors_still_warns() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let addrs: Vec<Address> = (0..3).map(|_| alice.new_address().unwrap()).collect();
+    let known = addrs[0].clone();
+    let inputs = fund_coins_at(&node, &alice, addrs, 300_000);
+    merge_into(
+        &node,
+        &[&alice],
+        &inputs,
+        alice.new_address().unwrap(),
+        900_000,
+    );
+
+    // One input address is named; the other two stay unknown to the scan.
+    let gateway = gateway_for(&node);
+    let settings = EngineSettings {
+        ownership_descriptors: vec![format!("addr({known})")],
+        ..EngineSettings::default()
+    };
+    let engine = AnalysisEngine::new(&gateway, settings);
+    let report = engine
+        .analyze(ScanTarget::Utxos(utxo_inputs_for(&alice)))
+        .expect("utxo scan failed");
+    assert_consolidation_warning(&report, 1, 2, 0);
+}

@@ -39,14 +39,13 @@ impl TxGraph {
                 .iter()
                 .filter(|ia| self.is_ours(&ia.address))
                 .count();
-            let unrecognised = resolved.len() - ours;
-            // Inputs whose funding tx was not fetched are unknown, not foreign.
-            let unresolved = parent
-                .vin
+            // Only a funding tx missing from the cache is unknown; an addressless prevout is not ours.
+            let spent: Vec<_> = parent.vin.iter().filter(|input| !input.coinbase).collect();
+            let unresolved = spent
                 .iter()
-                .filter(|input| !input.coinbase)
-                .count()
-                .saturating_sub(resolved.len());
+                .filter(|input| self.fetch_tx(&input.previous_txid).is_none())
+                .count();
+            let unrecognised = spent.len().saturating_sub(unresolved + ours);
             let details = json!({
                 "txid": utxo.txid,
                 "vout": utxo.vout,

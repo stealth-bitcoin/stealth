@@ -378,3 +378,45 @@ fn a_failed_index_probe_fails_the_utxo_scan() {
         .analyze(ScanTarget::Utxos(vec![pasted()]));
     assert_eq!(result.err(), Some(busy));
 }
+
+const XPUB: &str = "tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7we1vwNCpn8tGbBcgfVYjXyhWo4E1xkh56hjod1RhGjxbaTLV3X4FyWuejifB9jusQ46QzG87VKp";
+const PUBKEY: &str = "03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd";
+const PUBKEY2: &str = "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+
+fn names_whole_wallet(descriptors: &[String]) -> bool {
+    crate::engine::names_a_whole_wallet(descriptors)
+}
+
+#[test]
+fn a_single_script_descriptor_does_not_name_a_wallet() {
+    for d in [
+        format!("addr({ADDR})"),
+        "raw(0014e0a63d7b9c3a6a5b2c1d0e9f8a7b6c5d4e3f2a1b)".to_owned(),
+        format!("wpkh({PUBKEY})"),
+        format!("pkh({PUBKEY})#8fhd9pwu"),
+        format!("tr({PUBKEY})"),
+        format!("combo({PUBKEY})"),
+        format!("wsh(multi(1,{PUBKEY},{PUBKEY2}))"),
+        format!("wpkh({XPUB}/0/5)"),
+    ] {
+        assert!(!names_whole_wallet(std::slice::from_ref(&d)), "{d}");
+    }
+    assert!(!names_whole_wallet(&[]));
+}
+
+#[test]
+fn a_ranged_descriptor_names_a_wallet() {
+    for d in [
+        format!("wpkh({XPUB}/0/*)"),
+        format!("wpkh({XPUB}/1/*')#qwer"),
+        format!("wsh(multi(1,{XPUB}/0/*,{PUBKEY}))"),
+    ] {
+        assert!(names_whole_wallet(std::slice::from_ref(&d)), "{d}");
+    }
+}
+
+#[test]
+fn a_list_with_one_ranged_descriptor_names_a_wallet() {
+    let list = [format!("addr({ADDR})"), format!("wpkh({XPUB}/0/*)")];
+    assert!(names_whole_wallet(&list));
+}

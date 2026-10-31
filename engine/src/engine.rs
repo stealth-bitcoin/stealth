@@ -81,8 +81,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .gateway
             .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let addresses_only = expanded.iter().all(|d| is_address_descriptor(d));
-        let graph = TxGraph::from_wallet_history(history).with_partial_ownership(addresses_only);
+        let partial = !names_a_whole_wallet(&expanded);
+        let graph = TxGraph::from_wallet_history(history).with_partial_ownership(partial);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -97,7 +97,11 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let mut history = self.resolve_utxo_history(&utxos)?;
         let addresses_without_history = self.merge_address_history(&mut history)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let partial = self.settings.ownership_descriptors.is_empty();
+        let mut ownership = Vec::new();
+        for raw in &self.settings.ownership_descriptors {
+            ownership.extend(expand_input(raw)?);
+        }
+        let partial = !names_a_whole_wallet(&ownership);
         let graph = TxGraph::from_wallet_history(history).with_partial_ownership(partial);
         let mut report = graph.detect_all(
             &self.settings.config.thresholds,
@@ -304,10 +308,12 @@ fn name_pasted_output(error: AnalysisError, utxo: &UtxoInput) -> AnalysisError {
     }
 }
 
-/// An `addr()` or `raw()` descriptor names one script, not a wallet.
-fn is_address_descriptor(descriptor: &str) -> bool {
-    let d = descriptor.trim_start();
-    d.starts_with("addr(") || d.starts_with("raw(")
+/// True when some descriptor is ranged, so the scan covers a wallet's address
+/// space rather than a fixed set of scripts. In descriptor syntax (BIP 380)
+/// `*` occurs only as a derivation wildcard, never in keys, scripts or the
+/// checksum, so its presence is the ranged check.
+pub(crate) fn names_a_whole_wallet(descriptors: &[String]) -> bool {
+    descriptors.iter().any(|d| d.contains('*'))
 }
 
 /// The node's entries replace the ones built from the pasted outputs for the
