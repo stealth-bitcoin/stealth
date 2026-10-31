@@ -2699,10 +2699,19 @@ mod tests {
     /// A wallet listing one entry at `confirmations`, whose tx getrawtransaction
     /// answers with `error`.
     fn node_failing_to_serve(confirmations: i64, error: Value) -> BitcoinCoreRpc {
+        node_failing_to_serve_with(confirmations, error, json!([]))
+    }
+
+    /// Like [`node_failing_to_serve`], with `unspent` as the listunspent answer.
+    fn node_failing_to_serve_with(
+        confirmations: i64,
+        error: Value,
+        unspent: Value,
+    ) -> BitcoinCoreRpc {
         serve_node(move |method| {
             let result = match method {
                 "getblockcount" => json!(112),
-                "listunspent" => json!([]),
+                "listunspent" => unspent.clone(),
                 "listtransactions" => json!([{
                     "address": ADDR, "amount": 0.001, "category": "receive",
                     "confirmations": confirmations, "abandoned": false, "mempoolconflicts": [],
@@ -2735,6 +2744,20 @@ mod tests {
             history.left_out.unavailable.into_iter().collect::<Vec<_>>(),
             vec![ORIGINAL.parse::<Txid>().unwrap()]
         );
+    }
+
+    #[test]
+    fn the_outputs_of_an_unavailable_tx_leave_the_utxo_set_too() {
+        // listunspent still listed it, then it expired before the fetch.
+        let unspent = json!([{
+            "txid": ORIGINAL, "vout": 0, "address": ADDR, "amount": 0.001,
+            "confirmations": 0, "spendable": true, "solvable": true, "safe": false,
+        }]);
+        let history = node_failing_to_serve_with(0, not_found(), unspent)
+            .load_history_for_wallet("bob")
+            .expect("scan");
+        assert!(history.utxos.is_empty());
+        assert_eq!(history.left_out.unavailable.len(), 1);
     }
 
     #[test]
