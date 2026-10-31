@@ -103,6 +103,7 @@ struct FakeGateway {
     asked: RefCell<Vec<OutPoint>>,
     batches: RefCell<Vec<Vec<Txid>>>,
     vanished: HashSet<Txid>,
+    fail_batches: bool,
     calls: RefCell<Vec<&'static str>>,
 }
 
@@ -121,6 +122,7 @@ impl FakeGateway {
             asked: RefCell::new(Vec::new()),
             batches: RefCell::new(Vec::new()),
             vanished: HashSet::new(),
+            fail_batches: false,
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -187,6 +189,11 @@ impl BlockchainGateway for FakeGateway {
     fn get_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
         self.batches.borrow_mut().push(txids.to_vec());
         self.calls.borrow_mut().push("getrawtransaction");
+        if self.fail_batches {
+            return Err(AnalysisError::EnvironmentUnavailable(
+                "getrawtransaction: timeout".into(),
+            ));
+        }
         // As the trait's default: only a tx the node cannot find stays per tx.
         txids
             .iter()
@@ -915,4 +922,25 @@ fn pasted_dust_whose_creating_tx_is_unconfirmed_is_not_called_spent() {
         .analyze(ScanTarget::Utxos(vec![pasted]))
         .expect("utxo scan");
     assert_eq!(dust_status(&report, 1).as_deref(), Some("unspent"));
+}
+
+#[test]
+fn a_failed_creating_tx_lookup_still_reports_present_dust_unspent() {
+    let mut gateway = without_history();
+    gateway.fail_batches = true;
+    gateway.unspent = Ok(HashSet::from([OutPoint::new(txid(DUST_PARENT), 1)]));
+    let report = dust_descriptor_scan(&mut gateway, &[], 10, None);
+    assert_eq!(dust_status(&report, 0).as_deref(), Some("unknown"));
+    assert_eq!(dust_status(&report, 1).as_deref(), Some("unspent"));
+    let freeze = report
+        .findings
+        .iter()
+        .find(|f| {
+            f.details
+                .as_ref()
+                .is_some_and(|d| d["vout"].as_u64() == Some(1))
+        })
+        .and_then(|f| f.correction.clone())
+        .unwrap_or_default();
+    assert!(freeze.contains("freeze"), "{freeze}");
 }
