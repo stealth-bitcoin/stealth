@@ -374,10 +374,27 @@ impl TxGraph {
                 }
             }
 
-            if !oversized_inputs.is_empty() && our_in.len() > 1 {
+            // Keep the sufficient input whose address holds the most inputs; ties go to the
+            // larger coin, then the lower address, so input order never matters.
+            let at_address =
+                |ia: &InputInfo| our_in.iter().filter(|o| o.address == ia.address).count();
+            let sufficient = oversized_inputs.iter().max_by(|x, y| {
+                (at_address(x), x.value)
+                    .cmp(&(at_address(y), y.value))
+                    .then_with(|| {
+                        let (x, y) = (
+                            x.address.assume_checked_ref(),
+                            y.address.assume_checked_ref(),
+                        );
+                        y.to_string().cmp(&x.to_string())
+                    })
+            });
+            if let Some(sufficient) = sufficient {
                 // Inputs at the sufficient input's own address link nothing new.
-                let sufficient = &oversized_inputs[0].address;
-                let extra_count = our_in.iter().filter(|ia| &ia.address != sufficient).count();
+                let extra_count = our_in
+                    .iter()
+                    .filter(|ia| ia.address != sufficient.address)
+                    .count();
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::UnnecessaryInput,
                     severity: Severity::Medium,
@@ -386,14 +403,14 @@ impl TxGraph {
                          could cover the {:.8} BTC payment + fee",
                         txid,
                         extra_count,
-                        oversized_inputs[0].value.to_sat() as f64 / 1e8,
+                        sufficient.value.to_sat() as f64 / 1e8,
                         ext_total_sats as f64 / 1e8,
                     ),
                     details: Some(json!({
                         "txid": txid.to_string(),
                         "sufficient_input": {
-                            "address": oversized_inputs[0].address.assume_checked_ref().to_string(),
-                            "sats": oversized_inputs[0].value.to_sat(),
+                            "address": sufficient.address.assume_checked_ref().to_string(),
+                            "sats": sufficient.value.to_sat(),
                         },
                         "total_inputs_used": input_addrs.len(),
                         "unnecessary_count": extra_count,

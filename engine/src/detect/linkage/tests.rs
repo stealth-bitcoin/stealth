@@ -150,3 +150,27 @@ fn a_second_input_at_the_sufficient_inputs_address_is_not_counted_as_unnecessary
     assert_eq!(details["unnecessary_count"], 1);
     assert_eq!(details["total_inputs_used"], 3);
 }
+
+#[test]
+fn the_unnecessary_count_does_not_depend_on_input_order() {
+    // Both role assignments, so a tie-break on the address string cannot pass by luck.
+    for (a, b) in [(wpkh(1), wpkh(2)), (wpkh(2), wpkh(1))] {
+        // B holds two of the inputs, so its coin is the one to keep, even when A's is larger.
+        for a_sats in [100_000_000, 120_000_000] {
+            let orders: [&[(&Address<NetworkUnchecked>, u64)]; 2] = [
+                &[(&a, a_sats), (&b, 100_000_000), (&b, 10_000_000)],
+                &[(&b, 100_000_000), (&b, 10_000_000), (&a, a_sats)],
+            ];
+            for coins in orders {
+                let findings = unnecessary(coins, &a, &[&a, &b]);
+                assert_eq!(findings.len(), 1, "{findings:?}");
+                let details = findings[0].details.as_ref().expect("details");
+                assert_eq!(details["unnecessary_count"], 1, "{details}");
+                assert_eq!(
+                    details["sufficient_input"]["address"],
+                    b.assume_checked_ref().to_string()
+                );
+            }
+        }
+    }
+}
