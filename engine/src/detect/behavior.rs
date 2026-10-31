@@ -1,6 +1,6 @@
 //! Wallet behaviour detectors: script mixing, UTXO age, fingerprint, peel chain.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bitcoin::{Amount, Txid};
 use serde_json::json;
@@ -335,7 +335,28 @@ impl TxGraph {
         let min_hops = thresholds.peel_chain_min_hops;
         let critical_hops = thresholds.peel_chain_critical_hops;
 
-        let mut chains: Vec<(Vec<Txid>, u32, f64)> = Vec::new();
+        // The peel-shaped child spending `txid:vout`, and its large output.
+        let next_hop = |txid: Txid, vout: u32| -> Option<(Txid, u32)> {
+            let child_txid = self.spending_index.get(&(txid, vout)).copied()?;
+            let child_outs = self.get_output_addresses(&child_txid);
+            if child_outs.len() != 2 {
+                return None;
+            }
+            let mut cv: Vec<u64> = child_outs.iter().map(|o| o.value.to_sat()).collect();
+            cv.sort_unstable();
+            if cv[1] == 0 || cv[0] as f64 / cv[1] as f64 >= ratio_cutoff {
+                return None;
+            }
+            let large_child = if child_outs[0].value.to_sat() >= child_outs[1].value.to_sat() {
+                0
+            } else {
+                1
+            };
+            Some((child_txid, child_outs[large_child].index))
+        };
+
+        // Each trace: its hops, the hop it was cut before at `max_hops`, its ratio.
+        let mut traces: Vec<(Vec<Txid>, Option<Txid>, f64)> = Vec::new();
         let txids = self.ordered_txids();
         for txid in txids {
             let input_addrs = self.get_input_addresses(&txid);
@@ -369,60 +390,71 @@ impl TxGraph {
 
             // Trace forward: does the "large" output feed into another
             // 2-output transaction? If so, count the chain length.
-            let mut hops = 1u32;
-            let mut chain = vec![txid];
             let large_idx = if outputs[0].value.to_sat() >= outputs[1].value.to_sat() {
                 0
             } else {
                 1
             };
-            let mut trace_txid = txid;
-            let mut trace_vout = outputs[large_idx].index;
-
-            while hops < max_hops {
-                // Find the child transaction that spends trace_txid:trace_vout
-                let Some(child_txid) = self.spending_index.get(&(trace_txid, trace_vout)).copied()
-                else {
-                    break;
-                };
-                let child_outs = self.get_output_addresses(&child_txid);
-                if child_outs.len() != 2 {
+            let mut chain = vec![txid];
+            let mut cut = None;
+            let mut trace = (txid, outputs[large_idx].index);
+            while let Some(next) = next_hop(trace.0, trace.1) {
+                if chain.len() >= max_hops as usize {
+                    cut = Some(next.0);
                     break;
                 }
-                let mut cv: Vec<u64> = child_outs.iter().map(|o| o.value.to_sat()).collect();
-                cv.sort_unstable();
-                if cv[1] == 0 || cv[0] as f64 / cv[1] as f64 >= ratio_cutoff {
-                    break;
-                }
-                hops += 1;
-                chain.push(child_txid);
-                let large_child = if child_outs[0].value.to_sat() >= child_outs[1].value.to_sat() {
-                    0
-                } else {
-                    1
-                };
-                trace_txid = child_txid;
-                trace_vout = child_outs[large_child].index;
+                chain.push(next.0);
+                trace = next;
             }
 
-            if hops < min_hops {
+            if chain.len() < min_hops as usize {
                 continue; // At least `min_hops` to qualify
             }
-            chains.push((chain, hops, ratio));
+            traces.push((chain, cut, ratio));
         }
 
-        // A chain starting at a later hop of another chain is that chain's tail.
-        let later_hops: HashSet<Txid> = chains
+        // A trace starting at a later hop of another, or where another was cut, is its tail.
+        let tails: HashSet<Txid> = traces
             .iter()
-            .flat_map(|(chain, _, _)| chain.iter().skip(1).copied())
+            .flat_map(|(chain, cut, _)| chain.iter().skip(1).chain(cut.iter()).copied())
             .collect();
-        for (chain, hops, ratio) in chains {
+        let by_start: HashMap<Txid, usize> = traces
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (chain, _, _))| chain.first().map(|t| (*t, i)))
+            .collect();
+        for (mut chain, mut cut, ratio) in traces.iter().cloned() {
             let Some(&txid) = chain.first() else {
                 continue;
             };
-            if later_hops.contains(&txid) {
+            if tails.contains(&txid) {
                 continue;
             }
+            // Extend a cut chain with the tail trace that reaches furthest past it.
+            while cut.is_some() {
+                let len = chain.len();
+                let best = chain
+                    .iter()
+                    .skip(1)
+                    .chain(cut.iter())
+                    .enumerate()
+                    .filter_map(|(i, t)| by_start.get(t).map(|&j| (i + 1, j)))
+                    .filter(|&(pos, j)| pos + traces[j].0.len() > len)
+                    .max_by_key(|&(pos, j)| pos + traces[j].0.len());
+                let Some((pos, j)) = best else {
+                    break;
+                };
+                let (tail, tail_cut, _) = &traces[j];
+                let seen: HashSet<Txid> = chain.iter().copied().collect();
+                let extra: Vec<Txid> = tail.iter().skip(len - pos).copied().collect();
+                if extra.iter().any(|t| seen.contains(t)) {
+                    break; // Spends cannot form a cycle; stop rather than loop on bad data.
+                }
+                chain.extend(extra);
+                cut = *tail_cut;
+            }
+            let truncated = cut.is_some();
+            let hops = u32::try_from(chain.len()).unwrap_or(u32::MAX);
 
             let severity = if hops >= critical_hops {
                 Severity::Critical
@@ -434,13 +466,16 @@ impl TxGraph {
                 vulnerability_type: VulnerabilityType::PeelChain,
                 severity,
                 description: format!(
-                    "Peel chain detected from TX {}: {} hops of asymmetric 2-output transactions",
-                    txid, hops
+                    "Peel chain detected from TX {}: {}{} hops of asymmetric 2-output transactions",
+                    txid,
+                    if truncated { "at least " } else { "" },
+                    hops
                 ),
                 details: Some(json!({
                     "start_txid": txid.to_string(),
                     "hops": hops,
                     "txids": chain.iter().map(Txid::to_string).collect::<Vec<_>>(),
+                    "truncated": truncated,
                     "initial_ratio": (ratio * 100.0).round() as u32,
                 })),
                 correction: Some(

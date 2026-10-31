@@ -103,12 +103,25 @@ fn peel_to_self(
 /// A linear chain: `fund` pays us, each id in `hops` spends the change of
 /// the one before it.
 fn chain(fund: u8, hops: &[u8]) -> Vec<DecodedTransaction> {
+    wide_chain(fund, hops, &[])
+}
+
+/// Like `chain`, but each hop in `wide` also spends two more of our coins,
+/// so it has three inputs and cannot start a chain of its own.
+fn wide_chain(fund: u8, hops: &[u8], wide: &[u8]) -> Vec<DecodedTransaction> {
     let mut txs = vec![funding(fund, 100_000_000)];
     let mut prev = (fund, 0);
     let mut balance = 100_000_000u64;
     for &id in hops {
         balance -= 2_000_000;
-        txs.push(peel(id, &[prev], 1_000_000, balance));
+        if wide.contains(&id) {
+            let (a, b) = (id + 0x80, id + 0xC0);
+            txs.push(funding(a, 1_000_000));
+            txs.push(funding(b, 1_000_000));
+            txs.push(peel(id, &[prev, (a, 0), (b, 0)], 1_000_000, balance));
+        } else {
+            txs.push(peel(id, &[prev], 1_000_000, balance));
+        }
         prev = (id, 1);
     }
     txs
@@ -304,16 +317,93 @@ fn two_chains_that_merge_into_one_tail_are_both_reported() {
     }
 }
 
-#[test]
-fn a_chain_longer_than_the_hop_limit_is_still_one_finding() {
-    let findings = peel_findings(chain(
-        0x10,
-        &[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18],
-    ));
+fn truncated(f: &Finding) -> bool {
+    f.details.as_ref().expect("details")["truncated"]
+        .as_bool()
+        .expect("truncated is a bool")
+}
+
+fn assert_whole_chain(txs: Vec<DecodedTransaction>, hop_ids: &[u8]) {
+    let findings = peel_findings(txs);
     assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    assert_eq!(hops(f), hop_ids.len() as u64);
+    assert_eq!(chain_txids(f), ids(hop_ids));
+    assert_eq!(start(f), txid(hop_ids[0]).to_string());
+    assert_eq!(f.severity, Severity::Critical);
+    assert!(!truncated(f));
+    assert!(!f.description.contains("at least"), "{}", f.description);
+}
+
+const TWELVE: [u8; 12] = [
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C,
+];
+
+#[test]
+fn a_chain_longer_than_the_hop_limit_is_one_finding_with_every_hop() {
+    assert!(TWELVE.len() as u32 > DetectorThresholds::default().peel_chain_max_hops * 3 / 2);
+    assert_whole_chain(chain(0x10, &TWELVE), &TWELVE);
+}
+
+#[test]
+fn a_long_chain_is_whole_when_its_tails_are_visited_first() {
+    let reversed: Vec<u8> = TWELVE.iter().rev().map(|n| n + 0x20).collect();
+    assert_whole_chain(chain(0x10, &reversed), &reversed);
+}
+
+#[test]
+fn a_long_chain_is_whole_when_the_hop_after_the_limit_cannot_start_a_chain() {
+    // 0x17 is the first hop past the limit from 0x11; the trace from 0x12
+    // reaches past it.
+    assert_whole_chain(wide_chain(0x10, &TWELVE, &[0x17]), &TWELVE);
+}
+
+#[test]
+fn a_chain_cut_by_the_hop_limit_says_it_has_at_least_that_many_hops() {
+    // No hop after 0x11 can start a chain, so nothing traces past the limit.
+    let hops_ids = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18];
+    let findings = peel_findings(wide_chain(0x10, &hops_ids, &hops_ids[1..]));
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
     let max = DetectorThresholds::default().peel_chain_max_hops;
-    assert_eq!(hops(&findings[0]), u64::from(max));
-    assert_eq!(start(&findings[0]), txid(0x11).to_string());
+    assert_eq!(hops(f), u64::from(max));
+    assert_eq!(chain_txids(f), ids(&hops_ids[..max as usize]));
+    assert!(truncated(f));
+    assert!(
+        f.description.contains(&format!("at least {max} hops")),
+        "{}",
+        f.description
+    );
+}
+
+#[test]
+fn a_long_chain_is_whole_when_only_the_hop_after_the_limit_starts_a_trace() {
+    // 0x12 to 0x16 cannot start a chain, so the trace from 0x17 is the only
+    // one past the limit, and it starts exactly where 0x11's trace was cut.
+    assert_whole_chain(
+        wide_chain(0x10, &TWELVE, &[0x12, 0x13, 0x14, 0x15, 0x16]),
+        &TWELVE,
+    );
+}
+
+#[test]
+fn a_cycle_in_bad_data_does_not_hang_the_scan() {
+    // Real spends cannot form a cycle; 0x62 and 0x63 spend each other here.
+    let txs = vec![
+        funding(0x60, 100_000_000),
+        peel(0x61, &[(0x60, 0)], 1_000_000, 98_000_000),
+        peel(0x62, &[(0x61, 1), (0x63, 1)], 1_000_000, 96_000_000),
+        peel(0x63, &[(0x62, 1)], 1_000_000, 94_000_000),
+    ];
+    let findings = peel_findings(txs);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!(start(&findings[0]), txid(0x61).to_string());
+}
+
+#[test]
+fn a_chain_that_ends_on_its_own_is_not_truncated() {
+    let findings = peel_findings(chain(0x10, &[0x11, 0x12, 0x13]));
+    assert!(!truncated(&findings[0]));
 }
 
 #[test]
