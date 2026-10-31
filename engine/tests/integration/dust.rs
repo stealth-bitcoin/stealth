@@ -156,6 +156,15 @@ fn detect_dust_spending() {
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
     assert!(has_finding(&report, VulnerabilityType::DustSpending));
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.vulnerability_type == VulnerabilityType::Dust
+                && f.details.as_ref().is_some_and(|d| d["status"] == "spent")),
+        "dust spent with another input keeps its finding: {:?}",
+        report.findings
+    );
     assert_dust_advice(&report, VulnerabilityType::DustSpending, "from now on");
 }
 
@@ -249,6 +258,37 @@ fn coins_of_one_address_spent_together_link_nothing_new() {
     }
 }
 
+/// `coin` signed into a tx with it as the only input and one 0-value OP_RETURN carrying `data`.
+fn signed_fee_only_spend(
+    wallet: &corepc_node::Client,
+    coin: &Input,
+    data: &[u8; 4],
+    len: usize,
+) -> corepc_node::client::bitcoin::Transaction {
+    let raw = wallet
+        .create_raw_transaction(
+            std::slice::from_ref(coin),
+            &[Output::new(
+                wallet.new_address().unwrap(),
+                Amount::from_sat(1),
+            )],
+        )
+        .unwrap();
+    let mut tx = raw.transaction().unwrap();
+    let push =
+        corepc_node::client::bitcoin::script::PushBytesBuf::try_from(data[..len].to_vec()).unwrap();
+    tx.output = vec![TxOut {
+        value: Amount::ZERO,
+        script_pubkey: ScriptBuf::new_op_return(push),
+    }];
+    wallet
+        .sign_raw_transaction_with_wallet(&tx)
+        .unwrap()
+        .into_model()
+        .unwrap()
+        .tx
+}
+
 /// Mempool verdict on `coin` spent alone as fee to one 0-value OP_RETURN carrying `data`,
 /// with the fee rate it pays in sat/vB.
 fn fee_only_spend(
@@ -270,28 +310,7 @@ fn fee_only_spend_at(
     len: usize,
     maxfeerate: Option<f64>,
 ) -> (serde_json::Value, f64) {
-    let raw = wallet
-        .create_raw_transaction(
-            std::slice::from_ref(coin),
-            &[Output::new(
-                wallet.new_address().unwrap(),
-                Amount::from_sat(1),
-            )],
-        )
-        .unwrap();
-    let mut tx = raw.transaction().unwrap();
-    let push =
-        corepc_node::client::bitcoin::script::PushBytesBuf::try_from(data[..len].to_vec()).unwrap();
-    tx.output = vec![TxOut {
-        value: Amount::ZERO,
-        script_pubkey: ScriptBuf::new_op_return(push),
-    }];
-    let stx = wallet
-        .sign_raw_transaction_with_wallet(&tx)
-        .unwrap()
-        .into_model()
-        .unwrap()
-        .tx;
+    let stx = signed_fee_only_spend(wallet, coin, data, len);
     let hex = corepc_node::client::bitcoin::consensus::encode::serialize_hex(&stx);
     let verdict: serde_json::Value = wallet
         .call(
@@ -337,6 +356,29 @@ fn a_fee_only_spend_of_a_1000_sat_coin_passes_the_default_maxfeerate() {
     assert_eq!(verdict["allowed"], true, "{verdict}");
     let (capped, _) = fee_only_spend_at(&alice, &coin, 1_000, b"ash!", 4, Some(0.0001));
     assert_eq!(capped["reject-reason"], "max-fee-exceeded", "{capped}");
+}
+
+#[test]
+fn dust_given_away_alone_as_fee_gets_no_finding() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let coin = fund_coins(&node, &alice, 1, 600).remove(0);
+
+    let before = scan_wallet(&gateway_for(&node), "alice");
+    assert!(has_finding(&before, VulnerabilityType::Dust));
+
+    let stx = signed_fee_only_spend(&alice, &coin, b"ash!", 4);
+    alice.send_raw_transaction(&stx).unwrap();
+    mine(&node, 1, &da);
+
+    let after = scan_wallet(&gateway_for(&node), "alice");
+    assert!(
+        !has_finding(&after, VulnerabilityType::Dust),
+        "{:?}",
+        after.findings
+    );
 }
 
 // ─── 13. Dust Attack Detection ─────────────────────────────────────────────

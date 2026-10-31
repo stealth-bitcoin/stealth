@@ -12,7 +12,7 @@ use crate::gateway::{
     WalletTxCategory, WalletTxEntry,
 };
 use crate::graph::TxGraph;
-use crate::types::Finding;
+use crate::types::{Finding, Severity};
 
 fn txid(n: u32) -> Txid {
     format!("{n:064x}").parse().expect("txid")
@@ -247,4 +247,170 @@ fn spent_dust_advice_names_a_real_wallet_feature() {
     );
     // Bitcoin Core has no setting that rejects incoming dust.
     assert!(!correction.contains("rejection"), "{correction}");
+}
+
+fn op_return(n: u32) -> TxOutput {
+    TxOutput {
+        n,
+        address: None,
+        value: Amount::from_sat(0),
+        script_type: DescriptorType::Unknown,
+    }
+}
+
+/// Dust findings for a 600-sat coin of `a`, received in a tx paying `strangers` 500 sats each
+/// too, then spent in a tx with the given extra inputs and outputs.
+fn spent_dust(
+    strangers: u8,
+    extra_inputs: &[(&Address<NetworkUnchecked>, u64)],
+    vout: Vec<TxOutput>,
+) -> Vec<Finding> {
+    spent_dust_with(strangers, extra_inputs, vout, false, true)
+}
+
+/// As [`spent_dust`], with the coin still in the UTXO list when `listed`, as a pasted coin
+/// is, and the spending tx unconfirmed unless `confirmed`.
+fn spent_dust_with(
+    strangers: u8,
+    extra_inputs: &[(&Address<NetworkUnchecked>, u64)],
+    vout: Vec<TxOutput>,
+    listed: bool,
+    confirmed: bool,
+) -> Vec<Finding> {
+    let a = wpkh(1);
+    let (fund, spend) = (txid(1), txid(100));
+    let mut fund_vout = vec![out(0, &a, 600)];
+    fund_vout.extend((1..=strangers).map(|n| out(u32::from(n), &wpkh(100 + n), 500)));
+    let from_stranger = TxInputRef {
+        previous_txid: txid(90),
+        previous_vout: 0,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    };
+    let mut transactions = HashMap::from([
+        (
+            txid(90),
+            tx(txid(90), vec![], vec![out(0, &wpkh(200), 100_000)]),
+        ),
+        (fund, tx(fund, vec![from_stranger], fund_vout)),
+    ]);
+    let mut wallet_txs = vec![
+        entry(fund, Some(&a), WalletTxCategory::Receive),
+        entry(spend, None, WalletTxCategory::Send),
+    ];
+    let mut vin = vec![TxInputRef {
+        previous_txid: fund,
+        previous_vout: 0,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    }];
+    for (i, (address, sats)) in extra_inputs.iter().enumerate() {
+        let other = txid(i as u32 + 2);
+        transactions.insert(other, tx(other, vec![], vec![out(0, address, *sats)]));
+        wallet_txs.push(entry(other, Some(address), WalletTxCategory::Receive));
+        vin.push(TxInputRef {
+            previous_txid: other,
+            previous_vout: 0,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        });
+    }
+    for o in vout.iter().filter_map(|o| o.address.as_ref()) {
+        if *o == a || extra_inputs.iter().any(|(addr, _)| *addr == o) {
+            wallet_txs.push(entry(spend, Some(o), WalletTxCategory::Receive));
+        }
+    }
+    let mut spend_tx = tx(spend, vin, vout);
+    if !confirmed {
+        spend_tx.confirmations = 0;
+    }
+    transactions.insert(spend, spend_tx);
+    let utxos = if listed {
+        vec![Utxo {
+            txid: fund,
+            vout: 0,
+            address: Some(a.clone()),
+            amount: Amount::from_sat(600),
+            confirmations: 3,
+            script_type: DescriptorType::P2wpkh,
+        }]
+    } else {
+        vec![]
+    };
+    let history = WalletHistory {
+        wallet_txs,
+        utxos,
+        transactions,
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::new(),
+        ranged_addresses: HashSet::new(),
+    };
+    let mut findings = Vec::new();
+    TxGraph::from_wallet_history(history)
+        .detect_dust(&DetectorThresholds::default(), &mut findings);
+    findings
+}
+
+#[test]
+fn dust_spent_alone_as_fee_gets_no_finding() {
+    let findings = spent_dust(0, &[], vec![op_return(0)]);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn attack_dust_spent_alone_as_fee_gets_no_finding() {
+    let findings = spent_dust(9, &[], vec![op_return(0)]);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn dust_spent_with_another_input_stays_a_low_finding() {
+    let b = wpkh(2);
+    let findings = spent_dust(0, &[(&b, 50_000)], vec![out(0, &wpkh(150), 49_000)]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].severity, Severity::Low);
+}
+
+#[test]
+fn attack_dust_spent_with_another_input_stays_critical() {
+    let b = wpkh(2);
+    let findings = spent_dust(9, &[(&b, 50_000)], vec![out(0, &wpkh(150), 49_000)]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].severity, Severity::Critical);
+}
+
+#[test]
+fn dust_moved_alone_to_the_wallet_still_gets_a_finding() {
+    let findings = spent_dust(0, &[], vec![out(0, &wpkh(1), 400)]);
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.details.as_ref().is_some_and(|d| d["status"] == "spent")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn pasted_dust_already_spent_alone_as_fee_gets_no_finding() {
+    for strangers in [0, 9] {
+        let findings = spent_dust_with(strangers, &[], vec![op_return(0)], true, true);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+    let b = wpkh(2);
+    let merged = spent_dust_with(
+        0,
+        &[(&b, 50_000)],
+        vec![out(0, &wpkh(150), 49_000)],
+        true,
+        true,
+    );
+    assert_eq!(merged.len(), 1, "{merged:?}");
+}
+
+#[test]
+fn an_unconfirmed_fee_only_spend_may_be_replaced_so_the_dust_keeps_its_finding() {
+    for listed in [false, true] {
+        let findings = spent_dust_with(0, &[], vec![op_return(0)], listed, false);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+    }
 }

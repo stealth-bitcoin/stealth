@@ -37,6 +37,9 @@ impl TxGraph {
                 continue;
             }
             let key = (utxo.txid, utxo.vout);
+            if self.disposed_alone(&key) {
+                continue;
+            }
             let finding =
                 if self.confirmed_spend(&key) || self.chain_unspent.get(&key) == Some(&false) {
                     let mut finding = self.spent_dust_finding(
@@ -70,6 +73,9 @@ impl TxGraph {
         // history spends it, else the node's answer, else unknown.
         for (txid, out) in self.dust_outside_utxos(dust) {
             let key = (txid, out.index);
+            if self.disposed_alone(&key) {
+                continue;
+            }
             let unspent = if self.confirmed_spend(&key) {
                 Some(false)
             } else {
@@ -98,6 +104,23 @@ impl TxGraph {
             .get(key)
             .and_then(|child| self.tx_cache.get(child))
             .is_some_and(|child| child.confirmations > 0)
+    }
+
+    /// A confirmed tx spends this output as its only input and pays nothing back to the
+    /// wallet, so the coin was given away alone and links nothing.
+    fn disposed_alone(&self, key: &(Txid, u32)) -> bool {
+        self.confirmed_spend(key)
+            && self
+                .spending_index
+                .get(key)
+                .and_then(|child| self.tx_cache.get(child))
+                .is_some_and(|child| {
+                    child.vin.len() == 1
+                        && !child
+                            .vout
+                            .iter()
+                            .any(|o| o.address.as_ref().is_some_and(|a| self.is_ours(a)))
+                })
     }
 
     /// Outpoints of own dust in the UTXO list that no confirmed tx in the
