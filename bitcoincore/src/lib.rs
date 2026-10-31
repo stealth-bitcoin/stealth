@@ -3762,6 +3762,23 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_wallet_whose_count_fails_is_unloaded_before_any_history_is_fetched() {
+        let (rpc, calls) = node_answering_getwalletinfo((
+            "500 Internal Server Error",
+            json!({ "result": null, "error": { "code": -18, "message": "Requested wallet does not exist" } })
+                .to_string(),
+        ));
+        assert!(scan_one_address(&rpc, true, &HistoryLimit::default()).is_err());
+        assert!(!fetched_history(&calls));
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.last().map(String::as_str),
+            Some("unloadwallet"),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
     fn any_other_getwalletinfo_failure_still_fails_the_scan() {
         let (rpc, calls) = node_answering_getwalletinfo((
             "500 Internal Server Error",
