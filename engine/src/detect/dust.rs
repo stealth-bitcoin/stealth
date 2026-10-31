@@ -14,8 +14,8 @@ use crate::types::*;
 const FEE_ONLY_SPEND: &str = "To get rid of it, spend it alone as fee: one coin per transaction, \
      with a single input and one 0-value OP_RETURN output carrying 4 bytes of data, sent when \
      mempool fee rates are low enough for it to confirm (a 546-sat coin pays about 6 sat/vB). \
-     If the coin holds an ordinals inscription or runes, spending it as fee hands them to the \
-     miner and they are lost.";
+     If the coin holds an ordinals inscription or runes, spending it as fee loses them: \
+     an ordinals inscription goes to the miner and runes are burned; either way they are lost.";
 
 impl TxGraph {
     // ── 3. Dust UTXO Detection ─────────────────────────────────────────────
@@ -261,8 +261,8 @@ impl TxGraph {
             description,
             details: Some(details),
             correction: Some(
-                "This dust has already been spent. Going forward, reject \
-                 unsolicited dust by enabling automatic dust rejection."
+                "This dust has already been spent. From now on, freeze dust like this \
+                 in your wallet's coin control so it is never spent with your other coins."
                     .into(),
             ),
         }

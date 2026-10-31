@@ -258,6 +258,18 @@ fn fee_only_spend(
     data: &[u8; 4],
     len: usize,
 ) -> (serde_json::Value, f64) {
+    fee_only_spend_at(wallet, coin, sats, data, len, None)
+}
+
+/// As [`fee_only_spend`], with `maxfeerate` (BTC/kvB) passed to `testmempoolaccept` when set.
+fn fee_only_spend_at(
+    wallet: &corepc_node::Client,
+    coin: &Input,
+    sats: u64,
+    data: &[u8; 4],
+    len: usize,
+    maxfeerate: Option<f64>,
+) -> (serde_json::Value, f64) {
     let raw = wallet
         .create_raw_transaction(
             std::slice::from_ref(coin),
@@ -282,7 +294,13 @@ fn fee_only_spend(
         .tx;
     let hex = corepc_node::client::bitcoin::consensus::encode::serialize_hex(&stx);
     let verdict: serde_json::Value = wallet
-        .call("testmempoolaccept", &[serde_json::json!([hex])])
+        .call(
+            "testmempoolaccept",
+            &match maxfeerate {
+                Some(rate) => vec![serde_json::json!([hex]), serde_json::json!(rate)],
+                None => vec![serde_json::json!([hex])],
+            },
+        )
         .unwrap();
     (verdict[0].clone(), sats as f64 / stx.vsize() as f64)
 }
@@ -303,6 +321,22 @@ fn the_fee_only_spend_in_the_dust_advice_is_standard() {
     let (with_data, rate) = fee_only_spend(&alice, &coin, 546, b"ash!", 4);
     assert_eq!(with_data["allowed"], true, "{with_data}");
     assert!((5.5..6.5).contains(&rate), "about 6 sat/vB: {rate}");
+}
+
+#[test]
+fn a_fee_only_spend_of_a_1000_sat_coin_passes_the_default_maxfeerate() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let coin = fund_coins(&node, &alice, 1, 1_000).remove(0);
+
+    // The default maxfeerate is 0.10 BTC/kvB, 10,000 sat/vB, far above this coin's rate.
+    let (verdict, rate) = fee_only_spend(&alice, &coin, 1_000, b"ash!", 4);
+    assert!(rate > 10.0, "{rate}");
+    assert_eq!(verdict["allowed"], true, "{verdict}");
+    let (capped, _) = fee_only_spend_at(&alice, &coin, 1_000, b"ash!", 4, Some(0.0001));
+    assert_eq!(capped["reject-reason"], "max-fee-exceeded", "{capped}");
 }
 
 // ─── 13. Dust Attack Detection ─────────────────────────────────────────────

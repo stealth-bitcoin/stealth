@@ -179,13 +179,14 @@ fn unspent_dust_advice_freezes_first_then_offers_a_standard_fee_only_spend() {
         "one 0-value OP_RETURN output carrying 4 bytes of data",
         "mempool fee rates are low enough for it to confirm",
         "a 546-sat coin pays about 6 sat/vB",
-        "ordinals inscription or runes",
-        "hands them to the miner and they are lost",
+        // With no runestone or other output, runes are burned, not paid to the miner.
+        "an ordinals inscription goes to the miner and runes are burned; either way they are lost",
     ] {
         assert!(correction.contains(needle), "{needle}: {correction}");
     }
     // A coin of 1,000 sats or less is under any CoinJoin coordinator's minimum.
     for banned in [
+        "hands them to the miner",
         "low fee rate",
         "WabiSabi",
         "CoinJoin",
@@ -196,4 +197,24 @@ fn unspent_dust_advice_freezes_first_then_offers_a_standard_fee_only_spend() {
     ] {
         assert!(!correction.contains(banned), "{banned}: {correction}");
     }
+}
+
+#[test]
+fn spent_dust_advice_names_a_real_wallet_feature() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let mut findings = Vec::new();
+    TxGraph::from_wallet_history(spend_of(&[(&a, 600), (&b, 50_000)], &[&a, &b]))
+        .detect_dust(&DetectorThresholds::default(), &mut findings);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let correction = findings[0].correction.as_deref().expect("a correction");
+    assert!(
+        correction.starts_with("This dust has already been spent."),
+        "{correction}"
+    );
+    assert!(
+        correction.contains("freeze dust like this in your wallet's coin control"),
+        "{correction}"
+    );
+    // Bitcoin Core has no setting that rejects incoming dust.
+    assert!(!correction.contains("rejection"), "{correction}");
 }
