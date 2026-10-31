@@ -10,6 +10,9 @@ use crate::types::*;
 
 const MAX_CHANGE_REASONS: usize = 6;
 
+/// Smallest coin Wasabi's WabiSabi coordinator registers by default (MinRegistrableAmount).
+const WABISABI_MIN_SATS: u64 = 5_000;
+
 /// Keeps at most `cap` reasons, the first of each heuristic before any other, in first-found order.
 fn cap_reasons(problems: Vec<(&'static str, String)>, cap: usize) -> Vec<String> {
     let mut seen: HashSet<&str> = HashSet::new();
@@ -244,8 +247,7 @@ impl TxGraph {
                     correction: Some(format!(
                         "Freeze small change like this in your wallet from now on and never \
                          merge it with your other coins: that links the two transactions.{}",
-                        // Dust is under any CoinJoin coordinator's minimum.
-                        if out.value > thresholds.dust {
+                        if sats >= WABISABI_MIN_SATS {
                             " Change above a CoinJoin coordinator's minimum can go through a \
                              WabiSabi CoinJoin instead."
                         } else {

@@ -618,7 +618,7 @@ fn toxic_change_advice_is_for_next_time_and_offers_wabisabi_only_above_the_minim
 }
 
 #[test]
-fn toxic_change_of_dust_size_gets_no_coinjoin_mention() {
+fn toxic_change_under_the_coordinators_minimum_gets_no_coinjoin_mention() {
     for sats in [546, 600, 1_000] {
         let findings = toxic_findings_of(sats, &wpkh(1), &wpkh(2), vec![], &[]);
         let correction = findings[0].correction.as_deref().expect("a correction");
@@ -628,7 +628,15 @@ fn toxic_change_of_dust_size_gets_no_coinjoin_mention() {
         );
         assert!(!correction.contains("CoinJoin"), "{sats}: {correction}");
     }
-    let findings = toxic_findings_of(1_001, &wpkh(1), &wpkh(2), vec![], &[]);
-    let correction = findings[0].correction.as_deref().expect("a correction");
-    assert!(correction.contains("WabiSabi"), "{correction}");
+    // Wasabi's coordinator registers coins from 5,000 sats by default.
+    for sats in [1_001, 4_999] {
+        let findings = toxic_findings_of(sats, &wpkh(1), &wpkh(2), vec![], &[]);
+        let correction = findings[0].correction.as_deref().expect("a correction");
+        assert!(!correction.contains("CoinJoin"), "{sats}: {correction}");
+    }
+    for sats in [5_000, 10_000] {
+        let findings = toxic_findings_of(sats, &wpkh(1), &wpkh(2), vec![], &[]);
+        let correction = findings[0].correction.as_deref().expect("a correction");
+        assert!(correction.contains("WabiSabi"), "{sats}: {correction}");
+    }
 }
