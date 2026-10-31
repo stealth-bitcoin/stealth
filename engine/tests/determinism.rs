@@ -16,7 +16,7 @@ use stealth_engine::gateway::{
     DecodedTransaction, DescriptorType, TxInputRef, TxOutput, Utxo, WalletHistory,
     WalletTxCategory, WalletTxEntry,
 };
-use stealth_engine::{TxGraph, VulnerabilityType};
+use stealth_engine::{Finding, TxGraph, VulnerabilityType};
 
 // ─── builders ───────────────────────────────────────────────────────────────
 
@@ -469,14 +469,34 @@ fn spend_history(
     }
 }
 
-fn cluster_merges(history: &WalletHistory) -> Vec<String> {
+fn cluster_merge_findings(history: &WalletHistory) -> Vec<Finding> {
     TxGraph::from_wallet_history(history.clone())
         .detect_all(&DetectorThresholds::default(), None, None)
         .findings
         .into_iter()
         .filter(|f| f.vulnerability_type == VulnerabilityType::ClusterMerge)
+        .collect()
+}
+
+fn cluster_merges(history: &WalletHistory) -> Vec<String> {
+    cluster_merge_findings(history)
+        .into_iter()
         .map(|f| f.description)
         .collect()
+}
+
+/// A tx of ours: `id` spends a coin at our `from` (paid by `prev`) into `outs`.
+fn own_tx(
+    id: Txid,
+    prev: Txid,
+    from: &Address<NetworkUnchecked>,
+    outs: Vec<TxOutput>,
+) -> [DecodedTransaction; 2] {
+    let total = outs.iter().map(|o| o.value.to_sat()).sum::<u64>() + 10_000;
+    [
+        tx(prev, vec![vin(txid(0x5E0), 0)], vec![out(0, from, total)]),
+        tx(id, vec![vin(prev, 0)], outs),
+    ]
 }
 
 #[test]
@@ -562,23 +582,23 @@ fn cluster_merge_still_flags_coins_from_distinct_origins() {
 
 #[test]
 fn cluster_merge_counts_chains_not_inputs() {
-    // Two inputs come from one funding tx, the third is a distinct origin.
-    let w: Vec<Address<NetworkUnchecked>> = (224u8..=226).map(wpkh).collect();
+    // Two inputs come from one tx of ours, the third is a distinct origin.
+    let w: Vec<Address<NetworkUnchecked>> = (224u8..=227).map(wpkh).collect();
     let source = txid(0x521);
     let other = txid(0x523);
     let spend = txid(0x524);
-    let txs = vec![
-        tx(
-            source,
-            vec![vin(txid(0x5F5), 0)],
-            vec![out(0, &w[0], 400_000), out(1, &w[1], 500_000)],
-        ),
-        tx(
-            other,
-            vec![vin(txid(0x5F6), 0)],
-            vec![out(0, &w[2], 300_000)],
-        ),
-    ];
+    let mut txs = own_tx(
+        source,
+        txid(0x520),
+        &w[3],
+        vec![out(0, &w[0], 400_000), out(1, &w[1], 500_000)],
+    )
+    .to_vec();
+    txs.push(tx(
+        other,
+        vec![vin(txid(0x5F6), 0)],
+        vec![out(0, &w[2], 300_000)],
+    ));
     let history = spend_history(
         &w,
         &[source, other],
@@ -589,12 +609,45 @@ fn cluster_merge_counts_chains_not_inputs() {
         ),
         txs,
     );
-    let merges = cluster_merges(&history);
+    let merges = cluster_merge_findings(&history);
     assert_eq!(merges.len(), 1);
     assert!(
-        merges[0].ends_with("from 2 different funding chains"),
-        "{}",
         merges[0]
+            .description
+            .ends_with("from 2 different funding chains"),
+        "{}",
+        merges[0].description
+    );
+    let details = merges[0].details.as_ref().expect("finding has details");
+    assert!(details.get("funding_sources").is_none(), "{details}");
+    let chain_inputs: Vec<Vec<String>> = details["chains"]
+        .as_array()
+        .expect("chains is an array")
+        .iter()
+        .map(|c| {
+            c.as_array()
+                .expect("a chain is an array of inputs")
+                .iter()
+                .map(|i| {
+                    format!(
+                        "{}:{}",
+                        i["funding_txid"].as_str().unwrap_or(""),
+                        i["funding_vout"]
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        chain_inputs,
+        vec![
+            vec![format!("{source}:0"), format!("{source}:1")],
+            vec![format!("{other}:0")],
+        ]
+    );
+    assert_eq!(
+        details["chains"][1][0]["address"],
+        w[2].assume_checked_ref().to_string()
     );
 }
 
@@ -662,7 +715,8 @@ fn cluster_merge_ignores_coins_at_one_own_address() {
 }
 
 #[test]
-fn cluster_merge_ignores_coins_from_one_funding_tx() {
+fn cluster_merge_flags_two_outputs_of_a_foreign_batch() {
+    // An exchange batch pays two fresh addresses of ours; spending both joins them.
     let (w1, w2) = (wpkh(101), wpkh(102));
     let funding = txid(0x551);
     let spend = txid(0x552);
@@ -681,7 +735,60 @@ fn cluster_merge_ignores_coins_from_one_funding_tx() {
         ),
         txs,
     );
+    assert_eq!(cluster_merges(&history).len(), 1);
+}
+
+#[test]
+fn cluster_merge_ignores_two_outputs_of_our_own_tx() {
+    let (w1, w2, z) = (wpkh(101), wpkh(102), wpkh(104));
+    let funding = txid(0x551);
+    let spend = txid(0x552);
+    let txs = own_tx(
+        funding,
+        txid(0x550),
+        &z,
+        vec![out(0, &w1, 400_000), out(1, &w2, 400_000)],
+    )
+    .to_vec();
+    let history = spend_history(
+        &[w1, w2, z],
+        &[funding],
+        tx(
+            spend,
+            vec![vin(funding, 0), vin(funding, 1)],
+            vec![out(0, &wpkh(103), 790_000)],
+        ),
+        txs,
+    );
     assert_eq!(cluster_merges(&history), Vec::<String>::new());
+}
+
+#[test]
+fn cluster_merge_flags_a_coinbase_coin_spent_with_an_ordinary_one() {
+    let (w1, w2) = (wpkh(105), wpkh(106));
+    let (cb, paid) = (txid(0x553), txid(0x554));
+    let spend = txid(0x555);
+    let coinbase = TxInputRef {
+        previous_txid: Txid::all_zeros(),
+        previous_vout: u32::MAX,
+        sequence: 0xffff_ffff,
+        coinbase: true,
+    };
+    let txs = vec![
+        tx(cb, vec![coinbase], vec![out(0, &w1, 400_000)]),
+        tx(paid, vec![vin(txid(0x5F9), 0)], vec![out(0, &w2, 400_000)]),
+    ];
+    let history = spend_history(
+        &[w1, w2],
+        &[cb, paid],
+        tx(
+            spend,
+            vec![vin(cb, 0), vin(paid, 0)],
+            vec![out(0, &wpkh(107), 790_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history).len(), 1);
 }
 
 #[test]
@@ -720,19 +827,19 @@ fn cluster_merge_flags_a_counterparty_paid_from_the_same_batch() {
 #[test]
 fn cluster_merge_groups_inputs_linked_only_through_a_third() {
     // `a` and `c` share an own address, `c` and `b` share a funding tx; `a` and `b` share nothing.
-    let (x, y) = (wpkh(121), wpkh(122));
+    let (x, y, z) = (wpkh(121), wpkh(122), wpkh(123));
     let (fa, fbc) = (txid(0x574), txid(0x575));
     let spend = txid(0x577);
-    let txs = vec![
-        tx(fa, vec![vin(txid(0x5FC), 0)], vec![out(0, &x, 400_000)]),
-        tx(
-            fbc,
-            vec![vin(txid(0x5FD), 0)],
-            vec![out(0, &y, 400_000), out(1, &x, 400_000)],
-        ),
-    ];
+    let mut txs = own_tx(
+        fbc,
+        txid(0x576),
+        &z,
+        vec![out(0, &y, 400_000), out(1, &x, 400_000)],
+    )
+    .to_vec();
+    txs.push(tx(fa, vec![vin(txid(0x5FC), 0)], vec![out(0, &x, 400_000)]));
     let history = spend_history(
-        &[x, y],
+        &[x, y, z],
         &[fa, fbc],
         tx(
             spend,

@@ -1,6 +1,6 @@
 //! Input-ownership and input/output linkage detectors.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Txid};
@@ -94,30 +94,20 @@ impl TxGraph {
                 continue;
             }
 
-            // Trace each input one hop back to find funding sources.
-            let mut funding_sources: HashMap<String, HashSet<String>> = HashMap::new();
             let mut origins: Vec<Origin> = Vec::new();
             for ia in &our_in {
                 let parent_tx = match self.fetch_tx(&ia.funding_txid) {
                     Some(t) => t,
                     None => continue,
                 };
-                let mut gp_sources = HashSet::new();
-                for p_vin in &parent_tx.vin {
-                    if p_vin.coinbase {
-                        gp_sources.insert("coinbase".into());
-                    } else {
-                        let ptxid = p_vin.previous_txid.to_string();
-                        gp_sources.insert(ptxid[..16].to_string());
-                    }
-                }
-                let ftxid = ia.funding_txid.to_string();
-                let key = format!("{}:{}", &ftxid[..16], ia.funding_vout);
-                funding_sources.insert(key, gp_sources);
-
                 origins.push(Origin {
                     funding_txid: ia.funding_txid,
+                    funding_vout: ia.funding_vout,
                     address: ia.address.clone(),
+                    own_funding: self
+                        .get_input_addresses(&ia.funding_txid)
+                        .iter()
+                        .any(|p| self.is_ours(&p.address)),
                     coinbase: parent_tx.vin.iter().any(|v| v.coinbase),
                 });
             }
@@ -134,7 +124,13 @@ impl TxGraph {
                     }
                 }
             }
-            let chains = chain.iter().collect::<HashSet<_>>().len();
+            let mut labels: Vec<usize> = Vec::new();
+            for c in &chain {
+                if !labels.contains(c) {
+                    labels.push(*c);
+                }
+            }
+            let chains = labels.len();
 
             if chains >= 2 {
                 findings.push(Finding {
@@ -146,13 +142,18 @@ impl TxGraph {
                     ),
                     details: Some(json!({
                         "txid": txid,
-                        "funding_sources": funding_sources.iter()
-                            .map(|(k, v)| {
-                                let mut sources: Vec<String> = v.iter().cloned().collect();
-                                sources.sort_unstable();
-                                (k.clone(), sources)
+                        "chains": labels.iter()
+                            .map(|label| {
+                                origins.iter().zip(&chain)
+                                    .filter(|(_, c)| *c == label)
+                                    .map(|(o, _)| json!({
+                                        "funding_txid": o.funding_txid,
+                                        "funding_vout": o.funding_vout,
+                                        "address": o.address,
+                                    }))
+                                    .collect::<Vec<_>>()
                             })
-                            .collect::<BTreeMap<_, _>>(),
+                            .collect::<Vec<_>>(),
                     })),
                     correction: Some(
                         "Use coin control to spend UTXOs from only one funding source \
@@ -411,14 +412,17 @@ impl TxGraph {
 /// Where one of our inputs came from, as far back as cluster merge looks.
 struct Origin {
     funding_txid: Txid,
+    funding_vout: u32,
     address: Address<NetworkUnchecked>,
+    /// The funding tx spends at least one of our coins, so we built it.
+    own_funding: bool,
     coinbase: bool,
 }
 
 impl Origin {
-    /// Same funding tx, same own address, or both coinbase.
+    /// Same funding tx built by us, same own address, or both coinbase.
     fn same_chain(&self, other: &Origin) -> bool {
-        self.funding_txid == other.funding_txid
+        (self.funding_txid == other.funding_txid && self.own_funding)
             || self.address == other.address
             || (self.coinbase && other.coinbase)
     }
