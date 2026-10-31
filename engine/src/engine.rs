@@ -109,9 +109,9 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
     }
 
     /// Own dust whose spend the history does not settle (and, for a UTXO
-    /// scan, the pasted dust) is looked up on the node. Absent from the UTXO
-    /// set means spent only while the creating tx is confirmed or still known
-    /// to the node; an output without such an answer gets no entry.
+    /// scan, the pasted dust) is looked up on the node. Absent from the
+    /// confirmed UTXO set means spent only when the creating tx is confirmed;
+    /// an output without such an answer gets no entry.
     fn ask_dust_status(&self, graph: &mut TxGraph, include_listed: bool) {
         let thresholds = &self.settings.config.thresholds;
         let mut outpoints = graph.dust_needing_chain_status(thresholds);
@@ -140,7 +140,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             })
             .map(|(op, _)| op.txid)
             .collect();
-        let still_known: HashSet<Txid> = if unconfirmed.is_empty() {
+        let confirmed_since: HashSet<Txid> = if unconfirmed.is_empty() {
             HashSet::new()
         } else {
             let txids: Vec<Txid> = unconfirmed.iter().copied().collect();
@@ -149,7 +149,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
                 .map(|fetched| {
                     fetched
                         .into_iter()
-                        .filter(|(_, tx)| tx.is_ok())
+                        .filter(|(_, tx)| tx.as_ref().is_ok_and(|tx| tx.confirmations > 0))
                         .map(|(txid, _)| txid)
                         .collect()
                 })
@@ -157,7 +157,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         };
 
         for (op, in_set) in answers {
-            if in_set || !unconfirmed.contains(&op.txid) || still_known.contains(&op.txid) {
+            if in_set || !unconfirmed.contains(&op.txid) || confirmed_since.contains(&op.txid) {
                 graph.chain_unspent.insert((op.txid, op.vout), in_set);
             }
         }

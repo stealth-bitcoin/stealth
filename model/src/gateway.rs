@@ -60,8 +60,9 @@ pub trait BlockchainGateway {
         Ok(false)
     }
 
-    /// Whether each output is in the UTXO set, mempool spends included.
-    /// Absent covers spent and never created (an evicted or replaced
+    /// Whether each output is in the confirmed UTXO set: a spend only in the
+    /// mempool leaves it present. Absent covers spent in a block, created by
+    /// a tx not yet confirmed, and never created (an evicted or replaced
     /// creating tx, or a vout it does not have). The outer `Result` is
     /// transport-level; per-output failures come back in the inner `Result`s.
     fn outputs_in_utxo_set(&self, outpoints: &[OutPoint]) -> Result<UtxoSetResults, AnalysisError>;

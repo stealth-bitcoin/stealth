@@ -1240,16 +1240,8 @@ impl BlockchainGateway for BitcoinCoreRpc {
         if outpoints.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(per_chunk(outpoints, RPC_BATCH_SIZE, |chunk| {
-            let params: Vec<Vec<Value>> = chunk
-                .iter()
-                .map(|op| vec![json!(op.txid.to_string()), json!(op.vout), json!(true)])
-                .collect();
-            Ok(self
-                .call_batch_nullable::<Value>("gettxout", &params)?
-                .into_iter()
-                .map(|answer| answer.map(|txout| txout.is_some()))
-                .collect())
+        Ok(utxo_set_answers(outpoints, |params| {
+            self.call_batch_nullable::<Value>("gettxout", params)
         }))
     }
 
@@ -1414,6 +1406,26 @@ fn per_chunk<I: Copy, A>(
         }
     }
     out
+}
+
+/// gettxout over `outpoints` in chunks, against the confirmed UTXO set so a
+/// spend only in the mempool leaves the output present.
+fn utxo_set_answers(
+    outpoints: &[OutPoint],
+    mut call: impl FnMut(
+        &[Vec<Value>],
+    ) -> Result<Vec<Result<Option<Value>, AnalysisError>>, AnalysisError>,
+) -> UtxoSetResults {
+    per_chunk(outpoints, RPC_BATCH_SIZE, |chunk| {
+        let params: Vec<Vec<Value>> = chunk
+            .iter()
+            .map(|op| vec![json!(op.txid.to_string()), json!(op.vout), json!(false)])
+            .collect();
+        Ok(call(&params)?
+            .into_iter()
+            .map(|answer| answer.map(|txout| txout.is_some()))
+            .collect())
+    })
 }
 
 fn batch_answer<T>(
@@ -1758,10 +1770,11 @@ mod tests {
     use super::{
         batch_answer, cache_wallet_name, default_cookie_candidates, default_rpc_port,
         network_datadir_subdir, network_for_rpc_port, per_chunk, scan_wallet_name,
-        BitcoinCoreConfig, BitcoinCoreRpc, JsonRpcBatchEnvelope, JsonRpcError,
-        ListTransactionEntry, ListUnspentEntry, RawTransaction, RpcAuth,
+        utxo_set_answers, BitcoinCoreConfig, BitcoinCoreRpc, JsonRpcBatchEnvelope, JsonRpcError,
+        ListTransactionEntry, ListUnspentEntry, RawTransaction, RpcAuth, RPC_BATCH_SIZE,
     };
-    use bitcoin::{Amount, Txid};
+    use bitcoin::hashes::Hash;
+    use bitcoin::{Amount, OutPoint, Txid};
     use serde_json::{json, Value};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
@@ -2062,6 +2075,36 @@ mod tests {
                 Some(("__cookie__".to_string(), network.to_string())),
                 "{network} cookie must be read from <datadir>/{subdir}/.cookie"
             );
+        }
+    }
+
+    #[test]
+    fn gettxout_is_chunked_and_a_failed_chunk_only_fails_its_outputs() {
+        let txid = Txid::all_zeros();
+        let outpoints: Vec<OutPoint> = (0..250).map(|vout| OutPoint::new(txid, vout)).collect();
+        let mut chunks = Vec::new();
+        let answers = utxo_set_answers(&outpoints, |params: &[Vec<Value>]| {
+            chunks.push(params.len());
+            assert!(
+                params.iter().all(|p| p[2] == json!(false)),
+                "mempool spends must not count: {params:?}"
+            );
+            if params[0][1] == json!(RPC_BATCH_SIZE) {
+                return Err(AnalysisError::EnvironmentUnavailable("timeout".into()));
+            }
+            Ok(params
+                .iter()
+                .map(|p| Ok((p[1].as_u64() != Some(0)).then(|| json!({}))))
+                .collect())
+        });
+        assert_eq!(chunks, [100, 100, 50]);
+        assert_eq!(answers.len(), 250);
+        for (op, answer) in answers {
+            match op.vout {
+                100..=199 => assert!(answer.is_err(), "{op}"),
+                0 => assert_eq!(answer, Ok(false), "{op}"),
+                _ => assert_eq!(answer, Ok(true), "{op}"),
+            }
         }
     }
 

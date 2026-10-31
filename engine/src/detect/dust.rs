@@ -22,37 +22,39 @@ impl TxGraph {
     pub(super) fn detect_dust(&self, thresholds: &DetectorThresholds, findings: &mut Vec<Finding>) {
         let dust = thresholds.dust;
 
-        // Current UTXOs; only a pasted one is checked on the node, and it
-        // stays as pasted when the node gives no answer.
+        // Current UTXOs; a pasted one is spent when a confirmed tx in the
+        // history spends it or the node says so, and otherwise stays as pasted.
         for utxo in &self.utxos {
             if !self.is_ours(&utxo.address) || utxo.amount > dust {
                 continue;
             }
-            let finding = if self.chain_unspent.get(&(utxo.txid, utxo.vout)) == Some(&false) {
-                let mut finding = self.spent_dust_finding(
-                    &utxo.txid,
-                    utxo.vout,
-                    &utxo.address,
-                    utxo.amount,
-                    thresholds,
-                );
-                finding.description = format!(
+            let key = (utxo.txid, utxo.vout);
+            let finding =
+                if self.confirmed_spend(&key) || self.chain_unspent.get(&key) == Some(&false) {
+                    let mut finding = self.spent_dust_finding(
+                        &utxo.txid,
+                        utxo.vout,
+                        &utxo.address,
+                        utxo.amount,
+                        thresholds,
+                    );
+                    finding.description = format!(
                     "Dust output {}:{} at {} ({} sats) was pasted as unspent but is already spent",
                     utxo.txid,
                     utxo.vout,
                     utxo.address.assume_checked_ref(),
                     utxo.amount.to_sat(),
                 );
-                finding
-            } else {
-                self.unspent_dust_finding(
-                    &utxo.txid,
-                    utxo.vout,
-                    &utxo.address,
-                    utxo.amount,
-                    thresholds,
-                )
-            };
+                    finding
+                } else {
+                    self.unspent_dust_finding(
+                        &utxo.txid,
+                        utxo.vout,
+                        &utxo.address,
+                        utxo.amount,
+                        thresholds,
+                    )
+                };
             findings.push(finding);
         }
 
@@ -90,11 +92,13 @@ impl TxGraph {
             .is_some_and(|child| child.confirmations > 0)
     }
 
-    /// Outpoints of own dust in the UTXO list.
+    /// Outpoints of own dust in the UTXO list that no confirmed tx in the
+    /// history spends.
     pub(crate) fn listed_dust(&self, thresholds: &DetectorThresholds) -> Vec<OutPoint> {
         self.utxos
             .iter()
             .filter(|u| self.is_ours(&u.address) && u.amount <= thresholds.dust)
+            .filter(|u| !self.confirmed_spend(&(u.txid, u.vout)))
             .map(|u| OutPoint::new(u.txid, u.vout))
             .collect()
     }

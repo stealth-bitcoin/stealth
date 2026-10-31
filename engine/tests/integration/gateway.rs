@@ -269,7 +269,9 @@ fn outputs_in_utxo_set_follows_the_chain_and_the_mempool() {
         .expect("spend alice coin");
     assert_eq!(
         status(funded),
-        Some(false),
-        "a mempool spend counts as spent"
+        Some(true),
+        "a spend only in the mempool is not final"
     );
+    mine(&node, 1, &da);
+    assert_eq!(status(funded), Some(false), "a confirmed spend removes it");
 }
