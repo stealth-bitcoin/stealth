@@ -465,6 +465,15 @@ fn node_on(datadir: &std::path::Path, args: &[&str]) -> Node {
     Node::with_conf(exe, &conf).expect("failed to start bitcoind")
 }
 
+/// Removes a test's datadir when the test ends, passing or not.
+struct TempDatadir(std::path::PathBuf);
+
+impl Drop for TempDatadir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Core keeps replaced_by_txid on a bumped original for good: abandon the
 /// replacement while it is out of the mempool and the wallet rebroadcasts the
 /// original, which is then live and must be analyzed.
@@ -474,10 +483,12 @@ fn a_bumped_original_back_in_the_mempool_is_analyzed() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let datadir = std::env::temp_dir().join(format!("stealth-rebroadcast-{nanos}"));
-    std::fs::create_dir_all(&datadir).unwrap();
+    // Declared before the nodes, so it is dropped after them.
+    let guard = TempDatadir(std::env::temp_dir().join(format!("stealth-rebroadcast-{nanos}")));
+    std::fs::create_dir_all(&guard.0).unwrap();
+    let datadir = guard.0.as_path();
 
-    let mut first = node_on(&datadir, &[]);
+    let mut first = node_on(datadir, &[]);
     let miner = first.client.new_address().unwrap();
     mine(&first, 110, &miner);
     let to = first.client.new_address().unwrap();
@@ -504,14 +515,14 @@ fn a_bumped_original_back_in_the_mempool_is_analyzed() {
     first.stop().unwrap();
 
     // Without the saved mempool or wallet broadcast, the replacement is out and can be abandoned.
-    let mut second = node_on(&datadir, &["-persistmempool=0", "-walletbroadcast=0"]);
+    let mut second = node_on(datadir, &["-persistmempool=0", "-walletbroadcast=0"]);
     let _: Value = second
         .client
         .call("abandontransaction", &[json!(replacement.to_string())])
         .expect("abandontransaction");
     second.stop().unwrap();
 
-    let node = node_on(&datadir, &["-persistmempool=0"]);
+    let node = node_on(datadir, &["-persistmempool=0"]);
     let mempool: Vec<String> = node.client.call("getrawmempool", &[]).unwrap();
     assert_eq!(
         mempool,
@@ -529,7 +540,6 @@ fn a_bumped_original_back_in_the_mempool_is_analyzed() {
     assert!(mempool_conflicted(&report).is_empty(), "{:?}", report.stats);
     assert_eq!(report.stats.abandoned_txids, vec![replacement]);
     drop(node);
-    let _ = std::fs::remove_dir_all(&datadir);
 }
 
 /// A payment and a child spending its change, both expired from the mempool.

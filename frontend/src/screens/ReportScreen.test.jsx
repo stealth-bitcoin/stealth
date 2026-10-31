@@ -472,10 +472,13 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
 
   it('says nothing when the report predates the fields', () => {
     const report = makeReport({ txs: 2 })
+    delete report.stats.conflicted_txids
     delete report.stats.mempool_conflicted_txids
     delete report.stats.abandoned_txids
+    delete report.stats.unavailable_txids
     show(report)
-    expect(screen.queryByText(/replaced|abandoned/i)).toBeNull()
+    // Words from each of the four notes.
+    expect(screen.queryByText(/left out|conflict|in the mempool|abandoned|no longer has/i)).toBeNull()
   })
 })
 
