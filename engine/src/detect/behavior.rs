@@ -335,6 +335,7 @@ impl TxGraph {
         let min_hops = thresholds.peel_chain_min_hops;
         let critical_hops = thresholds.peel_chain_critical_hops;
 
+        let mut chains: Vec<(Vec<Txid>, u32, f64)> = Vec::new();
         let txids = self.ordered_txids();
         for txid in txids {
             let input_addrs = self.get_input_addresses(&txid);
@@ -369,6 +370,7 @@ impl TxGraph {
             // Trace forward: does the "large" output feed into another
             // 2-output transaction? If so, count the chain length.
             let mut hops = 1u32;
+            let mut chain = vec![txid];
             let large_idx = if outputs[0].value.to_sat() >= outputs[1].value.to_sat() {
                 0
             } else {
@@ -393,6 +395,7 @@ impl TxGraph {
                     break;
                 }
                 hops += 1;
+                chain.push(child_txid);
                 let large_child = if child_outs[0].value.to_sat() >= child_outs[1].value.to_sat() {
                     0
                 } else {
@@ -404,6 +407,21 @@ impl TxGraph {
 
             if hops < min_hops {
                 continue; // At least `min_hops` to qualify
+            }
+            chains.push((chain, hops, ratio));
+        }
+
+        // A chain starting at a later hop of another chain is that chain's tail.
+        let later_hops: HashSet<Txid> = chains
+            .iter()
+            .flat_map(|(chain, _, _)| chain.iter().skip(1).copied())
+            .collect();
+        for (chain, hops, ratio) in chains {
+            let Some(&txid) = chain.first() else {
+                continue;
+            };
+            if later_hops.contains(&txid) {
+                continue;
             }
 
             let severity = if hops >= critical_hops {
@@ -422,6 +440,7 @@ impl TxGraph {
                 details: Some(json!({
                     "start_txid": txid.to_string(),
                     "hops": hops,
+                    "txids": chain.iter().map(Txid::to_string).collect::<Vec<_>>(),
                     "initial_ratio": (ratio * 100.0).round() as u32,
                 })),
                 correction: Some(
