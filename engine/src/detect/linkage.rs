@@ -31,12 +31,15 @@ impl TxGraph {
                 .iter()
                 .filter(|ia| self.is_ours(&ia.address))
                 .collect();
-            if our_inputs.len() < 2 {
+            // Coins from a single address link nothing that address does not already.
+            let our_addresses: HashSet<_> = our_inputs.iter().map(|ia| &ia.address).collect();
+            if our_addresses.len() < 2 {
                 continue;
             }
 
             let total_inputs = input_addrs.len();
             let n_ours = our_inputs.len();
+            let n_our_addresses = our_addresses.len();
             let ownership_pct = (n_ours as f64 / total_inputs as f64 * 100.0).round() as u32;
 
             let severity = if n_ours == total_inputs {
@@ -49,13 +52,14 @@ impl TxGraph {
                 vulnerability_type: VulnerabilityType::Cioh,
                 severity,
                 description: format!(
-                    "TX {} merges {}/{} of your inputs ({}% ownership)",
-                    txid, n_ours, total_inputs, ownership_pct
+                    "TX {} merges {} of your addresses: {} of its {} inputs are yours ({}% ownership)",
+                    txid, n_our_addresses, n_ours, total_inputs, ownership_pct
                 ),
                 details: Some(json!({
                     "txid": txid,
                     "total_inputs": total_inputs,
                     "our_inputs": n_ours,
+                    "our_addresses": n_our_addresses,
                     "ownership_pct": ownership_pct,
                 })),
                 correction: Some(
