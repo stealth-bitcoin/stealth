@@ -344,7 +344,7 @@ fn the_receiver_of_a_payment_bumped_but_not_mined_leaves_it_out() {
 }
 
 #[test]
-fn a_double_spend_from_outside_the_wallet_leaves_out_the_tx_and_its_child() {
+fn a_raw_double_spend_of_the_wallets_own_payment_leaves_out_it_and_its_child() {
     let node = node();
     let miner = node.client.new_address().unwrap();
     mine(&node, 110, &miner);
@@ -391,4 +391,65 @@ fn a_double_spend_from_outside_the_wallet_leaves_out_the_tx_and_its_child() {
     let mut expected = vec![(payment, double_spend), (child, double_spend)];
     expected.sort_by_key(|(txid, _)| txid.to_string());
     assert_eq!(mempool_conflicted(&report), expected);
+}
+
+/// The sender double-spends a payment to bob with a raw tx back to itself;
+/// bob's wallet holds neither the double spend nor anything paying him now.
+#[test]
+fn the_receiver_of_a_payment_double_spent_away_from_him_leaves_it_out() {
+    let node = node();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let (alice, _) = fund_sender(&node, &miner, "alice", 1_000_000);
+    let funding = alice.list_unspent().unwrap().0.remove(0);
+    let bob = node.create_wallet("bob").unwrap();
+    let to = bob.new_address().unwrap();
+    let gateway = gateway_for(&node);
+    let settings = EngineSettings {
+        persist_scan_wallet: true,
+        ..EngineSettings::default()
+    };
+    let descriptor = format!("addr({to})");
+    let cached_scan = || {
+        AnalysisEngine::new(&gateway, settings.clone())
+            .analyze(ScanTarget::Descriptor(descriptor.clone()))
+    };
+    cached_scan().expect("first scan");
+
+    let payment: String = alice
+        .call("sendtoaddress", &[json!(to.to_string()), json!(0.001)])
+        .expect("sendtoaddress");
+    let payment: Txid = payment.parse().unwrap();
+    let raw = alice
+        .create_raw_transaction(
+            &[Input {
+                txid: funding.txid.parse().unwrap(),
+                vout: funding.vout as u64,
+                sequence: None,
+            }],
+            &[Output::new(
+                alice.new_address().unwrap(),
+                Amount::from_sat(1_000_000 - 50_000),
+            )],
+        )
+        .unwrap();
+    let signed = alice
+        .sign_raw_transaction_with_wallet(&raw.transaction().unwrap())
+        .unwrap();
+    let double_spend = signed.into_model().unwrap().tx;
+    alice.send_raw_transaction(&double_spend).unwrap();
+    let double_spend = double_spend.compute_txid();
+
+    let history = gateway
+        .scan_wallet("bob")
+        .expect("a payment double-spent away must not fail the receiver's scan");
+    let graph = TxGraph::from_wallet_history(history);
+    assert!(!graph.our_txids.contains(&payment));
+    assert!(!graph.our_txids.contains(&double_spend));
+    let report = graph.detect_all(&Default::default(), None, None);
+    assert_eq!(mempool_conflicted(&report), vec![(payment, double_spend)]);
+
+    let cached = cached_scan().expect("nor the cached descriptor scan");
+    assert_eq!(mempool_conflicted(&cached), vec![(payment, double_spend)]);
+    assert_eq!(cached.stats.transactions_analyzed, 0);
 }
