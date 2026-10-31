@@ -13,7 +13,7 @@ use crate::gateway::{
 use crate::graph::TxGraph;
 use crate::types::VulnerabilityType;
 
-const CHANGE_BACK: &str = "Change came back to this address from your own spends";
+const CHANGE_BACK: &str = "Your own spends sent change to this address";
 
 fn txid(n: u32) -> Txid {
     format!("{n:064x}").parse().expect("txid")

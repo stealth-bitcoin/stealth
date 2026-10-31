@@ -159,7 +159,7 @@ fn utxo_scan_gives_the_change_advice_for_change_back_to_the_input_address() {
     assert_eq!(reuse.len(), 1, "{:?}", report.findings);
     let correction = reuse[0].correction.as_deref().unwrap();
     assert!(
-        correction.starts_with("Change came back to this address from your own spends"),
+        correction.starts_with("Your own spends sent change to this address"),
         "{correction}"
     );
 }

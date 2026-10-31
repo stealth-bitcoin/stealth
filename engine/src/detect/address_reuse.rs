@@ -81,8 +81,8 @@ impl TxGraph {
                          and every payment to it lands on a fresh, unrelated address, so \
                          publishing it does not link the payments you receive.",
                         if change_back {
-                            "Change came back to this address from your own spends: send \
-                             change to a fresh change address instead, as wallets do by default. "
+                            "Your own spends sent change to this address: send change to a \
+                             fresh change address instead, as wallets do by default. "
                         } else {
                             ""
                         }

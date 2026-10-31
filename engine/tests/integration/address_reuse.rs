@@ -57,8 +57,8 @@ fn reuse_from_change_back_to_the_input_address_says_so() {
     let reuse = reuse_correction(&report, &reused);
     assert!(
         reuse.starts_with(
-            "Change came back to this address from your own spends: send change to a \
-             fresh change address instead, as wallets do by default."
+            "Your own spends sent change to this address: send change to a fresh \
+             change address instead, as wallets do by default."
         ),
         "{reuse}"
     );
@@ -192,7 +192,7 @@ fn change_from_another_address_landing_on_a_used_one_says_so() {
     let report = scan_wallet(&gateway_for(&node), "alice");
     let reuse = reuse_correction(&report, &used);
     assert!(
-        reuse.starts_with("Change came back to this address from your own spends"),
+        reuse.starts_with("Your own spends sent change to this address"),
         "{reuse}"
     );
 }
