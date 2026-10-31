@@ -253,7 +253,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
         let one = conflicted.len() == 1;
         lines.push(format!(
             "Left out {} transaction{} Core reports as conflicted: {}, or a transaction \
-             it spends, conflicts with another one, so {} not part of the wallet's history.",
+             it depends on, conflicts with another one, so {} not part of the wallet's history.",
             conflicted.len(),
             if one { "" } else { "s" },
             if one { "it" } else { "each" },

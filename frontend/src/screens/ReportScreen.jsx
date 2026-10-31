@@ -137,7 +137,7 @@ function ConflictedNote({ txids }) {
     <div className={styles.scopeNote}>
       <p className={styles.noteText}>
         Left out {txids.length} {one ? 'transaction' : 'transactions'} Core reports as
-        conflicted: {one ? 'it' : 'each'}, or a transaction it spends, conflicts with
+        conflicted: {one ? 'it' : 'each'}, or a transaction it depends on, conflicts with
         another one, so {one ? 'it is' : 'they are'} not part of the wallet's history.
       </p>
       <ul className={styles.txidList}>

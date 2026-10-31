@@ -82,11 +82,11 @@ fn a_cached_descriptor_scan_names_the_conflicted_tx_it_left_out() {
     assert_eq!(report.stats.conflicted_txids, vec![original]);
 }
 
-/// Alice pays bob, spends that payment's unconfirmed change, then a double
-/// spend of the payment's input is mined. Core reports both at negative
-/// depth; only the payment lists a wallet conflict.
+/// Alice pays bob, spends that payment's unconfirmed change, spends that
+/// change in turn, then a double spend of the payment's input is mined. Core
+/// reports all three at negative depth; only the payment lists a wallet conflict.
 #[test]
-fn a_tx_spending_a_conflicted_one_is_left_out_and_named_too() {
+fn txs_depending_on_a_conflicted_one_are_left_out_and_named_too() {
     let node = node();
     let miner = node.client.new_address().unwrap();
     mine(&node, 110, &miner);
@@ -108,11 +108,14 @@ fn a_tx_spending_a_conflicted_one_is_left_out_and_named_too() {
     };
     let payment = send(100_000);
     let child = send(200_000);
-    let decoded = gateway_for(&node).get_transaction(child).unwrap();
-    assert!(
-        decoded.vin.iter().any(|i| i.previous_txid == payment),
-        "the second send must spend the first one's change"
-    );
+    let grandchild = send(300_000);
+    for (spender, spent) in [(child, payment), (grandchild, child)] {
+        let decoded = gateway_for(&node).get_transaction(spender).unwrap();
+        assert!(
+            decoded.vin.iter().any(|i| i.previous_txid == spent),
+            "each send must spend the previous one's change"
+        );
+    }
 
     // A higher-fee spend of the payment's input evicts both and is mined.
     let back = alice.new_address().unwrap();
@@ -133,14 +136,13 @@ fn a_tx_spending_a_conflicted_one_is_left_out_and_named_too() {
         .unwrap();
     mine(&node, 1, &miner);
 
-    let child_entry: Value = alice
-        .call("gettransaction", &[json!(child.to_string())])
-        .expect("gettransaction");
-    assert!(
-        child_entry["confirmations"].as_i64().unwrap() < 0,
-        "{child_entry}"
-    );
-    assert_eq!(child_entry["walletconflicts"], json!([]), "{child_entry}");
+    for descendant in [child, grandchild] {
+        let entry: Value = alice
+            .call("gettransaction", &[json!(descendant.to_string())])
+            .expect("gettransaction");
+        assert!(entry["confirmations"].as_i64().unwrap() < 0, "{entry}");
+        assert_eq!(entry["walletconflicts"], json!([]), "{entry}");
+    }
 
     let history = gateway_for(&node)
         .scan_wallet("alice")
@@ -148,8 +150,9 @@ fn a_tx_spending_a_conflicted_one_is_left_out_and_named_too() {
     let graph = TxGraph::from_wallet_history(history);
     assert!(!graph.our_txids.contains(&payment));
     assert!(!graph.our_txids.contains(&child));
+    assert!(!graph.our_txids.contains(&grandchild));
     let report = graph.detect_all(&Default::default(), None, None);
-    let mut expected = vec![payment, child];
+    let mut expected = vec![payment, child, grandchild];
     expected.sort_by_key(Txid::to_string);
     assert_eq!(report.stats.conflicted_txids, expected);
 }

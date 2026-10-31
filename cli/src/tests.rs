@@ -339,7 +339,7 @@ mod ordering {
         assert!(
             text.contains(&format!(
                 "Left out 1 transaction Core reports as conflicted: it, or a transaction \
-                 it spends, conflicts with another one, so it is not part of the wallet's \
+                 it depends on, conflicts with another one, so it is not part of the wallet's \
                  history.\n  {CONFLICTED}\n"
             )),
             "{text}"
@@ -359,7 +359,7 @@ mod ordering {
         assert!(
             text.contains(&format!(
                 "Left out 2 transactions Core reports as conflicted: each, or a transaction \
-                 it spends, conflicts with another one, so they are not part of the wallet's \
+                 it depends on, conflicts with another one, so they are not part of the wallet's \
                  history.\n  {CONFLICTED}\n  {other}\n"
             )),
             "{text}"
