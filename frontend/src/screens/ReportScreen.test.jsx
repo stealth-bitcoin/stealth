@@ -489,13 +489,13 @@ describe('ReportScreen — unconfirmed transactions the node no longer has', () 
 
   it('names one and says why it was left out', () => {
     show(makeReport({ txs: 2, unavailable: [original] }))
-    expect(screen.getByText(/left out 1 transaction that is unconfirmed and that this node no longer has \(it may have expired or been evicted from the mempool, or never been broadcast\)\. it may still confirm; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 1 transaction that is unconfirmed and that this node no longer has \(it may have expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was double-spent\)\. unless a transaction it depends on was double-spent, it may still confirm; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
     expect(screen.getByText(original)).toBeTruthy()
   })
 
   it('counts several', () => {
     show(makeReport({ txs: 2, unavailable: [original, other] }))
-    expect(screen.getByText(/left out 2 transactions that are unconfirmed and that this node no longer has \(they may have expired or been evicted from the mempool, or never been broadcast\)\. they may still confirm; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 2 transactions that are unconfirmed and that this node no longer has \(they may have expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was double-spent\)\. unless a transaction they depend on was double-spent, they may still confirm; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
     expect(screen.getByText(other)).toBeTruthy()
   })
 

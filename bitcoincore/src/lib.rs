@@ -491,7 +491,7 @@ impl BitcoinCoreRpc {
             for (txid, fetched) in self.decode_transactions(&frontier)? {
                 let tx = match fetched {
                     Ok(tx) => tx,
-                    // Expired, evicted or never broadcast; it may still confirm.
+                    // Expired, evicted, never broadcast, or after a double spend of a parent.
                     Err(AnalysisError::TransactionNotFound(_))
                         if depth == 0 && !confirmed.contains(&txid) =>
                     {

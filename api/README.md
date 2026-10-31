@@ -98,7 +98,8 @@ object with `txid` and `conflicts_with`; the conflicting transaction is
 analyzed only when the wallet lists it and the scan keeps it),
 `abandoned_txids` for those abandoned in the scan's own wallet, and
 `unavailable_txids` for unconfirmed ones the node no longer has (expired or
-evicted from the mempool, or never broadcast). The abandoned list fills only
+evicted from the mempool, never broadcast, or depending on a transaction that
+was double-spent, in which case they can never confirm). The abandoned list fills only
 when someone abandons a transaction in Stealth's cache wallet; one abandoned in
 the user's own wallet lands in `unavailable_txids`. A wallet transaction the
 node cannot serve still fails the scan when it is confirmed, or when the node
