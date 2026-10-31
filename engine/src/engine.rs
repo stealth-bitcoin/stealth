@@ -75,10 +75,11 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let resolved = normalize_descriptors(
             &expanded,
             self.settings.config.derivation_range_end,
-            self.settings.rescan_since,
             self.gateway,
         )?;
-        let history = self.gateway.scan_descriptors(&resolved)?;
+        let history = self
+            .gateway
+            .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
         self.mark_phase(ScanPhase::Analyzing);
         let graph = TxGraph::from_wallet_history(history);
         Ok(graph.detect_all(
@@ -124,10 +125,9 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let fetched = normalize_descriptors(
             &raw,
             self.settings.config.derivation_range_end,
-            self.settings.rescan_since,
             self.gateway,
         )
-        .and_then(|resolved| self.gateway.scan_descriptors(&resolved));
+        .and_then(|resolved| self.gateway.scan_descriptors(&resolved, false));
         match fetched {
             Ok(full) => {
                 merge_chain_history(history, full);
@@ -256,7 +256,6 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let resolved = normalize_descriptors(
             &expanded,
             self.settings.config.derivation_range_end,
-            self.settings.rescan_since,
             self.gateway,
         )?;
         for descriptor in &resolved {

@@ -48,18 +48,6 @@ fn utxo_scan_sees_real_confirmations_for_age_spread() {
     );
 }
 
-fn wallet_descriptors(wallet: &corepc_node::Client) -> Vec<String> {
-    let resp: serde_json::Value = wallet
-        .call("listdescriptors", &[])
-        .expect("listdescriptors failed");
-    resp["descriptors"]
-        .as_array()
-        .expect("descriptors array missing")
-        .iter()
-        .filter_map(|d| d["desc"].as_str().map(str::to_owned))
-        .collect()
-}
-
 #[test]
 fn ownership_descriptors_suppress_own_batch_false_positive() {
     let node = node();

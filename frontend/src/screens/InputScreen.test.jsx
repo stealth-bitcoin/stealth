@@ -72,7 +72,7 @@ describe('InputScreen', () => {
     expect(screen.getByRole('button', { name: /analyze/i }).disabled).toBe(true)
   })
 
-  it('submits a descriptor body without rescan_since', () => {
+  it('submits a descriptor body', () => {
     const onAnalyze = setup()
     type(DESC)
     fireEvent.click(screen.getByRole('button', { name: /analyze/i }))
@@ -93,7 +93,7 @@ describe('InputScreen', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('submits a utxos body without rescan_since', () => {
+  it('submits a utxos body', () => {
     const onAnalyze = setup()
     type(`${TXID}:0`)
     fireEvent.click(screen.getByRole('button', { name: /analyze/i }))

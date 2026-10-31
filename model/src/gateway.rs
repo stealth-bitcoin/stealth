@@ -21,9 +21,16 @@ pub trait BlockchainGateway {
         &self,
         descriptor: &ResolvedDescriptor,
     ) -> Result<Vec<Address<NetworkUnchecked>>, AnalysisError>;
+    /// Scan a set of resolved descriptors.
+    ///
+    /// When `persist` is `true`, the implementation may keep a
+    /// deterministic watch-only wallet keyed to these descriptors so a
+    /// repeat scan only performs an incremental catch-up. When `false`,
+    /// any wallet it creates is discarded before returning.
     fn scan_descriptors(
         &self,
         descriptors: &[ResolvedDescriptor],
+        persist: bool,
     ) -> Result<WalletHistory, AnalysisError>;
     fn list_wallet_descriptors(
         &self,
@@ -75,8 +82,6 @@ pub struct ResolvedDescriptor {
     pub internal: bool,
     pub active: bool,
     pub range_end: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rescan_since: Option<u64>,
 }
 
 /// Role of a descriptor chain (external receive vs internal change).

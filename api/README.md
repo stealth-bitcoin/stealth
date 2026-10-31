@@ -50,10 +50,13 @@ Accepts one mutually-exclusive source:
 | `descriptor` | `string` | Single output descriptor |
 | `descriptors` | `string[]` | Multiple descriptors |
 | `utxos` | `UtxoInput[]` | Raw UTXO set |
+| `cache_wallet` | `bool` | Optional, default `false`. Keep a watch-only wallet named after the descriptors on the node so repeat scans only pay Core's incremental catch-up. The viewing key stays in the node's wallet directory until removed by hand. |
 
 **Descriptor scan flow:** creates a blank watch-only wallet, imports the
 descriptor(s) with a full blockchain rescan, builds a `TxGraph`, runs all
-17 detectors, then cleans up the temporary wallet.
+17 detectors, then unloads the temporary wallet. With `cache_wallet` the
+wallet is kept instead; a cached wallet whose build failed or was cancelled
+is built again on the next scan rather than trusted.
 
 **UTXO scan flow:** resolves each UTXO's address from the node, fetches the
 chain history of those addresses the way a descriptor scan does (one `addr()`

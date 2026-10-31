@@ -287,11 +287,11 @@ impl TestServer {
 }
 
 #[tokio::test]
-async fn post_scan_accepts_rescan_since_alongside_descriptor() {
+async fn post_scan_accepts_cache_wallet_flag() {
     let server = TestServer::spawn().await;
     let response = reqwest::Client::new()
         .post(server.url("/api/wallet/scan"))
-        .json(&serde_json::json!({ "descriptor": "wpkh(x/0/*)", "rescan_since": 1700000000 }))
+        .json(&serde_json::json!({ "descriptor": "wpkh(x/0/*)", "cache_wallet": true }))
         .send()
         .await
         .unwrap();
