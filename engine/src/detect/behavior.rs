@@ -386,17 +386,37 @@ impl TxGraph {
                 cur = step(&t);
             }
         }
-        // Starts no other start reaches head their chain; a covered start that
-        // no head reaches lies on a loop with no way in.
-        let mut from_heads: HashSet<Txid> = HashSet::new();
-        for (start, _) in starts.iter().filter(|(t, _)| !covered.contains(t)) {
-            let mut cur = step(start);
-            while let Some(t) = cur {
-                if !from_heads.insert(t) {
-                    break;
-                }
-                cur = step(&t);
+        // Chains that merge, or where one spends another's output, are one flow.
+        let mut nodes: Vec<Txid> = starts.iter().map(|(t, _)| *t).collect();
+        let mut index: HashMap<Txid, usize> = HashMap::with_capacity(nodes.len());
+        for (i, t) in nodes.iter().enumerate() {
+            index.insert(*t, i);
+        }
+        for &t in &covered {
+            if let std::collections::hash_map::Entry::Vacant(slot) = index.entry(t) {
+                slot.insert(nodes.len());
+                nodes.push(t);
             }
+        }
+        let mut parent: Vec<usize> = (0..nodes.len()).collect();
+        fn root(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        for (i, t) in nodes.iter().enumerate() {
+            for input in self.get_input_addresses(t) {
+                if let Some(&j) = index.get(&input.funding_txid) {
+                    let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                    parent[a] = b;
+                }
+            }
+        }
+        let mut size: HashMap<usize, usize> = HashMap::new();
+        for i in 0..nodes.len() {
+            *size.entry(root(&mut parent, i)).or_default() += 1;
         }
 
         // Hops from each peel to its chain's end, counting a loop's txs once.
@@ -432,45 +452,54 @@ impl TxGraph {
             }
         }
 
-        // Each head, and each loop once from its smallest start. A tx is listed
-        // by the first finding to reach it; later ones stop there and name it.
-        let cap = max_hops.saturating_add(1);
-        let mut listed_by: HashMap<Txid, Txid> = HashMap::new();
-        let mut loop_done: HashSet<Txid> = HashSet::new();
+        // One finding per flow: its longest path first, then the other chains,
+        // each tx once, up to `max_hops` txids.
+        let mut flows: Vec<usize> = Vec::new();
+        let mut members: HashMap<usize, Vec<(Txid, f64)>> = HashMap::new();
         for &(start, ratio) in &starts {
-            if covered.contains(&start) {
-                if from_heads.contains(&start) || !loop_done.insert(start) {
-                    continue;
-                }
-                let mut cur = step(&start);
-                while let Some(t) = cur {
-                    if !loop_done.insert(t) {
-                        break;
+            let flow = index.get(&start).map_or(0, |&i| root(&mut parent, i));
+            let entry = members.entry(flow).or_default();
+            if entry.is_empty() {
+                flows.push(flow);
+            }
+            entry.push((start, ratio));
+        }
+        let mut listed: HashSet<Txid> = HashSet::new();
+        for flow in flows {
+            let Some(flow_starts) = members.get(&flow) else {
+                continue;
+            };
+            let length = |t: &Txid| remaining.get(t).copied().unwrap_or(1);
+            let Some(&(txid, ratio)) = flow_starts.iter().rev().max_by_key(|(t, _)| length(t))
+            else {
+                continue;
+            };
+            let longest = length(&txid);
+            if longest.min(max_hops) < min_hops {
+                continue; // At least `min_hops` to qualify
+            }
+            let hops = u32::try_from(longest.min(max_hops)).unwrap_or(u32::MAX);
+            let at_least = longest > max_hops;
+            let chains = flow_starts
+                .iter()
+                .filter(|(t, _)| !covered.contains(t))
+                .count();
+
+            let mut chain = Vec::new();
+            let firsts = std::iter::once(txid).chain(flow_starts.iter().map(|(t, _)| *t));
+            'list: for first in firsts {
+                let mut cur = Some(first);
+                // Spends cannot form a cycle; a tx already listed ends bad data too.
+                while let Some(t) = cur.filter(|t| !listed.contains(t)) {
+                    if chain.len() >= max_hops {
+                        break 'list;
                     }
+                    listed.insert(t);
+                    chain.push(t);
                     cur = step(&t);
                 }
             }
-            let total = remaining.get(&start).copied().unwrap_or(1);
-            if total.min(cap) < min_hops {
-                continue; // At least `min_hops` to qualify
-            }
-            let truncated = total > cap;
-            let hops = u32::try_from(total.min(cap)).unwrap_or(u32::MAX);
-            let txid = start;
-
-            let mut chain = Vec::new();
-            let mut joins = None;
-            let mut cur = Some(start);
-            while let Some(t) = cur.filter(|_| chain.len() < cap) {
-                if let Some(&owner) = listed_by.get(&t) {
-                    // Spends cannot form a cycle; reaching our own tx again ends bad data.
-                    joins = (owner != start).then_some(t);
-                    break;
-                }
-                listed_by.insert(t, start);
-                chain.push(t);
-                cur = step(&t);
-            }
+            let truncated = size.get(&flow).copied().unwrap_or(0) > chain.len();
 
             let mut details = json!({
                 "start_txid": txid.to_string(),
@@ -481,8 +510,8 @@ impl TxGraph {
             if truncated {
                 details["truncated"] = json!(true); // Only shown when the chain was cut.
             }
-            if let Some(merge) = joins {
-                details["joins"] = json!(merge.to_string());
+            if chains > 1 {
+                details["merged_chains"] = json!(chains);
             }
 
             let severity = if hops >= critical_hops {
@@ -497,7 +526,7 @@ impl TxGraph {
                 description: format!(
                     "Peel chain detected from TX {}: {}{} hops of asymmetric 2-output transactions",
                     txid,
-                    if truncated { "at least " } else { "" },
+                    if at_least { "at least " } else { "" },
                     hops
                 ),
                 details: Some(details),

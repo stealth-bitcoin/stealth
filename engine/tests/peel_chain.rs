@@ -268,7 +268,7 @@ fn two_independent_chains_are_two_findings() {
 }
 
 #[test]
-fn a_chain_that_splits_off_its_peeled_output_is_two_findings() {
+fn a_chain_that_splits_off_its_peeled_output_is_one_finding() {
     // 0x51 peels to our own 0x60 address and carries on with its change to
     // 0x52 and 0x53; the peeled output then starts its own chain 0x61, 0x62.
     let txs = vec![
@@ -287,20 +287,16 @@ fn a_chain_that_splits_off_its_peeled_output_is_two_findings() {
         peel(0x62, &[(0x61, 1)], 1_000_000, 16_000_000),
     ];
     let findings = peel_findings(txs);
-    assert_eq!(findings.len(), 2, "{findings:#?}");
-    assert_eq!(starts(&findings), ids(&[0x51, 0x61]));
-    for f in &findings {
-        let expected = if start(f) == txid(0x51).to_string() {
-            ids(&[0x51, 0x52, 0x53])
-        } else {
-            ids(&[0x61, 0x62])
-        };
-        assert_eq!(chain_txids(f), expected);
-    }
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    assert_eq!(start(f), txid(0x51).to_string());
+    assert_eq!(hops(f), 3);
+    assert_eq!(chain_txids(f), ids(&[0x51, 0x52, 0x53, 0x61, 0x62]));
+    assert_eq!(merged(f), Some(2));
 }
 
 #[test]
-fn two_chains_that_merge_into_one_tail_are_both_reported() {
+fn two_chains_that_merge_into_one_tail_are_one_finding() {
     // 0x71 and 0x81 peel separately, then one transaction spends both of
     // their change outputs and the chain carries on as one.
     let txs = vec![
@@ -311,29 +307,91 @@ fn two_chains_that_merge_into_one_tail_are_both_reported() {
         peel(0x72, &[(0x71, 1), (0x81, 1)], 2_000_000, 143_000_000),
         peel(0x73, &[(0x72, 1)], 2_000_000, 140_000_000),
     ];
-    // Both count the shared tail; 0x71, the smaller start, lists it and
-    // 0x81 stops where it joins.
+    // Both paths are 3 hops; the smaller start lists its path first.
     let findings = peel_findings(txs);
-    assert_eq!(findings.len(), 2, "{findings:#?}");
-    assert_eq!(starts(&findings), ids(&[0x71, 0x81]));
-    for f in &findings {
-        assert_eq!(hops(f), 3);
-        if start(f) == txid(0x71).to_string() {
-            assert_eq!(chain_txids(f), ids(&[0x71, 0x72, 0x73]));
-            assert_eq!(joins(f), None);
-        } else {
-            assert_eq!(chain_txids(f), ids(&[0x81]));
-            assert_eq!(joins(f), Some(txid(0x72).to_string()));
-        }
-    }
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    assert_eq!(start(f), txid(0x71).to_string());
+    assert_eq!(hops(f), 3);
+    assert_eq!(chain_txids(f), ids(&[0x71, 0x72, 0x73, 0x81]));
+    assert_eq!(merged(f), Some(2));
+    assert!(!truncated(f));
 }
 
-fn joins(f: &Finding) -> Option<String> {
+#[test]
+fn a_merge_lists_the_longest_path_first() {
+    // 0x31 to 0x23 is 4 hops, 0x21 to 0x23 only 3, so 0x31 leads although
+    // its txid is larger.
+    let txs = vec![
+        funding(0x20, 100_000_000),
+        funding(0x30, 100_000_000),
+        peel(0x21, &[(0x20, 0)], 1_000_000, 98_000_000),
+        peel(0x31, &[(0x30, 0)], 1_000_000, 98_000_000),
+        peel(0x32, &[(0x31, 1)], 1_000_000, 96_000_000),
+        peel(0x22, &[(0x21, 1), (0x32, 1)], 1_000_000, 190_000_000),
+        peel(0x23, &[(0x22, 1)], 1_000_000, 188_000_000),
+    ];
+    let findings = peel_findings(txs);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    assert_eq!(start(f), txid(0x31).to_string());
+    assert_eq!(hops(f), 4);
+    assert_eq!(f.severity, Severity::Critical);
+    assert_eq!(chain_txids(f), ids(&[0x31, 0x32, 0x22, 0x23, 0x21]));
+    assert_eq!(merged(f), Some(2));
+}
+
+#[test]
+fn a_merge_under_a_lowered_bound_lists_at_most_that_many() {
+    // 0x41 to 0x46 and 0x51, 0x52 into 0x43: 8 txs, longest path 6.
+    let mut txs = vec![
+        funding(0x40, 100_000_000),
+        funding(0x50, 100_000_000),
+        peel(0x41, &[(0x40, 0)], 1_000_000, 98_000_000),
+        peel(0x42, &[(0x41, 1)], 1_000_000, 96_000_000),
+        peel(0x51, &[(0x50, 0)], 1_000_000, 98_000_000),
+        peel(0x52, &[(0x51, 1)], 1_000_000, 96_000_000),
+        peel(0x43, &[(0x42, 1), (0x52, 1)], 1_000_000, 190_000_000),
+    ];
+    for id in 0x44..=0x46 {
+        txs.push(peel(id, &[(id - 1, 1)], 1_000_000, 180_000_000));
+    }
+    let findings = peel_findings_with(txs.clone(), &bound_of_six());
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    assert_eq!(hops(f), 6);
+    assert!(!f.description.contains("at least"), "{}", f.description);
+    assert_eq!(chain_txids(f), ids(&[0x41, 0x42, 0x43, 0x44, 0x45, 0x46]));
+    assert!(truncated(f), "two txs of the set are not listed");
+    assert_eq!(merged(f), Some(2));
+
+    let four = DetectorThresholds {
+        peel_chain_max_hops: 4,
+        ..DetectorThresholds::default()
+    };
+    let findings = peel_findings_with(txs, &four);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    let f = &findings[0];
+    assert_eq!(hops(f), 4);
+    assert!(
+        f.description.contains("at least 4 hops"),
+        "{}",
+        f.description
+    );
+    assert_eq!(chain_txids(f), ids(&[0x41, 0x42, 0x43, 0x44]));
+    assert!(truncated(f));
+}
+
+fn merged(f: &Finding) -> Option<u64> {
     f.details
         .as_ref()
         .expect("details")
-        .get("joins")
-        .map(|v| v.as_str().expect("joins is a txid string").to_string())
+        .get("merged_chains")
+        .map(|v| v.as_u64().expect("merged_chains is a number"))
+}
+
+fn no_joins(f: &Finding) {
+    assert!(f.details.as_ref().expect("details").get("joins").is_none());
 }
 
 // `truncated` is only in the details when it is true.
@@ -383,22 +441,15 @@ fn a_long_chain_is_whole_when_the_hop_after_the_limit_cannot_start_a_chain() {
 
 #[test]
 fn a_chain_cut_by_the_hop_limit_says_it_has_at_least_that_many_hops() {
-    // With the limit lowered to 6, 0x17 is the peel the trace was cut before;
-    // it still counts.
-    let thresholds = DetectorThresholds {
-        peel_chain_max_hops: 6,
-        ..DetectorThresholds::default()
-    };
     let hops_ids = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18];
-    let findings = peel_findings_with(chain(0x10, &hops_ids), &thresholds);
+    let findings = peel_findings_with(chain(0x10, &hops_ids), &bound_of_six());
     assert_eq!(findings.len(), 1, "{findings:#?}");
     let f = &findings[0];
-    let seen = thresholds.peel_chain_max_hops + 1;
-    assert_eq!(hops(f), u64::from(seen));
-    assert_eq!(chain_txids(f), ids(&hops_ids[..seen as usize]));
+    assert_eq!(hops(f), 6);
+    assert_eq!(chain_txids(f), ids(&hops_ids[..6]));
     assert!(truncated(f));
     assert!(
-        f.description.contains(&format!("at least {seen} hops")),
+        f.description.contains("at least 6 hops"),
         "{}",
         f.description
     );
@@ -430,7 +481,8 @@ fn a_cycle_in_bad_data_does_not_hang_the_scan() {
     assert_eq!(hops(f), 3);
     assert_eq!(f.severity, Severity::High);
     assert!(!truncated(f));
-    assert_eq!(joins(f), None);
+    no_joins(f);
+    assert_eq!(merged(f), None);
 }
 
 fn bound_of_six() -> DetectorThresholds {
@@ -442,8 +494,8 @@ fn bound_of_six() -> DetectorThresholds {
 
 #[test]
 fn a_cycle_longer_than_the_hop_limit_lists_each_hop_once() {
-    // 0x72 to 0x78 spend each other in a loop longer than the bound of 6; the
-    // walk from 0x71 stops at the bound before it comes back round.
+    // 0x72 to 0x78 spend each other in a loop; with 0x71 that is 8 txs, more
+    // than the bound of 6.
     let mut txs = vec![
         funding(0x70, 100_000_000),
         peel(0x71, &[(0x70, 0)], 1_000_000, 90_000_000),
@@ -455,11 +507,13 @@ fn a_cycle_longer_than_the_hop_limit_lists_each_hop_once() {
     let findings = peel_findings_with(txs, &bound_of_six());
     assert_eq!(findings.len(), 1, "{findings:#?}");
     let f = &findings[0];
-    let listed: Vec<u8> = (0x71..=0x77).collect();
+    let listed: Vec<u8> = (0x71..=0x76).collect();
     assert_eq!(chain_txids(f), ids(&listed));
-    assert_eq!(hops(f), 7);
+    assert_eq!(hops(f), 6);
+    assert!(f.description.contains("at least 6 hops"));
     assert!(truncated(f));
-    assert_eq!(joins(f), None);
+    no_joins(f);
+    assert_eq!(merged(f), None);
 }
 
 #[test]
@@ -471,8 +525,9 @@ fn a_loop_with_no_way_in_longer_than_the_hop_limit_is_one_finding() {
     let findings = peel_findings_with(txs, &bound_of_six());
     assert_eq!(findings.len(), 1, "{findings:#?}");
     let f = &findings[0];
-    let listed: Vec<u8> = (0x61..=0x67).collect();
+    let listed: Vec<u8> = (0x61..=0x66).collect();
     assert_eq!(chain_txids(f), ids(&listed));
+    assert_eq!(hops(f), 6);
     assert!(truncated(f));
 }
 
@@ -546,7 +601,8 @@ fn a_very_long_chain_is_scanned_in_linear_time() {
         .filter(|f| f.vulnerability_type == VulnerabilityType::PeelChain)
         .collect();
     assert_eq!(peels.len(), 1);
-    assert_eq!(hops(peels[0]), 1_001);
+    assert_eq!(hops(peels[0]), 1_000);
+    assert_eq!(chain_txids(peels[0]).len(), 1_000);
     assert!(truncated(peels[0]));
     eprintln!("detect_all on {HOPS} hops took {elapsed:?}");
     assert!(elapsed.as_secs() < 10, "detect_all took {elapsed:?}");
@@ -610,20 +666,18 @@ fn a_loop_with_no_way_in_is_one_finding_from_its_smallest_txid() {
         assert_eq!(chain_txids(f), ids(&expected));
         assert_eq!(hops(f), 3);
         assert!(!truncated(f));
-        assert_eq!(joins(f), None);
+        no_joins(f);
+        assert_eq!(merged(f), None);
     }
 }
 
 #[test]
-fn a_chain_that_ends_right_after_the_hop_limit_is_not_truncated() {
-    let thresholds = DetectorThresholds {
-        peel_chain_max_hops: 6,
-        ..DetectorThresholds::default()
-    };
-    let hop_ids = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
-    let findings = peel_findings_with(chain(0x10, &hop_ids), &thresholds);
+fn a_chain_exactly_as_long_as_the_hop_limit_is_not_truncated() {
+    let hop_ids = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16];
+    let findings = peel_findings_with(chain(0x10, &hop_ids), &bound_of_six());
     assert_eq!(findings.len(), 1, "{findings:#?}");
     assert_eq!(chain_txids(&findings[0]), ids(&hop_ids));
+    assert_eq!(hops(&findings[0]), 6);
     assert!(!truncated(&findings[0]));
     assert!(!findings[0].description.contains("at least"));
 }
@@ -667,7 +721,7 @@ fn big_tx(id: u32, vins: &[(u32, u32)], vouts: Vec<TxOutput>) -> DecodedTransact
 }
 
 #[test]
-fn many_chains_merging_into_one_tail_list_each_tx_once() {
+fn many_chains_merging_into_one_tail_are_one_finding() {
     // T1 to T900 form one chain; each T(i) from T2 on also spends the change
     // of its own one-input peel S(i), so 900 chains share T(i).. as a tail.
     const N: u32 = 900;
@@ -729,32 +783,29 @@ fn many_chains_merging_into_one_tail_list_each_tx_once() {
         .iter()
         .filter(|f| f.vulnerability_type == VulnerabilityType::PeelChain)
         .collect();
-    assert_eq!(peels.len(), N as usize);
-    // Every finding counts the whole shared tail.
-    for f in &peels {
-        let head = start(f);
-        let expected = if head == big_id(t(1)).to_string() {
-            N
-        } else {
-            let i = (2..=N)
-                .find(|&i| big_id(s(i)).to_string() == head)
-                .expect("every other finding starts at a side peel");
-            N - i + 2
-        };
-        assert_eq!(hops(f), u64::from(expected));
-    }
-    // Each tx is listed once, and a finding that stops early names a tx
-    // another finding lists.
-    let listed: Vec<String> = peels.iter().flat_map(|f| chain_txids(f)).collect();
+    // One flow: T1 and S2 both start a path of N hops.
+    assert_eq!(peels.len(), 1, "{} findings", peels.len());
+    let f = peels[0];
+    assert!([big_id(t(1)), big_id(s(2))]
+        .map(|t| t.to_string())
+        .contains(&start(f)));
+    assert_eq!(hops(f), u64::from(N));
+    assert_eq!(merged(f), Some(u64::from(N)));
+    // 2N - 1 txs in the set, listed once each up to the bound of 1,000.
+    let listed = chain_txids(f);
     let unique: HashSet<&String> = listed.iter().collect();
-    assert_eq!(listed.len(), 2 * N as usize - 1);
+    assert_eq!(listed.len(), 1_000);
     assert_eq!(unique.len(), listed.len());
-    for f in &peels {
-        if let Some(merge) = joins(f) {
-            assert!(unique.contains(&merge));
-            assert!(!chain_txids(f).contains(&merge));
-        }
-    }
+    assert!(truncated(f));
     eprintln!("detect_all on {N} merge points took {elapsed:?}");
     assert!(elapsed.as_secs() < 10, "detect_all took {elapsed:?}");
+}
+
+#[test]
+fn two_hops_are_a_chain_and_one_is_not() {
+    let findings = peel_findings(chain(0x10, &[0x11, 0x12]));
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!(hops(&findings[0]), 2);
+    assert_eq!(findings[0].severity, Severity::High);
+    assert!(peel_findings(chain(0x10, &[0x11])).is_empty());
 }
