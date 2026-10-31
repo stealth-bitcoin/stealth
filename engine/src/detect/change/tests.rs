@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash;
 use bitcoin::{
-    Address, Amount, Network, ScriptBuf, Txid, WPubkeyHash, WitnessProgram, WitnessVersion,
+    Address, Amount, Network, PubkeyHash, ScriptBuf, ScriptHash, Txid, WPubkeyHash, WitnessProgram,
+    WitnessVersion,
 };
 use serde_json::Value;
 
@@ -23,6 +24,19 @@ fn txid(n: u32) -> Txid {
 
 fn wpkh(seed: u8) -> Address<NetworkUnchecked> {
     parse(ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array(
+        [seed; 20],
+    )))
+}
+
+fn pkh(seed: u8) -> Address<NetworkUnchecked> {
+    parse(ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array(
+        [seed; 20],
+    )))
+}
+
+/// A P2SH address, as a wrapped segwit (sh-wpkh) coin pays to.
+fn sh(seed: u8) -> Address<NetworkUnchecked> {
+    parse(ScriptBuf::new_p2sh(&ScriptHash::from_byte_array(
         [seed; 20],
     )))
 }
@@ -602,7 +616,7 @@ fn toxic_change_advice_is_for_next_time_and_offers_wabisabi_only_above_the_minim
     );
     assert!(correction.contains("from now on"), "{correction}");
     assert!(
-        correction.contains("above a CoinJoin coordinator's minimum"),
+        correction.contains("at or above a CoinJoin coordinator's minimum"),
         "{correction}"
     );
     assert!(correction.contains("WabiSabi"), "{correction}");
@@ -639,4 +653,16 @@ fn toxic_change_under_the_coordinators_minimum_gets_no_coinjoin_mention() {
         let correction = findings[0].correction.as_deref().expect("a correction");
         assert!(correction.contains("WabiSabi"), "{sats}: {correction}");
     }
+}
+
+#[test]
+fn toxic_change_at_a_script_type_the_coordinator_refuses_gets_no_coinjoin_mention() {
+    for change in [pkh(1), sh(1)] {
+        let findings = toxic_findings_of(5_000, &change, &wpkh(2), vec![], &[]);
+        let correction = findings[0].correction.as_deref().expect("a correction");
+        assert!(!correction.contains("CoinJoin"), "{change:?}: {correction}");
+    }
+    let findings = toxic_findings_of(5_000, &tr(1), &wpkh(2), vec![], &[]);
+    let correction = findings[0].correction.as_deref().expect("a correction");
+    assert!(correction.contains("WabiSabi"), "{correction}");
 }
