@@ -381,6 +381,46 @@ fn dust_given_away_alone_as_fee_gets_no_finding() {
     );
 }
 
+#[test]
+fn a_utxo_scan_sees_dust_given_away_alone_through_the_address_history() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let a = alice.new_address().unwrap();
+    let dust = fund_coins_at(&node, &alice, vec![a.clone()], 600).remove(0);
+    let normal = fund_coins_at(&node, &alice, vec![a], 50_000).remove(0);
+    // Only the normal coin is pasted; the dust is known through the address history.
+    let pasted = || {
+        vec![stealth_engine::engine::UtxoInput {
+            txid: normal.txid,
+            vout: normal.vout as u32,
+            value: None,
+            address: None,
+        }]
+    };
+    let gateway = gateway_for(&node);
+    let engine = AnalysisEngine::new(&gateway, EngineSettings::default());
+
+    let before = engine.analyze(ScanTarget::Utxos(pasted())).unwrap();
+    assert!(
+        has_finding(&before, VulnerabilityType::Dust),
+        "{:?}",
+        before.findings
+    );
+
+    let stx = signed_fee_only_spend(&alice, &dust, b"ash!", 4);
+    alice.send_raw_transaction(&stx).unwrap();
+    mine(&node, 1, &da);
+
+    let after = engine.analyze(ScanTarget::Utxos(pasted())).unwrap();
+    assert!(
+        !has_finding(&after, VulnerabilityType::Dust),
+        "{:?}",
+        after.findings
+    );
+}
+
 // ─── 13. Dust Attack Detection ─────────────────────────────────────────────
 //
 // Dust-attack detection is folded into the Dust detector: when a dust

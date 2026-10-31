@@ -428,8 +428,28 @@ fn spent_finding(findings: &[Finding]) -> Option<&Finding> {
 
 #[test]
 fn dust_spent_alone_to_another_own_address_keeps_its_finding() {
-    let findings = spent_dust(0, &[], vec![out(0, &wpkh(3), 400)]);
-    assert!(spent_finding(&findings).is_some(), "{findings:?}");
+    for strangers in [0, 9] {
+        let findings = spent_dust(strangers, &[], vec![out(0, &wpkh(3), 400)]);
+        assert_moved_elsewhere(&findings, strangers);
+    }
+}
+
+/// The spent dust finding of a coin whose value went to another address: Critical with an
+/// attack-shaped parent (`strangers` > 0), Low otherwise, and the freeze-from-now-on advice.
+fn assert_moved_elsewhere(findings: &[Finding], strangers: u8) {
+    let f = spent_finding(findings).expect("a spent dust finding");
+    let expected = if strangers > 0 {
+        Severity::Critical
+    } else {
+        Severity::Low
+    };
+    assert_eq!(f.severity, expected, "{f:?}");
+    let correction = f.correction.as_deref().expect("a correction");
+    assert!(
+        correction.contains("never spent with your other coins"),
+        "{correction}"
+    );
+    assert!(!correction.contains("linked none"), "{correction}");
 }
 
 #[test]
@@ -437,7 +457,7 @@ fn dust_spent_alone_to_a_foreign_address_is_a_payment_and_keeps_its_finding() {
     // In UTXO mode a foreign address may be the user's own, unscanned one.
     for strangers in [0, 9] {
         let findings = spent_dust(strangers, &[], vec![out(0, &wpkh(150), 400)]);
-        assert!(spent_finding(&findings).is_some(), "{findings:?}");
+        assert_moved_elsewhere(&findings, strangers);
     }
 }
 
@@ -453,7 +473,7 @@ fn an_output_with_no_address_but_a_value_is_not_a_fee_only_spend() {
 fn attack_dust_spent_with_a_coin_at_its_own_address_is_low_and_no_linking_mistake() {
     let a = wpkh(1);
     for strangers in [0, 9] {
-        let findings = spent_dust(strangers, &[(&a, 50_000)], vec![out(0, &wpkh(150), 49_000)]);
+        let findings = spent_dust(strangers, &[(&a, 50_000)], vec![out(0, &a, 49_000)]);
         let f = spent_finding(&findings).expect("a spent dust finding");
         assert_eq!(f.severity, Severity::Low, "{f:?}");
         let correction = f.correction.as_deref().expect("a correction");
@@ -470,7 +490,28 @@ fn attack_dust_spent_with_a_coin_at_its_own_address_is_low_and_no_linking_mistak
 
 #[test]
 fn attack_dust_spent_with_an_input_of_unknown_address_stays_critical() {
-    let findings = spent_dust(9, &[(&wpkh(1), 0)], vec![out(0, &wpkh(150), 400)]);
+    let findings = spent_dust(9, &[(&wpkh(1), 0)], vec![out(0, &wpkh(1), 400)]);
     let f = spent_finding(&findings).expect("a spent dust finding");
     assert_eq!(f.severity, Severity::Critical, "{f:?}");
+}
+
+#[test]
+fn a_same_address_merge_sending_value_elsewhere_keeps_its_severity() {
+    let a = wpkh(1);
+    for strangers in [0, 9] {
+        let payment_and_change = vec![out(0, &wpkh(150), 20_000), out(1, &wpkh(3), 29_000)];
+        let findings = spent_dust(strangers, &[(&a, 50_000)], payment_and_change);
+        assert_moved_elsewhere(&findings, strangers);
+        let change_only = vec![out(0, &a, 20_000), out(1, &wpkh(3), 29_000)];
+        let findings = spent_dust(strangers, &[(&a, 50_000)], change_only);
+        assert_moved_elsewhere(&findings, strangers);
+    }
+}
+
+#[test]
+fn a_same_address_merge_with_an_op_return_stays_low() {
+    let a = wpkh(1);
+    let findings = spent_dust(9, &[(&a, 50_000)], vec![out(0, &a, 49_000), op_return(1)]);
+    let f = spent_finding(&findings).expect("a spent dust finding");
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
 }
