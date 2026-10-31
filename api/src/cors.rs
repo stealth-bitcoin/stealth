@@ -164,11 +164,9 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
             let address: Ipv6Addr = address
                 .parse()
                 .map_err(|_| invalid("brackets must hold an IPv6 address"))?;
-            // Browsers print IPv4-mapped addresses in hex, Rust in dotted form; they would never match.
+            // Browsers print these in hex and Rust in dotted form, so matching them would be fragile.
             if address.to_ipv4_mapped().is_some() {
-                return Err(invalid(
-                    "use the IPv4 address instead of an IPv4-mapped IPv6 address",
-                ));
+                return Err(invalid("IPv4-mapped IPv6 addresses are not supported"));
             }
             let port = match after.strip_prefix(':') {
                 Some(port) => Some(port),

@@ -1,5 +1,6 @@
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,12 +29,19 @@ Environment:
 Loopback origins (localhost, 127.0.0.1, [::1]) are always allowed.
 ";
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> ExitCode {
     init_tracing();
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
-    let Some(origins) = read_allowed_origins()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
-    else {
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(origins) = read_allowed_origins()? else {
         print!("{USAGE}");
         return Ok(());
     };
@@ -41,8 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `BitcoinCoreRpc` uses `reqwest::blocking::Client`, which must be
     // constructed outside a Tokio runtime.
     let gateway: Arc<dyn BlockchainGateway + Send + Sync> = Arc::new(build_gateway()?);
-    let bind_addr = read_bind_addr()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let bind_addr = read_bind_addr()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

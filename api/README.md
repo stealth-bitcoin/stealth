@@ -36,8 +36,9 @@ STEALTH_RPC_COOKIE=~/.bitcoin/.cookie \
 Configure the listen address with `STEALTH_API_BIND` (default `127.0.0.1:20899`).
 
 Browsers may only call the API from loopback origins (`http://localhost`,
-`http://127.0.0.1` and `http://[::1]`, on any port), which covers the
-frontend's Vite dev server. To allow another web origin, pass it with
+`http://127.0.0.1` and `http://[::1]`, on any port). The frontend is not
+affected: it calls `/api` through the Vite proxy, which the browser treats as
+the page's own origin, so CORS does not apply. To allow another web origin, pass it with
 `--allow-origin` (repeatable) or list it in `STEALTH_API_ALLOW_ORIGINS`
 (comma-separated). Each value is an exact origin, `scheme://host[:port]` with no
 path; the API refuses to start on a malformed one. Hosts must be ASCII (use the

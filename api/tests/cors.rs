@@ -212,7 +212,6 @@ fn bracketed_host_must_be_an_ipv6_address() {
         "http://[127.0.0.1]:5173",
         "http://[::1%25eth0]",
         "http://[]",
-        "http://[::ffff:127.0.0.1]",
     ] {
         let result = stealth_api::AllowedOrigins::localhost().with_extra([raw]);
         let error = result
@@ -327,5 +326,24 @@ fn forbidden_host_code_points_are_refused() {
     ] {
         let result = stealth_api::AllowedOrigins::localhost().with_extra([raw]);
         assert!(result.is_err(), "{raw:?} was accepted");
+    }
+}
+
+#[test]
+fn ipv4_mapped_ipv6_origins_are_refused_as_unsupported() {
+    for raw in ["http://[::ffff:127.0.0.1]", "http://[::ffff:c0a8:105]:5173"] {
+        let result = stealth_api::AllowedOrigins::localhost().with_extra([raw]);
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("{raw:?} was accepted"));
+        let message = error.to_string();
+        assert!(
+            message.contains("not supported"),
+            "error for {raw:?}: {message}"
+        );
+        assert!(
+            !message.contains("use the IPv4"),
+            "error for {raw:?}: {message}"
+        );
     }
 }

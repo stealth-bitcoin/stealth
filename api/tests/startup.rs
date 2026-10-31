@@ -54,7 +54,10 @@ fn allow_origin_flag_without_a_value_stops_startup() {
     let output = run_api(&["--allow-origin"], None);
     assert!(!output.status.success());
     let stderr = stderr(&output);
-    assert!(stderr.contains("--allow-origin"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("--allow-origin needs a value"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -231,4 +234,16 @@ fn help_does_not_hide_other_unknown_arguments() {
     let output = run_api(&["--hepl"], None);
     assert!(!output.status.success());
     assert!(stderr(&output).contains("unknown argument: --hepl"));
+}
+
+#[test]
+fn startup_errors_print_the_plain_message() {
+    let output = run_api(&["--allow-origin", "https://wallet.example.org/app"], None);
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(!stderr.contains("Custom {"), "stderr: {stderr}");
+    assert!(
+        stderr.starts_with("Error: invalid --allow-origin value: invalid origin \"https://wallet.example.org/app\""),
+        "stderr: {stderr}"
+    );
 }
