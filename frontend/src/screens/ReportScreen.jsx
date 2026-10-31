@@ -142,7 +142,7 @@ const LEFT_OUT = {
     // It may never have been broadcast.
     ifBroadcast: true,
     comesBackOne: 'It can only come back if a reorg removes the conflicting block',
-    comesBackMany: 'They can only come back if a reorg removes the conflicting blocks',
+    comesBackMany: 'They can only come back if a reorg removes the block or blocks holding the conflicting transactions',
   },
   mempoolConflicted: {
     settled: false,

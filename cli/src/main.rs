@@ -270,7 +270,7 @@ fn text_report(report: &stealth_engine::Report) -> String {
             unless_many: None,
             comes_back_one: Some("It can only come back if a reorg removes the conflicting block"),
             comes_back_many: Some(
-                "They can only come back if a reorg removes the conflicting blocks",
+                "They can only come back if a reorg removes the block or blocks holding the conflicting transactions",
             ),
         },
     );

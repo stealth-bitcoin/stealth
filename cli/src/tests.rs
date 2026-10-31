@@ -378,8 +378,8 @@ mod ordering {
             text.contains(&format!(
                 "Left out 2 transactions Core reports as conflicted: each, or a transaction \
                  it depends on, conflicts with another one, so they are not part of the wallet's \
-                 history. They can only come back if a reorg removes the conflicting blocks. If \
-                 they were broadcast, they may have been seen by the network before they became \
+                 history. They can only come back if a reorg removes the block or blocks holding the \
+                 conflicting transactions. If they were broadcast, they may have been seen by the network before they became \
                  conflicted; Stealth does not analyze them.\n  {CONFLICTED}\n  {other}\n"
             )),
             "{text}"
