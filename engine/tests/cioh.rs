@@ -149,6 +149,7 @@ fn inputs_from_two_own_addresses_is_cioh() {
     assert_eq!(details["txid"], spend.to_string());
     assert_eq!(details["our_inputs"], 2);
     assert_eq!(details["total_inputs"], 2);
+    assert_eq!(details["our_addresses"], 2);
 }
 
 #[test]
@@ -187,4 +188,30 @@ fn description_says_how_many_of_the_inputs_are_yours() {
     assert!(d.contains("2 of its 3 inputs are yours"), "{d}");
     assert!(d.contains("(67% ownership)"), "{d}");
     assert!(!d.contains("of your inputs"), "{d}");
+}
+
+#[test]
+fn two_inputs_from_one_own_address_among_a_strangers_is_not_cioh() {
+    let a = wpkh(1);
+    let stranger = wpkh(200);
+    let (history, _) = spend_history(&[&a, &a, &stranger], std::slice::from_ref(&a));
+    let findings = cioh_findings(history);
+    assert!(
+        findings.is_empty(),
+        "one own address next to a stranger's input is not CIOH: {findings:?}"
+    );
+}
+
+#[test]
+fn correction_allows_coins_of_one_address_together() {
+    let a = wpkh(1);
+    let b = wpkh(2);
+    let (history, _) = spend_history(&[&a, &b], &[a.clone(), b.clone()]);
+    let findings = cioh_findings(history);
+    let correction = findings
+        .first()
+        .and_then(|f| f.correction.as_deref())
+        .expect("CIOH finding has a correction");
+    assert!(!correction.contains("only one UTXO"), "{correction}");
+    assert!(correction.contains("different addresses"), "{correction}");
 }

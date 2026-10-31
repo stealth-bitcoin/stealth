@@ -63,7 +63,8 @@ impl TxGraph {
                     "ownership_pct": ownership_pct,
                 })),
                 correction: Some(
-                    "Use coin control to select only one UTXO per transaction. \
+                    "Use coin control to avoid spending coins from different addresses \
+                     in the same transaction. \
                      If you are paying someone, prefer a Payjoin (BIP-78) payment: \
                      it merges inputs without revealing common ownership. \
                      If consolidation is unavoidable, do it privately via a CoinJoin round."
