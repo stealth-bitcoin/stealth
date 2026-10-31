@@ -95,9 +95,14 @@ transaction it depends on, conflicts with another one), `mempool_conflicted_txid
 for unconfirmed ones a transaction in the mempool conflicts with, such as the
 original of a fee bump or a payment double-spent by a raw transaction (each an
 object with `txid` and `conflicts_with`; the conflicting transaction is
-analyzed only when the wallet lists it and the scan keeps it), and
-`abandoned_txids` for those abandoned in the wallet. Any other wallet
-transaction the node cannot serve still fails the scan. A fresh scan wallet
+analyzed only when the wallet lists it and the scan keeps it),
+`abandoned_txids` for those abandoned in the scan's own wallet, and
+`unavailable_txids` for unconfirmed ones the node no longer has (expired or
+evicted from the mempool, or never broadcast). The abandoned list fills only
+when someone abandons a transaction in Stealth's cache wallet; one abandoned in
+the user's own wallet lands in `unavailable_txids`. A wallet transaction the
+node cannot serve still fails the scan when it is confirmed, or when the node
+answers with any error other than not found. A fresh scan wallet
 only sees the active chain and the mempool, so through this API the lists can
 be non-empty only for a scan with `cache_wallet`, whose wallet was watching
 when these transactions were in the mempool.
