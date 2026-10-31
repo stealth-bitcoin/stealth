@@ -200,6 +200,7 @@ pub struct BitcoinCoreRpc {
     cookie: RwLock<Option<(String, String)>>,
     // Set once the node has refused a history count, so it is said only once.
     count_refused: AtomicBool,
+    warn: Box<dyn Fn(&str) + Send + Sync>,
 }
 
 impl BitcoinCoreRpc {
@@ -218,11 +219,18 @@ impl BitcoinCoreRpc {
             cache_locks: Mutex::new(HashMap::new()),
             cookie: RwLock::new(None),
             count_refused: AtomicBool::new(false),
+            warn: Box::new(|warning| eprintln!("warning: {warning}")),
         })
     }
 
     pub fn with_max_ancestor_depth(mut self, depth: u32) -> Self {
         self.max_ancestor_depth = depth;
+        self
+    }
+
+    /// Where warnings go; stderr by default.
+    pub fn with_warning_sink(mut self, warn: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.warn = Box::new(warn);
         self
     }
 
@@ -1095,9 +1103,9 @@ impl BitcoinCoreRpc {
             ))
             | Err(RpcError::Other(AnalysisError::RpcForbidden { .. })) => {
                 if !self.count_refused.swap(true, Ordering::Relaxed) {
-                    eprintln!(
-                        "warning: the node refused getwalletinfo, so the history limit is not \
-                         checked; allow getwalletinfo for this RPC user to have it checked"
+                    (self.warn)(
+                        "the node refused getwalletinfo, so the history limit is not checked; \
+                         allow getwalletinfo for this RPC user to have it checked",
                     );
                 }
                 return Ok(());
@@ -3776,6 +3784,21 @@ mod tests {
             Some("unloadwallet"),
             "{calls:?}"
         );
+    }
+
+    #[test]
+    fn a_refused_count_is_warned_about_once_per_gateway() {
+        let (rpc, _) = node_answering_getwalletinfo(("403 Forbidden", String::new()));
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&warnings);
+        let rpc =
+            rpc.with_warning_sink(move |warning| seen.lock().unwrap().push(warning.to_owned()));
+        for _ in 0..3 {
+            scan_one_address(&rpc, false, &HistoryLimit::default()).expect("goes on");
+        }
+        let warnings = warnings.lock().unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("getwalletinfo"), "{warnings:?}");
     }
 
     #[test]
