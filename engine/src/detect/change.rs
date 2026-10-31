@@ -218,18 +218,10 @@ impl TxGraph {
                 if child_inputs.len() < 2 {
                     continue;
                 }
-                // Coins from a single address link nothing that address does not already.
-                let own_addresses: HashSet<_> = child_inputs
-                    .iter()
-                    .filter(|ci| self.is_ours(&ci.address))
-                    .map(|ci| &ci.address)
-                    .collect();
-                if own_addresses.len() < 2 {
-                    continue;
-                }
-                let has_larger = child_inputs
-                    .iter()
-                    .any(|ci| ci.value > toxic_upper && self.is_ours(&ci.address));
+                // A larger coin at the change's own address was linked to it already.
+                let has_larger = child_inputs.iter().any(|ci| {
+                    ci.value > toxic_upper && self.is_ours(&ci.address) && ci.address != out.address
+                });
                 if !has_larger {
                     continue;
                 }

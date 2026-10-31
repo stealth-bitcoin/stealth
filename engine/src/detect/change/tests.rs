@@ -518,10 +518,13 @@ fn toxic_findings(
     a: &Address<NetworkUnchecked>,
     big: &Address<NetworkUnchecked>,
     extra: Vec<Coin>,
+    also_ours: &[&Address<NetworkUnchecked>],
 ) -> Vec<Finding> {
     let mut coins = vec![coin(a, 600), coin(big, 50_000)];
     coins.extend(extra);
-    let mut history = history_for(coins, vec![out(0, &wpkh(101), 40_000)], &[a, big]);
+    let mut ours = vec![a, big];
+    ours.extend_from_slice(also_ours);
+    let mut history = history_for(coins, vec![out(0, &wpkh(101), 40_000)], &ours);
     // The 600-sat coin is change from an earlier spend of a coin of `a`.
     let earlier = txid(50);
     history
@@ -546,27 +549,41 @@ fn toxic_findings(
 
 #[test]
 fn small_change_merged_with_a_coin_at_another_address_is_toxic() {
-    let findings = toxic_findings(&wpkh(1), &wpkh(2), vec![]);
+    let findings = toxic_findings(&wpkh(1), &wpkh(2), vec![], &[]);
     assert_eq!(findings.len(), 1, "{findings:?}");
 }
 
 #[test]
 fn small_change_merged_with_a_coin_at_its_own_address_links_nothing_new() {
     let a = wpkh(1);
-    let findings = toxic_findings(&a, &a, vec![]);
+    let findings = toxic_findings(&a, &a, vec![], &[]);
     assert!(findings.is_empty(), "{findings:?}");
 }
 
 #[test]
 fn a_strangers_input_does_not_make_one_address_toxic() {
     let a = wpkh(1);
-    let findings = toxic_findings(&a, &a, vec![coin(&wpkh(200), 30_000)]);
+    let findings = toxic_findings(&a, &a, vec![coin(&wpkh(200), 30_000)], &[]);
     assert!(findings.is_empty(), "{findings:?}");
 }
 
 #[test]
+fn a_small_own_coin_elsewhere_does_not_make_a_same_address_merge_toxic() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let findings = toxic_findings(&a, &a, vec![coin(&b, 3_000)], &[&b]);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn a_larger_own_coin_elsewhere_still_makes_the_merge_toxic() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let findings = toxic_findings(&a, &a, vec![coin(&b, 30_000)], &[&b]);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+}
+
+#[test]
 fn toxic_change_advice_freezes_first_and_never_says_absorb_into_the_fee() {
-    let findings = toxic_findings(&wpkh(1), &wpkh(2), vec![]);
+    let findings = toxic_findings(&wpkh(1), &wpkh(2), vec![], &[]);
     let correction = findings[0].correction.as_deref().expect("a correction");
     assert!(correction.starts_with("Freeze"), "{correction}");
     assert!(
