@@ -110,10 +110,7 @@ answers with any error other than not found. `mempoolconflicts`,
 which `mempool_conflicted_txids` relies on, appeared in Bitcoin Core 28.0; on
 an older node an unmined fee bump's original lands in `unavailable_txids`. A
 scan that hits an unconfirmed transaction the node does not have while the
-node is still loading its mempool fails, asking to scan again later. So does
-one that keeps seeing new blocks land between listing the wallet and fetching
-its transactions: without txindex a transaction mined in between reads as not
-found, so the history is read again once before giving up. A fresh scan wallet
+node is still loading its mempool fails, asking to scan again later. A fresh scan wallet
 only sees the active chain and the mempool, so through this API the lists can
 be non-empty only for a scan with `cache_wallet`, whose wallet was watching
 when these transactions were in the mempool.
