@@ -1,6 +1,6 @@
 //! Wallet behaviour detectors: script mixing, UTXO age, fingerprint, peel chain.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use bitcoin::{Amount, Txid};
 use serde_json::json;
@@ -9,6 +9,14 @@ use crate::config::DetectorThresholds;
 use crate::gateway::WalletTxCategory;
 use crate::graph::TxGraph;
 use crate::types::*;
+
+/// One forward trace of a peel chain from a starting transaction.
+struct Trace {
+    chain: Vec<Txid>,
+    truncated: bool,
+    closes_loop: bool,
+    ratio: f64,
+}
 
 impl TxGraph {
     // ── 7. Script Type Mixing ──────────────────────────────────────────────
@@ -355,8 +363,7 @@ impl TxGraph {
             Some((child_txid, child_outs[large_child].index))
         };
 
-        // Each trace: its hops, the hop it was cut before at `max_hops`, its ratio.
-        let mut traces: Vec<(Vec<Txid>, Option<Txid>, f64)> = Vec::new();
+        let mut traces: Vec<Trace> = Vec::new();
         let txids = self.ordered_txids();
         for txid in txids {
             let input_addrs = self.get_input_addresses(&txid);
@@ -395,77 +402,65 @@ impl TxGraph {
             } else {
                 1
             };
+            // Follow the change to the chain's end; `max_hops` is only a safety bound.
             let mut chain = vec![txid];
-            let mut cut = None;
+            let mut seen = HashSet::from([txid]);
+            let mut truncated = false;
+            let mut closes_loop = false;
             let mut trace = (txid, outputs[large_idx].index);
             while let Some(next) = next_hop(trace.0, trace.1) {
-                if chain.contains(&next.0) {
-                    break; // Spends cannot form a cycle; stop rather than loop on bad data.
-                }
-                if chain.len() >= max_hops as usize {
-                    cut = Some(next.0);
+                if !seen.insert(next.0) {
+                    // Spends cannot form a cycle; stop rather than loop on bad data.
+                    closes_loop = next.0 == txid;
                     break;
                 }
                 chain.push(next.0);
+                if chain.len() > max_hops as usize {
+                    truncated = next_hop(next.0, next.1).is_some();
+                    break;
+                }
                 trace = next;
             }
 
             if chain.len() < min_hops as usize {
                 continue; // At least `min_hops` to qualify
             }
-            traces.push((chain, cut, ratio));
+            traces.push(Trace {
+                chain,
+                truncated,
+                closes_loop,
+                ratio,
+            });
         }
 
-        // A trace starting at a later hop of another, or where another was cut, is its tail.
+        // A trace starting at a later hop of another is its tail. In a loop
+        // every start is, so a loop is reported once, from its smallest start.
         let tails: HashSet<Txid> = traces
             .iter()
-            .flat_map(|(chain, cut, _)| chain.iter().skip(1).chain(cut.iter()).copied())
+            .filter(|t| !t.closes_loop)
+            .flat_map(|t| t.chain.iter().skip(1).copied())
             .collect();
-        let by_start: HashMap<Txid, usize> = traces
+        let loop_starts: HashSet<Txid> = traces
             .iter()
-            .enumerate()
-            .filter_map(|(i, (chain, _, _))| chain.first().map(|t| (*t, i)))
+            .filter(|t| t.closes_loop)
+            .filter_map(|t| t.chain.first().copied())
             .collect();
-        for (mut chain, mut cut, ratio) in traces.iter().cloned() {
+        for Trace {
+            chain,
+            truncated,
+            closes_loop,
+            ratio,
+        } in traces
+        {
             let Some(&txid) = chain.first() else {
                 continue;
             };
             if tails.contains(&txid) {
                 continue;
             }
-            // Extend a cut chain with the tail trace that reaches furthest past it.
-            while cut.is_some() {
-                let len = chain.len();
-                let best = chain
-                    .iter()
-                    .skip(1)
-                    .chain(cut.iter())
-                    .enumerate()
-                    .filter_map(|(i, t)| by_start.get(t).map(|&j| (i + 1, j)))
-                    .filter(|&(pos, j)| pos + traces[j].0.len() > len)
-                    .max_by_key(|&(pos, j)| pos + traces[j].0.len());
-                let Some((pos, j)) = best else {
-                    break;
-                };
-                let (tail, tail_cut, _) = &traces[j];
-                let seen: HashSet<Txid> = chain.iter().copied().collect();
-                let extra: Vec<Txid> = tail.iter().skip(len - pos).copied().collect();
-                let fresh = extra.iter().take_while(|t| !seen.contains(*t)).count();
-                chain.extend(extra.iter().take(fresh));
-                cut = if fresh == extra.len() {
-                    *tail_cut
-                } else {
-                    None
-                };
+            if closes_loop && chain.iter().any(|t| loop_starts.contains(t) && *t < txid) {
+                continue;
             }
-            // The hop a trace was cut before is a confirmed peel, unless it loops back.
-            let truncated = match cut {
-                Some(next) if !chain.contains(&next) => {
-                    chain.push(next);
-                    true
-                }
-                _ => false,
-            };
             let hops = u32::try_from(chain.len()).unwrap_or(u32::MAX);
 
             let mut details = json!({

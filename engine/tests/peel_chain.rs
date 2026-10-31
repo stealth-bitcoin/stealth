@@ -161,9 +161,16 @@ fn history(txs: Vec<DecodedTransaction>) -> WalletHistory {
 }
 
 fn peel_findings(txs: Vec<DecodedTransaction>) -> Vec<Finding> {
+    peel_findings_with(txs, &DetectorThresholds::default())
+}
+
+fn peel_findings_with(
+    txs: Vec<DecodedTransaction>,
+    thresholds: &DetectorThresholds,
+) -> Vec<Finding> {
     let graph = TxGraph::from_wallet_history(history(txs));
     graph
-        .detect_all(&DetectorThresholds::default(), None, None)
+        .detect_all(thresholds, None, None)
         .findings
         .into_iter()
         .filter(|f| f.vulnerability_type == VulnerabilityType::PeelChain)
@@ -346,7 +353,6 @@ const TWELVE: [u8; 12] = [
 
 #[test]
 fn a_chain_longer_than_the_hop_limit_is_one_finding_with_every_hop() {
-    assert!(TWELVE.len() as u32 > DetectorThresholds::default().peel_chain_max_hops * 3 / 2);
     assert_whole_chain(chain(0x10, &TWELVE), &TWELVE);
 }
 
@@ -365,13 +371,17 @@ fn a_long_chain_is_whole_when_the_hop_after_the_limit_cannot_start_a_chain() {
 
 #[test]
 fn a_chain_cut_by_the_hop_limit_says_it_has_at_least_that_many_hops() {
-    // No hop after 0x11 can start a chain, so nothing traces past the limit;
-    // 0x17, the peel the trace was cut before, still counts.
+    // With the limit lowered to 6, 0x17 is the peel the trace was cut before;
+    // it still counts.
+    let thresholds = DetectorThresholds {
+        peel_chain_max_hops: 6,
+        ..DetectorThresholds::default()
+    };
     let hops_ids = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18];
-    let findings = peel_findings(wide_chain(0x10, &hops_ids, &hops_ids[1..]));
+    let findings = peel_findings_with(chain(0x10, &hops_ids), &thresholds);
     assert_eq!(findings.len(), 1, "{findings:#?}");
     let f = &findings[0];
-    let seen = DetectorThresholds::default().peel_chain_max_hops + 1;
+    let seen = thresholds.peel_chain_max_hops + 1;
     assert_eq!(hops(f), u64::from(seen));
     assert_eq!(chain_txids(f), ids(&hops_ids[..seen as usize]));
     assert!(truncated(f));
@@ -458,4 +468,50 @@ fn a_tail_is_dropped_even_when_the_hop_before_it_cannot_start_a_chain() {
     let findings = peel_findings(txs);
     assert_eq!(findings.len(), 1, "{findings:#?}");
     assert_eq!(chain_txids(&findings[0]), ids(&[0x91, 0x92, 0x93, 0x94]));
+}
+
+#[test]
+fn a_chain_is_whole_when_no_hop_for_a_while_after_the_old_limit_can_start_a_trace() {
+    // 0x12 to 0x18 have three inputs, so the first trace past them starts at
+    // 0x19; it is still a tail of the chain from 0x11.
+    let hop_ids: Vec<u8> = (0x11..=0x1E).collect();
+    let wide: Vec<u8> = (0x12..=0x18).collect();
+    assert_whole_chain(wide_chain(0x10, &hop_ids, &wide), &hop_ids);
+}
+
+#[test]
+fn a_loop_with_no_way_in_is_one_finding_from_its_smallest_txid() {
+    // Real spends cannot loop; here 0x61, 0x62 and 0x63 spend each other in
+    // a circle, so every start is a later hop of another trace.
+    for order in [[0x61, 0x62, 0x63], [0x62, 0x63, 0x61], [0x63, 0x61, 0x62]] {
+        let [a, b, c] = order;
+        let txs = vec![
+            peel(a, &[(c, 1)], 1_000_000, 98_000_000),
+            peel(b, &[(a, 1)], 1_000_000, 96_000_000),
+            peel(c, &[(b, 1)], 1_000_000, 94_000_000),
+        ];
+        let findings = peel_findings(txs);
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        let f = &findings[0];
+        let mut expected = vec![a, b, c];
+        let first = expected.iter().position(|&n| n == 0x61).unwrap_or(0);
+        expected.rotate_left(first);
+        assert_eq!(chain_txids(f), ids(&expected));
+        assert_eq!(hops(f), 3);
+        assert!(!truncated(f));
+    }
+}
+
+#[test]
+fn a_chain_that_ends_right_after_the_hop_limit_is_not_truncated() {
+    let thresholds = DetectorThresholds {
+        peel_chain_max_hops: 6,
+        ..DetectorThresholds::default()
+    };
+    let hop_ids = [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+    let findings = peel_findings_with(chain(0x10, &hop_ids), &thresholds);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!(chain_txids(&findings[0]), ids(&hop_ids));
+    assert!(!truncated(&findings[0]));
+    assert!(!findings[0].description.contains("at least"));
 }
