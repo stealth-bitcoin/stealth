@@ -7,6 +7,7 @@ use bitcoin::{Address, Amount, OutPoint, Txid};
 use serde_json::json;
 
 use crate::config::DetectorThresholds;
+use crate::gateway::DecodedTransaction;
 use crate::graph::TxGraph;
 use crate::types::*;
 
@@ -100,27 +101,40 @@ impl TxGraph {
     /// A confirmed tx in the history spends this output; an unconfirmed one
     /// may still be replaced.
     fn confirmed_spend(&self, key: &(Txid, u32)) -> bool {
+        self.confirmed_child(key).is_some()
+    }
+
+    /// The confirmed tx spending this output, if any.
+    fn confirmed_child(&self, key: &(Txid, u32)) -> Option<&DecodedTransaction> {
         self.spending_index
             .get(key)
             .and_then(|child| self.tx_cache.get(child))
-            .is_some_and(|child| child.confirmations > 0)
+            .filter(|child| child.confirmations > 0)
     }
 
-    /// A confirmed tx spends this output as its only input and pays nothing back to the
-    /// wallet, so the coin was given away alone and links nothing.
+    /// A confirmed tx spends this output as its only input into nothing but 0-value
+    /// outputs with no address (OP_RETURN): the fee-only spend, which links nothing.
     fn disposed_alone(&self, key: &(Txid, u32)) -> bool {
-        self.confirmed_spend(key)
-            && self
-                .spending_index
-                .get(key)
-                .and_then(|child| self.tx_cache.get(child))
-                .is_some_and(|child| {
-                    child.vin.len() == 1
-                        && !child
-                            .vout
-                            .iter()
-                            .any(|o| o.address.as_ref().is_some_and(|a| self.is_ours(a)))
-                })
+        self.confirmed_child(key).is_some_and(|child| {
+            child.vin.len() == 1
+                && child
+                    .vout
+                    .iter()
+                    .all(|o| o.address.is_none() && o.value == Amount::ZERO)
+        })
+    }
+
+    /// Every input of the confirmed tx spending this output is at `address`, so the spend
+    /// joined no coin from another address.
+    fn spent_from_its_address_only(
+        &self,
+        key: &(Txid, u32),
+        address: &Address<NetworkUnchecked>,
+    ) -> bool {
+        self.confirmed_child(key).is_some_and(|child| {
+            let inputs = self.get_input_addresses(&child.txid);
+            inputs.len() == child.vin.len() && inputs.iter().all(|i| i.address == *address)
+        })
     }
 
     /// Outpoints of own dust in the UTXO list that no confirmed tx in the
@@ -246,7 +260,8 @@ impl TxGraph {
         thresholds: &DetectorThresholds,
     ) -> Finding {
         let attack = self.dust_attack_evidence(txid, thresholds);
-        let severity = if attack.is_some() {
+        let alone = self.spent_from_its_address_only(&(*txid, vout), address);
+        let severity = if attack.is_some() && !alone {
             Severity::Critical
         } else {
             Severity::Low
@@ -285,9 +300,15 @@ impl TxGraph {
             description,
             details: Some(details),
             correction: Some(
-                "This dust has already been spent. From now on, freeze dust like this \
-                 in your wallet's coin control so it is never spent with your other coins."
-                    .into(),
+                if alone {
+                    "This dust has already been spent with no coins from your other \
+                     addresses, so it linked none of them to this one. Keep any other dust \
+                     like it frozen in your wallet's coin control."
+                } else {
+                    "This dust has already been spent. From now on, freeze dust like this \
+                     in your wallet's coin control so it is never spent with your other coins."
+                }
+                .into(),
             ),
         }
     }

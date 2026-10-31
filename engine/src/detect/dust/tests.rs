@@ -260,7 +260,8 @@ fn op_return(n: u32) -> TxOutput {
 }
 
 /// Dust findings for a 600-sat coin of `a`, received in a tx paying `strangers` 500 sats each
-/// too, then spent in a tx with the given extra inputs and outputs.
+/// too, then spent in a tx with the given extra inputs (a 0-sat one has no loaded parent)
+/// and outputs.
 fn spent_dust(
     strangers: u8,
     extra_inputs: &[(&Address<NetworkUnchecked>, u64)],
@@ -307,8 +308,10 @@ fn spent_dust_with(
     }];
     for (i, (address, sats)) in extra_inputs.iter().enumerate() {
         let other = txid(i as u32 + 2);
-        transactions.insert(other, tx(other, vec![], vec![out(0, address, *sats)]));
-        wallet_txs.push(entry(other, Some(address), WalletTxCategory::Receive));
+        if *sats > 0 {
+            transactions.insert(other, tx(other, vec![], vec![out(0, address, *sats)]));
+            wallet_txs.push(entry(other, Some(address), WalletTxCategory::Receive));
+        }
         vin.push(TxInputRef {
             previous_txid: other,
             previous_vout: 0,
@@ -317,7 +320,8 @@ fn spent_dust_with(
         });
     }
     for o in vout.iter().filter_map(|o| o.address.as_ref()) {
-        if *o == a || extra_inputs.iter().any(|(addr, _)| *addr == o) {
+        // `wpkh(3)` stands for a second known address of the wallet.
+        if *o == a || *o == wpkh(3) || extra_inputs.iter().any(|(addr, _)| *addr == o) {
             wallet_txs.push(entry(spend, Some(o), WalletTxCategory::Receive));
         }
     }
@@ -414,4 +418,59 @@ fn an_unconfirmed_fee_only_spend_may_be_replaced_so_the_dust_keeps_its_finding()
         let findings = spent_dust_with(0, &[], vec![op_return(0)], listed, false);
         assert_eq!(findings.len(), 1, "{findings:?}");
     }
+}
+
+fn spent_finding(findings: &[Finding]) -> Option<&Finding> {
+    findings
+        .iter()
+        .find(|f| f.details.as_ref().is_some_and(|d| d["status"] == "spent"))
+}
+
+#[test]
+fn dust_spent_alone_to_another_own_address_keeps_its_finding() {
+    let findings = spent_dust(0, &[], vec![out(0, &wpkh(3), 400)]);
+    assert!(spent_finding(&findings).is_some(), "{findings:?}");
+}
+
+#[test]
+fn dust_spent_alone_to_a_foreign_address_is_a_payment_and_keeps_its_finding() {
+    // In UTXO mode a foreign address may be the user's own, unscanned one.
+    for strangers in [0, 9] {
+        let findings = spent_dust(strangers, &[], vec![out(0, &wpkh(150), 400)]);
+        assert!(spent_finding(&findings).is_some(), "{findings:?}");
+    }
+}
+
+#[test]
+fn an_output_with_no_address_but_a_value_is_not_a_fee_only_spend() {
+    let mut bare = op_return(0);
+    bare.value = Amount::from_sat(400);
+    let findings = spent_dust(0, &[], vec![bare]);
+    assert!(spent_finding(&findings).is_some(), "{findings:?}");
+}
+
+#[test]
+fn attack_dust_spent_with_a_coin_at_its_own_address_is_low_and_no_linking_mistake() {
+    let a = wpkh(1);
+    for strangers in [0, 9] {
+        let findings = spent_dust(strangers, &[(&a, 50_000)], vec![out(0, &wpkh(150), 49_000)]);
+        let f = spent_finding(&findings).expect("a spent dust finding");
+        assert_eq!(f.severity, Severity::Low, "{f:?}");
+        let correction = f.correction.as_deref().expect("a correction");
+        assert!(
+            correction.contains("linked none of them to this one"),
+            "{correction}"
+        );
+        assert!(
+            !correction.contains("never spent with your other coins"),
+            "{correction}"
+        );
+    }
+}
+
+#[test]
+fn attack_dust_spent_with_an_input_of_unknown_address_stays_critical() {
+    let findings = spent_dust(9, &[(&wpkh(1), 0)], vec![out(0, &wpkh(150), 400)]);
+    let f = spent_finding(&findings).expect("a spent dust finding");
+    assert_eq!(f.severity, Severity::Critical, "{f:?}");
 }
