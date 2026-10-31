@@ -1,7 +1,7 @@
 use crate::common::*;
 
 use stealth_engine::engine::{HistoryLimit, UtxoInput};
-use stealth_engine::error::AnalysisError;
+use stealth_engine::error::{AnalysisError, HistoryOf};
 
 /// An address paid five times, each payment in its own block.
 fn address_paid_five_times(node: &Node) -> Address {
@@ -47,6 +47,7 @@ fn a_descriptor_scan_above_the_limit_stops_and_leaves_no_wallet_loaded() {
     assert_eq!(
         error,
         AnalysisError::HistoryTooLarge {
+            of: HistoryOf::Wallet,
             tx_count: 5,
             limit: 3
         }
@@ -104,9 +105,16 @@ fn a_utxo_scan_whose_address_history_is_above_the_limit_stops() {
     assert_eq!(
         error,
         AnalysisError::HistoryTooLarge {
+            of: HistoryOf::PastedAddresses,
             tx_count: 5,
             limit: 3
         }
+    );
+    assert!(
+        error
+            .to_string()
+            .starts_with("the history of the pasted outputs' addresses holds 5 transactions"),
+        "{error}"
     );
     assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
 
@@ -114,4 +122,64 @@ fn a_utxo_scan_whose_address_history_is_above_the_limit_stops() {
         .analyze(ScanTarget::Utxos(vec![pasted]))
         .expect("at the limit");
     assert_eq!(report.stats.addresses_without_history, 0);
+}
+
+/// A node whose RPC user may make every call a scan needs except getwalletinfo,
+/// with an address paid five times.
+fn node_refusing_getwalletinfo() -> (Node, Address) {
+    let exe = corepc_node::exe_path().expect("bitcoind not found");
+    let mut conf = corepc_node::Conf::default();
+    conf.args.push("-txindex");
+    conf.args.push(
+        "-rpcwhitelist=__cookie__:getblockchaininfo,getnetworkinfo,getblockcount,\
+         generatetoaddress,getbestblockhash,getblock,getrawtransaction,deriveaddresses,\
+         getindexinfo,getdescriptorinfo,createwallet,importdescriptors,listtransactions,\
+         listunspent,getmempoolinfo,gettxout,unloadwallet,abortrescan,listwallets,\
+         getnewaddress,sendtoaddress,stop",
+    );
+    let node = Node::with_conf(exe, &conf).expect("failed to start bitcoind");
+    let aa = address_paid_five_times(&node);
+    (node, aa)
+}
+
+#[test]
+fn a_descriptor_scan_the_node_will_not_count_goes_on_unchecked() {
+    let (node, aa) = node_refusing_getwalletinfo();
+    let gateway = gateway_for(&node);
+    let report = AnalysisEngine::new(&gateway, limited_to(3))
+        .analyze(ScanTarget::Descriptor(format!("addr({aa})")))
+        .expect("the count is unknown, so the scan goes on");
+    assert_eq!(report.stats.transactions_analyzed, 5);
+}
+
+#[test]
+fn a_utxo_scan_the_node_will_not_count_keeps_its_address_history() {
+    let (node, aa) = node_refusing_getwalletinfo();
+    let gateway = gateway_for(&node);
+    // The pasted output comes from the history the gateway serves.
+    let history = gateway
+        .scan_descriptors(
+            &[stealth_engine::gateway::ResolvedDescriptor {
+                desc: gateway
+                    .normalize_descriptor(&format!("addr({aa})"))
+                    .expect("normalize"),
+                internal: false,
+                active: false,
+                range_end: 0,
+            }],
+            false,
+            &HistoryLimit::at_most(3),
+        )
+        .expect("history");
+    let pasted = UtxoInput {
+        txid: history.utxos[0].txid,
+        vout: history.utxos[0].vout,
+        value: None,
+        address: Some(aa.to_string().parse().expect("address")),
+    };
+    let report = AnalysisEngine::new(&gateway, limited_to(3))
+        .analyze(ScanTarget::Utxos(vec![pasted]))
+        .expect("the count is unknown, so the scan goes on");
+    assert_eq!(report.stats.addresses_without_history, 0);
+    assert_eq!(report.stats.transactions_analyzed, 5);
 }

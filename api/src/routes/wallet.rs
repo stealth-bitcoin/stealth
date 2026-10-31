@@ -140,9 +140,15 @@ async fn scans_create(
                 } else {
                     match result {
                         Ok(report) => JobOutcome::Done(report),
-                        Err(AnalysisError::HistoryTooLarge { tx_count, limit }) => {
-                            JobOutcome::HistoryTooLarge { tx_count, limit }
-                        }
+                        Err(
+                            error @ AnalysisError::HistoryTooLarge {
+                                tx_count, limit, ..
+                            },
+                        ) => JobOutcome::HistoryTooLarge {
+                            message: ApiError::Analysis(error).to_string(),
+                            tx_count,
+                            limit,
+                        },
                         Err(error) => JobOutcome::Failed(ApiError::Analysis(error).to_string()),
                     }
                 };
@@ -178,13 +184,15 @@ async fn scans_get(
             error: Some(message),
             limit_exceeded: None,
         },
-        Some(JobOutcome::HistoryTooLarge { tx_count, limit }) => ScanJobStatus {
+        Some(JobOutcome::HistoryTooLarge {
+            message,
+            tx_count,
+            limit,
+        }) => ScanJobStatus {
             state: "failed",
             progress: None,
             report: None,
-            error: Some(
-                ApiError::Analysis(AnalysisError::HistoryTooLarge { tx_count, limit }).to_string(),
-            ),
+            error: Some(message),
             limit_exceeded: Some(LimitExceeded { tx_count, limit }),
         },
         Some(JobOutcome::Cancelled) => ScanJobStatus {

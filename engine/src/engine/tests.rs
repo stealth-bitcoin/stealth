@@ -9,7 +9,7 @@ use bitcoin::{Address, Amount, OutPoint, Txid};
 use crate::engine::{
     merge_chain_history, AnalysisEngine, EngineSettings, HistoryLimit, ScanTarget, UtxoInput,
 };
-use crate::error::AnalysisError;
+use crate::error::{AnalysisError, HistoryOf};
 use crate::gateway::{
     BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, TxFetchResults,
     TxInputRef, TxOutput, Utxo, UtxoSetResults, WalletHistory, WalletTxCategory, WalletTxEntry,
@@ -102,6 +102,7 @@ struct FakeGateway {
     scanned: RefCell<Vec<String>>,
     persisted: RefCell<Vec<bool>>,
     limits: RefCell<Vec<Option<u64>>>,
+    counted_of: RefCell<Vec<HistoryOf>>,
     unspent: Result<HashSet<OutPoint>, String>,
     failing: HashSet<OutPoint>,
     asked: RefCell<Vec<OutPoint>>,
@@ -122,6 +123,7 @@ impl FakeGateway {
             scanned: RefCell::new(Vec::new()),
             persisted: RefCell::new(Vec::new()),
             limits: RefCell::new(Vec::new()),
+            counted_of: RefCell::new(Vec::new()),
             unspent: Ok(HashSet::new()),
             failing: HashSet::new(),
             asked: RefCell::new(Vec::new()),
@@ -156,6 +158,7 @@ impl BlockchainGateway for FakeGateway {
     ) -> Result<WalletHistory, AnalysisError> {
         self.persisted.borrow_mut().push(persist);
         self.limits.borrow_mut().push(limit.max_txs);
+        self.counted_of.borrow_mut().push(limit.of);
         self.scanned
             .borrow_mut()
             .extend(descriptors.iter().map(|d| d.desc.clone()));
@@ -337,6 +340,10 @@ fn the_address_history_load_of_a_utxo_scan_carries_the_history_limit() {
         .analyze(ScanTarget::Utxos(vec![pasted()]))
         .expect("utxo scan");
     assert_eq!(gateway.limits.borrow().as_slice(), [Some(5_000), Some(3)]);
+    assert_eq!(
+        gateway.counted_of.borrow().as_slice(),
+        [HistoryOf::PastedAddresses, HistoryOf::PastedAddresses]
+    );
 }
 
 #[test]
@@ -350,11 +357,13 @@ fn a_descriptor_scan_carries_the_history_limit() {
         .analyze(ScanTarget::Descriptor(format!("addr({ADDR})")))
         .expect("descriptor scan");
     assert_eq!(gateway.limits.borrow().as_slice(), [None]);
+    assert_eq!(gateway.counted_of.borrow().as_slice(), [HistoryOf::Wallet]);
 }
 
 #[test]
 fn a_utxo_scan_whose_address_history_is_above_the_limit_stops_instead_of_going_on_without_it() {
     let too_large = AnalysisError::HistoryTooLarge {
+        of: HistoryOf::PastedAddresses,
         tx_count: 5_001,
         limit: 5_000,
     };

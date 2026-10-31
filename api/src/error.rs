@@ -70,9 +70,9 @@ impl IntoResponse for ApiError {
         let message = self.to_string();
         let code = self.error_code();
         let (tx_count, limit) = match self {
-            Self::Analysis(AnalysisError::HistoryTooLarge { tx_count, limit }) => {
-                (Some(tx_count), Some(limit))
-            }
+            Self::Analysis(AnalysisError::HistoryTooLarge {
+                tx_count, limit, ..
+            }) => (Some(tx_count), Some(limit)),
             _ => (None, None),
         };
         let body = Json(ErrorResponse {

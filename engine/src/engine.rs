@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use bitcoin::{Amount, OutPoint, Txid};
 
 use crate::descriptor::{expand_input, is_ranged, normalize_descriptors};
-use crate::error::AnalysisError;
+use crate::error::{AnalysisError, HistoryOf};
 use crate::gateway::{
     BlockchainGateway, DecodedTransaction, DescriptorType, Utxo, WalletHistory, WalletTxCategory,
     WalletTxEntry,
@@ -20,7 +20,7 @@ use crate::types::Report;
 
 pub use stealth_model::progress::{ScanPhase, ScanProgress};
 pub use stealth_model::scan::{
-    EngineSettings, HistoryLimit, ScanTarget, UtxoInput, DEFAULT_MAX_WALLET_TXS,
+    AskToGoOn, EngineSettings, HistoryLimit, ScanTarget, UtxoInput, DEFAULT_MAX_WALLET_TXS,
 };
 
 type AddressSet = HashSet<bitcoin::Address<bitcoin::address::NetworkUnchecked>>;
@@ -199,8 +199,11 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             self.gateway,
         )
         .and_then(|resolved| {
-            self.gateway
-                .scan_descriptors(&resolved, false, &self.settings.history_limit)
+            let limit = HistoryLimit {
+                of: HistoryOf::PastedAddresses,
+                ..self.settings.history_limit.clone()
+            };
+            self.gateway.scan_descriptors(&resolved, false, &limit)
         });
         match fetched {
             Ok(full) => Ok((0, merge_chain_history(history, full))),

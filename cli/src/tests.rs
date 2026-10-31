@@ -710,7 +710,7 @@ mod ordering {
 
 mod history_limit {
     use crate::*;
-    use stealth_engine::error::AnalysisError;
+    use stealth_engine::error::{AnalysisError, HistoryOf};
 
     fn to_args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
@@ -767,13 +767,15 @@ mod history_limit {
     #[test]
     fn a_stop_names_the_count_and_the_flags_that_go_on() {
         let message = scan_error(AnalysisError::HistoryTooLarge {
+            of: HistoryOf::Wallet,
             tx_count: 12_345,
             limit: 5_000,
         });
         assert!(message.contains("12345 transactions"), "{message}");
         assert!(message.contains("limit of 5000"), "{message}");
-        assert!(message.contains("--max-txs 12345"), "{message}");
-        assert!(message.contains("--no-limits"), "{message}");
+        let no_limits = message.find("--no-limits").expect("--no-limits");
+        let max_txs = message.find("--max-txs 12345").expect("--max-txs");
+        assert!(no_limits < max_txs, "--no-limits comes first: {message}");
     }
 
     #[test]
@@ -782,10 +784,44 @@ mod history_limit {
         assert_eq!(scan_error(error.clone()), error.to_string());
     }
 
-    fn answer(typed: &str) -> (bool, String) {
+    fn answer_about(of: HistoryOf, typed: &str) -> (bool, String) {
         let mut shown = Vec::new();
-        let go_on = ask_to_go_on(12_345, 5_000, &mut typed.as_bytes(), &mut shown);
+        let go_on = ask_to_go_on(of, 12_345, 5_000, &mut typed.as_bytes(), &mut shown);
         (go_on, String::from_utf8(shown).expect("utf-8"))
+    }
+
+    fn answer(typed: &str) -> (bool, String) {
+        answer_about(HistoryOf::Wallet, typed)
+    }
+
+    #[test]
+    fn the_prompt_names_whose_history_it_counted() {
+        let (_, wallet) = answer_about(HistoryOf::Wallet, "n\n");
+        assert!(
+            wallet.starts_with("This wallet's history holds 12345"),
+            "{wallet}"
+        );
+        let (_, pasted) = answer_about(HistoryOf::PastedAddresses, "n\n");
+        assert!(
+            pasted.starts_with("The history of the pasted outputs' addresses holds 12345"),
+            "{pasted}"
+        );
+    }
+
+    /// The asker installed for a terminal, reading `typed` and writing nowhere.
+    fn asked_with(typed: &'static str) -> HistoryLimit {
+        HistoryLimit {
+            ask: Some(terminal_ask(move || (typed.as_bytes(), io::sink()))),
+            ..HistoryLimit::at_most(3)
+        }
+    }
+
+    #[test]
+    fn the_terminal_asker_goes_on_only_on_a_yes() {
+        assert_eq!(asked_with("y\n").check(5), Ok(()));
+        for typed in ["n\n", "\n", ""] {
+            assert!(asked_with(typed).check(5).is_err(), "{typed:?}");
+        }
     }
 
     #[test]

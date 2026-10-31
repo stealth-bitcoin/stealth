@@ -198,6 +198,8 @@ pub struct BitcoinCoreRpc {
     cache_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     // Cookie credentials read once, re-read only when the node answers 401.
     cookie: RwLock<Option<(String, String)>>,
+    // Set once the node has refused a history count, so it is said only once.
+    count_refused: AtomicBool,
 }
 
 impl BitcoinCoreRpc {
@@ -215,6 +217,7 @@ impl BitcoinCoreRpc {
             progress_sinks: Mutex::new(HashMap::new()),
             cache_locks: Mutex::new(HashMap::new()),
             cookie: RwLock::new(None),
+            count_refused: AtomicBool::new(false),
         })
     }
 
@@ -1080,7 +1083,27 @@ impl BitcoinCoreRpc {
         if limit.max_txs.is_none() {
             return Ok(());
         }
-        let info: Value = self.call(Some(wallet_name), "getwalletinfo", Vec::new())?;
+        let info = match self.call_rpc::<Value>(Some(wallet_name), "getwalletinfo", Vec::new()) {
+            Ok(info) => info,
+            // A user the node will not tell the count goes on unchecked.
+            Err(RpcError::Node(
+                _,
+                JsonRpcError {
+                    code: Some(RPC_METHOD_NOT_FOUND),
+                    ..
+                },
+            ))
+            | Err(RpcError::Other(AnalysisError::RpcForbidden { .. })) => {
+                if !self.count_refused.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "warning: the node refused getwalletinfo, so the history limit is not \
+                         checked; allow getwalletinfo for this RPC user to have it checked"
+                    );
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let tx_count = info["txcount"].as_u64().ok_or_else(|| {
             AnalysisError::EnvironmentUnavailable("getwalletinfo: no txcount in the reply".into())
         })?;
@@ -1949,6 +1972,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use stealth_model::error::AnalysisError;
+    use stealth_model::error::HistoryOf;
     use stealth_model::gateway::{ResolvedDescriptor, WalletTxCategory};
     use stealth_model::scan::HistoryLimit;
 
@@ -3575,6 +3599,14 @@ mod tests {
     /// A node whose scan wallet holds `txcount` transactions, recording the
     /// methods called on it.
     fn node_holding(txcount: u64) -> (BitcoinCoreRpc, Arc<Mutex<Vec<String>>>) {
+        let info = json!({ "result": { "txcount": txcount, "scanning": false }, "error": null });
+        node_answering_getwalletinfo(("200 OK", info.to_string()))
+    }
+
+    /// Like [`node_holding`], with `info` as the getwalletinfo reply.
+    fn node_answering_getwalletinfo(
+        info: (&'static str, String),
+    ) -> (BitcoinCoreRpc, Arc<Mutex<Vec<String>>>) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&calls);
         let rpc = serve_node(move |method| {
@@ -3582,7 +3614,7 @@ mod tests {
             let result = match method {
                 "createwallet" => json!({ "name": "scan" }),
                 "importdescriptors" => json!([{ "success": true }]),
-                "getwalletinfo" => json!({ "txcount": txcount, "scanning": false }),
+                "getwalletinfo" => return info.clone(),
                 "listwallets" => json!([]),
                 "listwalletdir" => json!({ "wallets": [] }),
                 "deriveaddresses" => json!([ADDR]),
@@ -3635,6 +3667,7 @@ mod tests {
         assert_eq!(
             error,
             AnalysisError::HistoryTooLarge {
+                of: HistoryOf::Wallet,
                 tx_count: 5_001,
                 limit: 5_000
             }
@@ -3675,7 +3708,7 @@ mod tests {
     fn a_history_above_the_limit_is_loaded_when_the_answer_is_to_go_on() {
         let (rpc, calls) = node_holding(5_001);
         let limit = HistoryLimit {
-            ask: Some(Arc::new(|_, _| true)),
+            ask: Some(Arc::new(|_, _, _| true)),
             ..HistoryLimit::default()
         };
         scan_one_address(&rpc, false, &limit).expect("told to go on");
@@ -3695,6 +3728,48 @@ mod tests {
             Some("unloadwallet"),
             "{calls:?}"
         );
+    }
+
+    #[test]
+    fn a_cache_wallet_above_the_limit_is_kept_and_loaded_when_the_answer_is_to_go_on() {
+        let (rpc, calls) = node_holding(5_001);
+        let limit = HistoryLimit {
+            ask: Some(Arc::new(|_, _, _| true)),
+            ..HistoryLimit::default()
+        };
+        scan_one_address(&rpc, true, &limit).expect("told to go on");
+        assert!(fetched_history(&calls));
+        let calls = calls.lock().unwrap();
+        assert!(!calls.iter().any(|m| m == "unloadwallet"), "{calls:?}");
+    }
+
+    #[test]
+    fn a_count_the_node_refuses_to_give_lets_the_scan_go_on_unchecked() {
+        let forbidden = ("403 Forbidden", String::new());
+        let not_found = (
+            "500 Internal Server Error",
+            json!({ "result": null, "error": { "code": -32601, "message": "Method not found" } })
+                .to_string(),
+        );
+        for refusal in [forbidden, not_found] {
+            for persist in [false, true] {
+                let (rpc, calls) = node_answering_getwalletinfo(refusal.clone());
+                scan_one_address(&rpc, persist, &HistoryLimit::default())
+                    .unwrap_or_else(|e| panic!("{refusal:?} persist={persist}: {e}"));
+                assert!(fetched_history(&calls), "{refusal:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn any_other_getwalletinfo_failure_still_fails_the_scan() {
+        let (rpc, calls) = node_answering_getwalletinfo((
+            "500 Internal Server Error",
+            json!({ "result": null, "error": { "code": -18, "message": "Requested wallet does not exist" } })
+                .to_string(),
+        ));
+        assert!(scan_one_address(&rpc, false, &HistoryLimit::default()).is_err());
+        assert!(!fetched_history(&calls));
     }
 
     #[test]

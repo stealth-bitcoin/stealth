@@ -21,6 +21,7 @@ pub enum JobOutcome {
     Failed(String),
     /// Stopped before loading a history above the limit.
     HistoryTooLarge {
+        message: String,
         tx_count: u64,
         limit: u64,
     },

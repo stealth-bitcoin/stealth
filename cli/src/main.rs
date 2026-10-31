@@ -6,9 +6,10 @@ use std::{env, fs};
 
 use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc, RpcAuth};
 use stealth_engine::engine::{
-    AnalysisEngine, EngineSettings, HistoryLimit, ScanTarget, UtxoInput, DEFAULT_MAX_WALLET_TXS,
+    AnalysisEngine, AskToGoOn, EngineSettings, HistoryLimit, ScanTarget, UtxoInput,
+    DEFAULT_MAX_WALLET_TXS,
 };
-use stealth_engine::error::AnalysisError;
+use stealth_engine::error::{AnalysisError, HistoryOf};
 use stealth_engine::types::{Finding, Summary};
 
 fn main() -> ExitCode {
@@ -69,7 +70,10 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
 fn scan_error(error: AnalysisError) -> String {
     match error {
         AnalysisError::HistoryTooLarge { tx_count, .. } => {
-            format!("{error}; to scan it anyway, pass --max-txs {tx_count} or --no-limits")
+            format!(
+                "{error}; to scan it anyway, pass --no-limits, or --max-txs {tx_count} to raise \
+                 the limit"
+            )
         }
         other => other.to_string(),
     }
@@ -77,14 +81,19 @@ fn scan_error(error: AnalysisError) -> String {
 
 /// Asks on `output` whether to load a history above the limit; only a yes goes on.
 fn ask_to_go_on(
+    of: HistoryOf,
     tx_count: u64,
     limit: u64,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> bool {
+    let whose = match of {
+        HistoryOf::Wallet => "This wallet's history",
+        HistoryOf::PastedAddresses => "The history of the pasted outputs' addresses",
+    };
     let _ = write!(
         output,
-        "This wallet's history holds {tx_count} transactions, more than the limit of {limit}. \
+        "{whose} holds {tx_count} transactions, more than the limit of {limit}. \
          Loading it can take long and put a heavy load on the node. Go on? [y/N] "
     );
     let _ = output.flush();
@@ -93,6 +102,16 @@ fn ask_to_go_on(
         return false;
     }
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// An asker that reads the answer from what `open` hands it each time it asks.
+fn terminal_ask<R: BufRead, W: Write>(
+    open: impl Fn() -> (R, W) + Send + Sync + 'static,
+) -> AskToGoOn {
+    Arc::new(move |of, tx_count, limit| {
+        let (mut input, mut output) = open();
+        ask_to_go_on(of, tx_count, limit, &mut input, &mut output)
+    })
 }
 
 /// Nothing was analyzed and nothing was reported. Findings alongside zero
@@ -209,9 +228,7 @@ impl ScanOpts {
         }
         let mut limit = HistoryLimit::at_most(self.max_txs.unwrap_or(DEFAULT_MAX_WALLET_TXS));
         if interactive {
-            limit.ask = Some(Arc::new(|tx_count, limit| {
-                ask_to_go_on(tx_count, limit, &mut io::stdin().lock(), &mut io::stderr())
-            }));
+            limit.ask = Some(terminal_ask(|| (io::stdin().lock(), io::stderr())));
         }
         limit
     }
