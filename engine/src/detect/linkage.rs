@@ -100,15 +100,14 @@ impl TxGraph {
                     Some(t) => t,
                     None => continue,
                 };
+                // Coinbase and unresolved inputs are missing from the payers, so they fail the count.
+                let payers = self.get_input_addresses(&ia.funding_txid);
                 origins.push(Origin {
                     funding_txid: ia.funding_txid,
                     funding_vout: ia.funding_vout,
                     address: ia.address.clone(),
-                    own_funding: self
-                        .get_input_addresses(&ia.funding_txid)
-                        .iter()
-                        .any(|p| self.is_ours(&p.address)),
-                    coinbase: parent_tx.vin.iter().any(|v| v.coinbase),
+                    own_funding: payers.len() == parent_tx.vin.len()
+                        && payers.iter().all(|p| self.is_ours(&p.address)),
                 });
             }
 
@@ -414,16 +413,14 @@ struct Origin {
     funding_txid: Txid,
     funding_vout: u32,
     address: Address<NetworkUnchecked>,
-    /// The funding tx spends at least one of our coins, so we built it.
+    /// Every input of the funding tx is a coin of ours, so we built it alone.
     own_funding: bool,
-    coinbase: bool,
 }
 
 impl Origin {
-    /// Same funding tx built by us, same own address, or both coinbase.
+    /// Same funding tx built only from our coins, or same own address.
     fn same_chain(&self, other: &Origin) -> bool {
         (self.funding_txid == other.funding_txid && self.own_funding)
             || self.address == other.address
-            || (self.coinbase && other.coinbase)
     }
 }
