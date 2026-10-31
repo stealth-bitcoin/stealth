@@ -182,9 +182,8 @@ pub struct Stats {
     /// not serve; their counts cover only the pasted outputs.
     #[serde(default)]
     pub addresses_without_history: usize,
-    /// Wallet transactions left out because Core reports them as conflicted:
-    /// each conflicts with another transaction, so it is not part of the
-    /// wallet's history.
+    /// Wallet transactions left out because Core reports them as conflicted,
+    /// sorted by their displayed hex.
     #[serde(default)]
     pub conflicted_txids: Vec<Txid>,
 }

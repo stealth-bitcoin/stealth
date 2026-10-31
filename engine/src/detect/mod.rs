@@ -70,12 +70,16 @@ impl TxGraph {
             });
         }
 
+        // In the order they are printed, which reverses the bytes a Txid sorts by.
+        let mut conflicted_txids: Vec<Txid> = self.conflicted_txids.iter().copied().collect();
+        conflicted_txids.sort_by_cached_key(Txid::to_string);
+
         let stats = Stats {
             transactions_analyzed: self.our_txids.len(),
             addresses_seen: self.addr_map.len(),
             utxos_current: self.utxos.len(),
             addresses_without_history: 0,
-            conflicted_txids: self.conflicted_txids.iter().copied().collect(),
+            conflicted_txids,
         };
 
         Report::new(stats, findings, warnings)

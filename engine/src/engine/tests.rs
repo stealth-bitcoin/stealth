@@ -976,3 +976,19 @@ fn a_scan_without_conflicted_txs_names_none() {
     let gateway = FakeGateway::new(Ok(chain_history(12, 1)));
     assert!(scan(&gateway).stats.conflicted_txids.is_empty());
 }
+
+#[test]
+fn conflicted_txids_come_out_in_the_order_they_are_printed() {
+    // Displayed hex reverses the bytes: 0x200 prints after 3 but sorts before it internally.
+    let gateway = FakeGateway::new(Ok(with_conflicted(chain_history(2, 1), &[0x200, 3])));
+    let report = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Descriptor(format!("addr({ADDR})")))
+        .expect("descriptor scan");
+    let printed: Vec<String> = report
+        .stats
+        .conflicted_txids
+        .iter()
+        .map(Txid::to_string)
+        .collect();
+    assert_eq!(printed, [txid(3).to_string(), txid(0x200).to_string()]);
+}
