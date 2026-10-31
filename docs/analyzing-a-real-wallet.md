@@ -35,12 +35,14 @@ blockfilterindex=1
 
 Loading a large wallet history makes `bitcoind` grow its memory, and it does
 not give that memory back when Stealth unloads the scan wallet. On a node you
-use for scanning, start `bitcoind` with `MALLOC_ARENA_MAX=1` in its
-environment: it keeps glibc from holding freed memory in many arenas, and is
-what helps that memory go back to the system. A smaller `dbcache` (for
-example `dbcache=300`, once the node has finished syncing) shrinks the cache
-of the UTXO set, not the wallet's own use; it leaves the machine more memory
-for the wallet load:
+use for scanning, Bitcoin Core's own
+[doc/reduce-memory.md](https://github.com/bitcoin/bitcoin/blob/master/doc/reduce-memory.md)
+advises starting `bitcoind` with `MALLOC_ARENA_MAX=1` on Linux, since glibc's
+`malloc` may use more than one arena, which "is known to cause excessive memory
+usage in some scenarios". A smaller `dbcache` (for example `dbcache=300`,
+once the node has finished syncing; the same document notes a lower value
+mostly slows the initial sync) shrinks the UTXO set cache, not the wallet's
+own use; it leaves the machine more memory for the wallet load:
 
 ```bash
 MALLOC_ARENA_MAX=1 bitcoind -dbcache=300

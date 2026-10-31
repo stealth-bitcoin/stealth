@@ -985,6 +985,19 @@ mod history_limit {
     }
 
     #[test]
+    fn the_scan_is_interruptible_only_once_the_handler_is_installed() {
+        assert!(install_interrupt_handler(false, || true));
+        assert!(
+            !install_interrupt_handler(false, || false),
+            "installing failed"
+        );
+        assert!(
+            !install_interrupt_handler(true, || panic!("an ignored SIGINT gets no handler")),
+            "SIGINT ignored"
+        );
+    }
+
+    #[test]
     fn a_scan_whose_interrupt_is_ignored_is_not_asked() {
         assert!(!should_ask(true, true, false));
     }

@@ -50,15 +50,15 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
 
     // Ctrl-C at the question answers no; an inherited SIG_IGN stays and means no question.
     let interrupts = Arc::new(Interrupts::default());
-    let interruptible = !sigint_ignored();
-    if interruptible {
-        let handler = Arc::clone(&interrupts);
-        let _ = ctrlc::set_handler(move || {
+    let handler = Arc::clone(&interrupts);
+    let interruptible = install_interrupt_handler(sigint_ignored(), move || {
+        ctrlc::set_handler(move || {
             if handler.interrupt() {
                 die_by_interrupt();
             }
-        });
-    }
+        })
+        .is_ok()
+    });
 
     let ask = should_ask(
         io::stdin().is_terminal(),
@@ -129,6 +129,11 @@ fn die_by_interrupt() -> ! {
         let _ = raise(Signal::SIGINT);
     }
     std::process::exit(130)
+}
+
+/// Installs the Ctrl-C handler unless SIGINT was ignored; says whether one is in place.
+fn install_interrupt_handler(sigint_ignored: bool, install: impl FnOnce() -> bool) -> bool {
+    !sigint_ignored && install()
 }
 
 /// The question is asked only where someone can both read it and answer it,
@@ -210,10 +215,7 @@ enum Moment {
     Asking(mpsc::Sender<Reply>),
 }
 
-/// What Ctrl-C does: while the question waits it answers no, so the scan
-/// stops the usual way and unloads its wallet; at any other moment, after a
-/// no included, it exits at once. Whichever of the typed answer and an
-/// interrupt comes first answers the question.
+/// Ctrl-C answers no while the question waits, else exits; the first of answer and interrupt wins.
 #[derive(Debug, Default)]
 struct Interrupts {
     moment: Mutex<Moment>,

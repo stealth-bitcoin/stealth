@@ -19,10 +19,9 @@ stealth-bitcoincore = { path = "../bitcoincore" }
 stealth-engine = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-# Already in the tree through ctrlc; used to die by SIGINT like before and to
-# tell a foreground scan from a background job.
+# Already in the tree through ctrlc: dies by SIGINT, tells foreground from background.
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "term"] }
-# Already in the tree through nix; reads the SIGINT disposition, which nix cannot.
+# Already in the tree through nix: reads the SIGINT disposition, which nix cannot.
 libc = "0.2.191"
 
 [dev-dependencies]
