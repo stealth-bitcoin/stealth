@@ -453,3 +453,80 @@ fn the_receiver_of_a_payment_double_spent_away_from_him_leaves_it_out() {
     assert_eq!(mempool_conflicted(&cached), vec![(payment, double_spend)]);
     assert_eq!(cached.stats.transactions_analyzed, 0);
 }
+
+/// A node on a datadir kept across restarts, with extra arguments.
+fn node_on(datadir: &std::path::Path, args: &[&str]) -> Node {
+    let exe = corepc_node::exe_path().expect("bitcoind not found");
+    let mut conf = corepc_node::Conf::default();
+    conf.staticdir = Some(datadir.to_path_buf());
+    conf.args.push("-txindex");
+    conf.args.extend_from_slice(args);
+    Node::with_conf(exe, &conf).expect("failed to start bitcoind")
+}
+
+/// Core keeps replaced_by_txid on a bumped original for good: abandon the
+/// replacement while it is out of the mempool and the wallet rebroadcasts the
+/// original, which is then live and must be analyzed.
+#[test]
+fn a_bumped_original_back_in_the_mempool_is_analyzed() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let datadir = std::env::temp_dir().join(format!("stealth-rebroadcast-{nanos}"));
+    std::fs::create_dir_all(&datadir).unwrap();
+
+    let mut first = node_on(&datadir, &[]);
+    let miner = first.client.new_address().unwrap();
+    mine(&first, 110, &miner);
+    let to = first.client.new_address().unwrap();
+    let original: String = first
+        .client
+        .call(
+            "sendtoaddress",
+            &[
+                json!(to.to_string()),
+                json!(0.001),
+                json!(""),
+                json!(""),
+                json!(false),
+                json!(true),
+            ],
+        )
+        .expect("sendtoaddress");
+    let bumped: Value = first
+        .client
+        .call("bumpfee", &[json!(original)])
+        .expect("bumpfee");
+    let original: Txid = original.parse().unwrap();
+    let replacement: Txid = bumped["txid"].as_str().unwrap().parse().unwrap();
+    first.stop().unwrap();
+
+    // Without the saved mempool or wallet broadcast, the replacement is out and can be abandoned.
+    let mut second = node_on(&datadir, &["-persistmempool=0", "-walletbroadcast=0"]);
+    let _: Value = second
+        .client
+        .call("abandontransaction", &[json!(replacement.to_string())])
+        .expect("abandontransaction");
+    second.stop().unwrap();
+
+    let node = node_on(&datadir, &["-persistmempool=0"]);
+    let mempool: Vec<String> = node.client.call("getrawmempool", &[]).unwrap();
+    assert_eq!(
+        mempool,
+        vec![original.to_string()],
+        "the wallet rebroadcasts the original"
+    );
+
+    let history = gateway_for(&node).scan_wallet("default").expect("scan");
+    let graph = TxGraph::from_wallet_history(history);
+    assert!(
+        graph.our_txids.contains(&original),
+        "the live original is analyzed"
+    );
+    let report = graph.detect_all(&Default::default(), None, None);
+    assert!(mempool_conflicted(&report).is_empty(), "{:?}", report.stats);
+    assert_eq!(report.stats.abandoned_txids, vec![replacement]);
+    drop(node);
+    let _ = std::fs::remove_dir_all(&datadir);
+}
