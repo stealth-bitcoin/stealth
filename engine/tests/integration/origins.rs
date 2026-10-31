@@ -105,24 +105,12 @@ fn detect_exchange_origin() {
 // sender's change: the batch is judged on its other outputs only.
 
 fn exchange_batch_report(recipient_sats: &[u64], self_outputs: &[u64]) -> stealth_engine::Report {
-    let node = node();
-    let da = node.client.new_address().unwrap();
-    mine(&node, 110, &da);
-
-    let alice = node.create_wallet("alice").unwrap();
-    let (exchange, exchange_addr) = fund_sender(&node, &da, "exchange", 1_000_000);
-
-    let mut outputs = vec![(alice.new_address().unwrap(), recipient_sats[0])];
-    for &sats in &recipient_sats[1..] {
-        outputs.push((node.client.new_address().unwrap(), sats));
-    }
-    for &sats in self_outputs {
-        outputs.push((exchange_addr.clone(), sats));
-    }
-    spend_to(&exchange, &outputs, &exchange_addr);
-    mine(&node, 1, &da);
-
-    scan_wallet(&gateway_for(&node), "alice")
+    payout_report(
+        &recipient_sats[..1],
+        &recipient_sats[1..],
+        self_outputs,
+        false,
+    )
 }
 
 #[test]
@@ -217,19 +205,37 @@ fn dust_class_payout_in_dust_attack_is_not_exchange_origin() {
     recipients.extend([330; 11]);
     let report = exchange_batch_report(&recipients, &[]);
     assert!(
-        report.findings.iter().any(|f| {
-            f.vulnerability_type == VulnerabilityType::Dust
-                && f.details
-                    .as_ref()
-                    .and_then(|d| d.get("dust_attack"))
-                    .is_some()
-        }),
+        has_dust_attack(&report),
         "expected a dust-attack finding: {:?}",
         report.findings
     );
     assert!(
         !has_finding(&report, VulnerabilityType::ExchangeOrigin),
         "dust from a dust attack is not an exchange payout: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn exchange_batch_output_count_skips_op_return() {
+    // Four small recipients, an OP_RETURN and change to the input address.
+    let report = payout_report(&[50_000], &[50_000; 3], &[], true);
+    assert!(
+        !has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "an OP_RETURN is not a batch recipient: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn normal_payout_next_to_dust_in_dust_attack_still_counts() {
+    // The wallet gets one dust output and one normal payout; only the dust is
+    // covered by the dust-attack finding.
+    let report = payout_report(&[330, 100_000], &[330; 10], &[], false);
+    assert!(has_dust_attack(&report), "{:?}", report.findings);
+    assert!(
+        has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "the normal payout is still from a batch: {:?}",
         report.findings
     );
 }

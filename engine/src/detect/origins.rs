@@ -79,17 +79,8 @@ impl TxGraph {
 
         let txids = self.ordered_txids();
         for txid in &txids {
-            let tx = match self.fetch_tx(txid) {
-                Some(t) => t,
-                None => continue,
-            };
             let input_addrs = self.get_input_addresses(txid);
-            let input_set: HashSet<_> = input_addrs.iter().map(|ia| &ia.address).collect();
-            let recipients: Vec<_> = tx
-                .vout
-                .iter()
-                .filter(|o| o.address.as_ref().is_none_or(|a| !input_set.contains(a)))
-                .collect();
+            let recipients = self.recipient_outputs(txid);
             let n_out = recipients.len();
             if n_out < batch_threshold {
                 continue;
@@ -112,7 +103,7 @@ impl TxGraph {
                 continue;
             }
             // Dust we received here is already reported as a dust attack.
-            if our_outputs.iter().any(|o| o.value <= thresholds.dust)
+            if our_outputs.iter().all(|o| o.value <= thresholds.dust)
                 && self.dust_attack_evidence(txid, thresholds).is_some()
             {
                 continue;
@@ -122,7 +113,7 @@ impl TxGraph {
 
             let unique_addr_count = recipients
                 .iter()
-                .filter_map(|o| o.address.as_ref())
+                .map(|o| &o.address)
                 .collect::<HashSet<_>>()
                 .len();
             if unique_addr_count >= batch_threshold {

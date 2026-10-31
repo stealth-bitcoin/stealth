@@ -302,3 +302,26 @@ fn dust_attack_with_self_outputs_is_not_exchange_origin() {
         report.findings
     );
 }
+
+// The attack needs ten recipients; change back to the sender does not count.
+
+#[test]
+fn dust_attack_needs_ten_recipients_besides_change() {
+    let report = payout_report(&[330], &[330; 8], &[], false);
+    assert!(has_finding(&report, VulnerabilityType::Dust));
+    assert!(
+        !has_dust_attack(&report),
+        "nine recipients plus change is below the attack threshold: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn dust_attack_fires_at_ten_recipients_besides_change() {
+    let report = payout_report(&[330], &[330; 9], &[], false);
+    assert!(
+        has_dust_attack(&report),
+        "ten recipients plus change is a dust attack: {:?}",
+        report.findings
+    );
+}
