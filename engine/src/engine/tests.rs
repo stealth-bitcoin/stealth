@@ -175,10 +175,9 @@ impl BlockchainGateway for FakeGateway {
         if self.broken.contains(&txid) {
             return Err(AnalysisError::EnvironmentUnavailable(format!("bad {txid}")));
         }
+        // Core answers -5 for a tx that left the chain, which the gateway maps to not found.
         if self.vanished.contains(&txid) {
-            return Err(AnalysisError::EnvironmentUnavailable(format!(
-                "gone {txid}"
-            )));
+            return Err(AnalysisError::TransactionNotFound(format!("gone {txid}")));
         }
         self.transactions
             .get(&txid)
