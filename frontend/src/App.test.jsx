@@ -190,6 +190,24 @@ describe('App scan flow', () => {
     expect(getScan).not.toHaveBeenCalled()
   })
 
+  it('sends a cancel clicked after the id arrived but before the screen re-rendered', async () => {
+    let resolveStart
+    startScan.mockReturnValue(new Promise((resolve) => { resolveStart = resolve }))
+    cancelScan.mockResolvedValue()
+    render(<App />)
+    await submitScan()
+    const cancel = screen.getByRole('button', { name: /^cancel$/i })
+
+    // The id lands outside act, so the click still runs the handler of the render before it.
+    resolveStart('scan-1')
+    // One microtask runs the code after startScan; React re-renders a microtask later.
+    await Promise.resolve()
+    // A plain DOM click, not wrapped in act, so no pending render is flushed first.
+    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await act(async () => {})
+    expect(cancelScan).toHaveBeenCalledWith('scan-1')
+  })
+
   it('keeps following the scan when the early cancel cannot be sent', async () => {
     let resolveStart
     startScan.mockReturnValue(new Promise((resolve) => { resolveStart = resolve }))

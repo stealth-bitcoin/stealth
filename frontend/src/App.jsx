@@ -11,7 +11,9 @@ const MAX_POLL_FAILURES = 5
 export default function App() {
   const [screen, setScreen] = useState('input')
   const [scan, setScan] = useState(null)
-  const [scanId, setScanId] = useState(null)
+  const [scanId, setScanIdState] = useState(null)
+  // Read by handleCancel, which a click can run before the render that sees a new id.
+  const currentScanId = useRef(null)
   const [job, setJob] = useState(null)
   const [report, setReport] = useState(null)
   const [error, setError] = useState(null)
@@ -20,6 +22,11 @@ export default function App() {
   const cancelSent = useRef(false)
   // A cancel clicked before startScan returned the id, settled once it is sent.
   const cancelWaiting = useRef(null)
+
+  function setScanId(id) {
+    currentScanId.current = id
+    setScanIdState(id)
+  }
 
   useEffect(() => {
     if (!scanId) return undefined
@@ -109,12 +116,13 @@ export default function App() {
 
   function handleCancel() {
     cancelSent.current = true
-    if (!scanId) {
+    const id = currentScanId.current
+    if (!id) {
       return new Promise((resolve, reject) => {
         cancelWaiting.current = { resolve, reject }
       })
     }
-    return cancelScan(scanId).catch((err) => {
+    return cancelScan(id).catch((err) => {
       cancelSent.current = false
       throw err
     })
