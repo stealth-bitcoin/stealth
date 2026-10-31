@@ -182,6 +182,11 @@ pub struct Stats {
     /// not serve; their counts cover only the pasted outputs.
     #[serde(default)]
     pub addresses_without_history: usize,
+    /// Wallet transactions left out because Core reports them as conflicted:
+    /// each conflicts with another transaction, so it is not part of the
+    /// wallet's history.
+    #[serde(default)]
+    pub conflicted_txids: Vec<Txid>,
 }
 
 /// Summary of the scan results.
@@ -237,6 +242,7 @@ mod summary_tests {
             addresses_seen: 0,
             utxos_current: 0,
             addresses_without_history: 0,
+            conflicted_txids: Vec::new(),
         }
     }
 
@@ -252,6 +258,21 @@ mod summary_tests {
         let report = Report::new(stats(7), Vec::new(), Vec::new());
         assert!(report.summary.clean);
         assert!(!report.summary.analyzed_nothing);
+    }
+
+    #[test]
+    fn conflicted_txids_go_out_as_hex_and_may_be_absent() {
+        let txid = "515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb";
+        let mut with = stats(2);
+        with.conflicted_txids = vec![txid.parse().unwrap()];
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["conflicted_txids"], serde_json::json!([txid]));
+
+        let older: Stats = serde_json::from_value(serde_json::json!({
+            "transactions_analyzed": 2, "addresses_seen": 0, "utxos_current": 0,
+        }))
+        .unwrap();
+        assert!(older.conflicted_txids.is_empty());
     }
 
     #[test]

@@ -15,6 +15,7 @@ fn empty_history() -> WalletHistory {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
         ranged_addresses: HashSet::new(),
+        conflicted_txids: Default::default(),
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, OutPoint, Txid};
@@ -258,6 +258,10 @@ pub struct WalletHistory {
     /// The subset of `derived_addresses` that came from ranged descriptors.
     #[serde(default, with = "serde_addr_set")]
     pub ranged_addresses: HashSet<Address<NetworkUnchecked>>,
+    /// Wallet transactions Core reports as conflicted (negative confirmations):
+    /// they conflict with another transaction, so they are left out above.
+    #[serde(default)]
+    pub conflicted_txids: BTreeSet<Txid>,
 }
 
 /// A participant (input or output) in a transaction, enriched with

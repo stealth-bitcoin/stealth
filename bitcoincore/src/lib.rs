@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -460,8 +460,9 @@ impl BitcoinCoreRpc {
     }
 
     fn load_history_for_wallet(&self, wallet_name: &str) -> Result<WalletHistory, AnalysisError> {
-        let wallet_txs = self.list_transactions(wallet_name)?;
-        let utxos = self.list_unspent(wallet_name)?;
+        let (wallet_txs, mut conflicted_txids) = self.list_transactions(wallet_name)?;
+        let (utxos, conflicted_utxos) = self.list_unspent(wallet_name)?;
+        conflicted_txids.extend(conflicted_utxos);
         let mut txids = wallet_txs
             .iter()
             .map(|entry| entry.txid)
@@ -507,20 +508,37 @@ impl BitcoinCoreRpc {
             internal_addresses: HashSet::new(),
             derived_addresses: HashSet::new(),
             ranged_addresses: HashSet::new(),
+            conflicted_txids,
         })
     }
 
-    fn list_transactions(&self, wallet_name: &str) -> Result<Vec<WalletTxEntry>, AnalysisError> {
+    /// The wallet's entries except those Core reports as conflicted, and those txids.
+    fn list_transactions(
+        &self,
+        wallet_name: &str,
+    ) -> Result<(Vec<WalletTxEntry>, BTreeSet<Txid>), AnalysisError> {
         // A block landing mid-pagination shifts the skip windows; refetch once.
         let tip = self.block_count()?;
         let mut entries = self.fetch_transaction_pages(wallet_name)?;
         if self.block_count()? != tip {
             entries = self.fetch_transaction_pages(wallet_name)?;
         }
-        entries
-            .into_iter()
-            .map(Self::convert_list_transaction_entry)
-            .collect()
+        Self::convert_list_transactions(entries)
+    }
+
+    fn convert_list_transactions(
+        entries: Vec<ListTransactionEntry>,
+    ) -> Result<(Vec<WalletTxEntry>, BTreeSet<Txid>), AnalysisError> {
+        let mut kept = Vec::new();
+        let mut conflicted = BTreeSet::new();
+        for entry in entries {
+            if is_conflicted(entry.confirmations) {
+                conflicted.insert(parse_txid("listtransactions", &entry.txid)?);
+            } else {
+                kept.push(Self::convert_list_transaction_entry(entry)?);
+            }
+        }
+        Ok((kept, conflicted))
     }
 
     fn convert_list_transaction_entry(
@@ -551,7 +569,7 @@ impl BitcoinCoreRpc {
             amount: node_amount("listtransactions", btc, || {
                 format!("entry of tx {}", entry.txid)
             })?,
-            confirmations: entry.confirmations.unwrap_or_default(),
+            confirmations: depth(entry.confirmations),
             blockheight: entry.blockheight.unwrap_or_default(),
         })
     }
@@ -586,16 +604,31 @@ impl BitcoinCoreRpc {
         self.call::<u64>(None, "getblockcount", Vec::new())
     }
 
-    fn list_unspent(&self, wallet_name: &str) -> Result<Vec<Utxo>, AnalysisError> {
+    fn list_unspent(
+        &self,
+        wallet_name: &str,
+    ) -> Result<(Vec<Utxo>, BTreeSet<Txid>), AnalysisError> {
         let utxos = self.call::<Vec<ListUnspentEntry>>(
             Some(wallet_name),
             "listunspent",
             vec![json!(0), json!(9_999_999)],
         )?;
-        utxos
-            .into_iter()
-            .map(Self::convert_list_unspent_entry)
-            .collect()
+        Self::convert_list_unspent(utxos)
+    }
+
+    fn convert_list_unspent(
+        utxos: Vec<ListUnspentEntry>,
+    ) -> Result<(Vec<Utxo>, BTreeSet<Txid>), AnalysisError> {
+        let mut kept = Vec::new();
+        let mut conflicted = BTreeSet::new();
+        for utxo in utxos {
+            if is_conflicted(utxo.confirmations) {
+                conflicted.insert(parse_txid("listunspent", &utxo.txid)?);
+            } else {
+                kept.push(Self::convert_list_unspent_entry(utxo)?);
+            }
+        }
+        Ok((kept, conflicted))
     }
 
     fn convert_list_unspent_entry(utxo: ListUnspentEntry) -> Result<Utxo, AnalysisError> {
@@ -614,7 +647,7 @@ impl BitcoinCoreRpc {
                 .unwrap_or(DescriptorType::Unknown),
             address,
             amount: node_amount("listunspent", utxo.amount, place)?,
-            confirmations: utxo.confirmations.unwrap_or_default(),
+            confirmations: depth(utxo.confirmations),
         })
     }
 
@@ -721,7 +754,8 @@ impl BitcoinCoreRpc {
             version: tx.version.unwrap_or(2),
             locktime: tx.locktime.unwrap_or_default(),
             vsize: tx.vsize.unwrap_or_default(),
-            confirmations: tx.confirmations.unwrap_or_default(),
+            // Counted on the active chain, so never negative; if it were, read it as unconfirmed.
+            confirmations: depth(tx.confirmations),
         })
     }
 
@@ -1204,6 +1238,7 @@ impl BlockchainGateway for BitcoinCoreRpc {
         for wallet_name in wallet_names {
             txids.extend(
                 self.list_transactions(wallet_name)?
+                    .0
                     .into_iter()
                     .map(|entry| entry.txid),
             );
@@ -1347,6 +1382,17 @@ fn parse_txid(method: &str, s: &str) -> Result<Txid, AnalysisError> {
     s.parse::<Txid>().map_err(|e| {
         AnalysisError::EnvironmentUnavailable(format!("{method}: invalid txid '{s}': {e}"))
     })
+}
+
+/// Core reports a conflicted wallet tx, one that conflicts with another
+/// transaction, at negative depth.
+fn is_conflicted(confirmations: Option<i64>) -> bool {
+    confirmations.is_some_and(|count| count < 0)
+}
+
+/// The depth of a kept tx; an absent count is unconfirmed.
+fn depth(confirmations: Option<i64>) -> u32 {
+    confirmations.map_or(0, |count| u32::try_from(count.max(0)).unwrap_or(u32::MAX))
 }
 
 // Accepts the same names as `network_datadir_subdir`, plus mainnet's.
@@ -1717,7 +1763,7 @@ struct ListTransactionEntry {
     address: Option<String>,
     category: Option<String>,
     amount: f64,
-    confirmations: Option<u32>,
+    confirmations: Option<i64>,
     blockheight: Option<u32>,
 }
 
@@ -1727,7 +1773,7 @@ struct ListUnspentEntry {
     vout: u32,
     address: Option<String>,
     amount: f64,
-    confirmations: Option<u32>,
+    confirmations: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1738,7 +1784,7 @@ struct RawTransaction {
     version: Option<i32>,
     locktime: Option<u32>,
     vsize: Option<u32>,
-    confirmations: Option<u32>,
+    confirmations: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2294,6 +2340,100 @@ mod tests {
             "vout": [{ "value": value, "n": 0, "scriptPubKey": { "address": address } }],
         }))
         .unwrap()
+    }
+
+    // A page as Core prints it after a fee bump whose replacement was mined.
+    const ORIGINAL: &str = "515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb";
+    const REPLACEMENT: &str = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
+    const IN_MEMPOOL: &str = "f5561a23e573423aeb6d9200aaf74db3ac73c83fae52f5261520d28506dadcd9";
+
+    #[test]
+    fn a_conflicted_listtransactions_entry_is_left_out_and_named() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            {
+                "address": ADDR, "amount": 0.01, "category": "receive", "confirmations": 2,
+                "blockheight": 111, "txid": TXID, "vout": 0, "walletconflicts": [],
+            },
+            {
+                "address": ADDR, "amount": -0.001, "bip125-replaceable": "yes",
+                "category": "send", "confirmations": -1, "fee": -0.0000141,
+                "replaced_by_txid": REPLACEMENT, "trusted": false, "txid": ORIGINAL,
+                "vout": 0, "walletconflicts": [REPLACEMENT],
+            },
+            {
+                "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 1,
+                "blockheight": 112, "fee": -0.0000282, "txid": REPLACEMENT, "vout": 0,
+                "walletconflicts": [ORIGINAL],
+            },
+            {
+                "address": ADDR, "amount": 0.002, "category": "receive", "confirmations": 0,
+                "trusted": false, "txid": IN_MEMPOOL, "vout": 0, "walletconflicts": [],
+            },
+        ]))
+        .expect("a negative confirmation count must parse");
+        let (kept, conflicted) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert_eq!(
+            conflicted.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+        let kept: Vec<_> = kept
+            .iter()
+            .map(|e| (e.txid.to_string(), e.confirmations, e.blockheight))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                (TXID.to_owned(), 2, 111),
+                (REPLACEMENT.to_owned(), 1, 112),
+                (IN_MEMPOOL.to_owned(), 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_conflicted_listunspent_entry_is_left_out_and_named() {
+        let utxos: Vec<ListUnspentEntry> = serde_json::from_value(json!([
+            {
+                "txid": ORIGINAL, "vout": 1, "address": ADDR, "amount": 0.0089859,
+                "confirmations": -1, "spendable": true, "solvable": true, "safe": false,
+            },
+            {
+                "txid": TXID, "vout": 0, "address": ADDR, "amount": 0.01,
+                "confirmations": 2, "spendable": true, "solvable": true, "safe": true,
+            },
+        ]))
+        .expect("a negative confirmation count must parse");
+        let (kept, conflicted) = BitcoinCoreRpc::convert_list_unspent(utxos).unwrap();
+        assert_eq!(
+            conflicted.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+        let kept: Vec<_> = kept
+            .iter()
+            .map(|u| (u.txid.to_string(), u.confirmations))
+            .collect();
+        assert_eq!(kept, vec![(TXID.to_owned(), 2)]);
+    }
+
+    #[test]
+    fn a_negative_getrawtransaction_depth_parses_as_unconfirmed() {
+        let raw = |confirmations: i64| -> RawTransaction {
+            serde_json::from_value(json!({
+                "txid": ORIGINAL, "hash": ORIGINAL, "version": 2, "size": 222,
+                "vsize": 141, "weight": 561, "locktime": 0,
+                "vin": [{ "txid": TXID, "vout": 0, "sequence": 4294967293_u32 }],
+                "vout": [{
+                    "value": 0.001, "n": 0,
+                    "scriptPubKey": { "address": ADDR, "type": "witness_v0_keyhash" },
+                }],
+                "confirmations": confirmations,
+            }))
+            .expect("a negative confirmation count must parse")
+        };
+        for (reported, read) in [(-1, 0), (0, 0), (7, 7)] {
+            let tx = BitcoinCoreRpc::convert_raw_transaction(raw(reported)).unwrap();
+            assert_eq!(tx.confirmations, read, "{reported}");
+        }
     }
 
     #[test]

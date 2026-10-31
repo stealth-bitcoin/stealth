@@ -75,6 +75,7 @@ impl TxGraph {
             addresses_seen: self.addr_map.len(),
             utxos_current: self.utxos.len(),
             addresses_without_history: 0,
+            conflicted_txids: self.conflicted_txids.iter().copied().collect(),
         };
 
         Report::new(stats, findings, warnings)

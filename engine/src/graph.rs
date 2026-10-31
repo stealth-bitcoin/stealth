@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, Txid};
@@ -46,6 +46,9 @@ pub struct TxGraph {
     /// The node's answer on whether an output is unspent, for own outputs
     /// whose status the history does not settle. Filled by the engine.
     pub chain_unspent: HashMap<(Txid, u32), bool>,
+    /// Wallet txs the gateway left out because Core reports them as
+    /// conflicted; the report names them.
+    pub conflicted_txids: BTreeSet<Txid>,
 }
 
 /// A UTXO entry from `listunspent`.
@@ -248,6 +251,7 @@ impl TxGraph {
             ranged_addrs: history.ranged_addresses,
             partial_scan: false,
             chain_unspent: HashMap::new(),
+            conflicted_txids: history.conflicted_txids,
         }
     }
 }

@@ -111,6 +111,7 @@ fn spend_history(
         internal_addresses: HashSet::new(),
         derived_addresses: ours.iter().cloned().collect(),
         ranged_addresses: ours.iter().cloned().collect(),
+        conflicted_txids: Default::default(),
     };
     (history, spend)
 }
@@ -259,6 +260,7 @@ fn dust_correction(a: &Address<NetworkUnchecked>, outputs: Vec<TxOutput>) -> Str
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([a.clone()]),
         ranged_addresses: HashSet::from([a.clone()]),
+        conflicted_txids: Default::default(),
     };
     TxGraph::from_wallet_history(history)
         .detect_all(&DetectorThresholds::default(), None, None)

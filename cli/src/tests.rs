@@ -232,6 +232,7 @@ mod ordering {
             addresses_seen: 3,
             utxos_current: 1,
             addresses_without_history: 0,
+            conflicted_txids: Vec::new(),
         };
         stealth_engine::Report::new(stats, findings, warnings)
     }
@@ -266,6 +267,7 @@ mod ordering {
             addresses_seen: 1,
             utxos_current: 0,
             addresses_without_history: 0,
+            conflicted_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert_eq!(
@@ -293,6 +295,7 @@ mod ordering {
             addresses_seen: 2,
             utxos_current: 2,
             addresses_without_history: 2,
+            conflicted_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(
             stats,
@@ -316,6 +319,7 @@ mod ordering {
             addresses_seen: 1,
             utxos_current: 2,
             addresses_without_history: 1,
+            conflicted_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert!(text.contains("No privacy issues found."), "{text}");

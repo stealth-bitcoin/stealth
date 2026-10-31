@@ -125,6 +125,7 @@ fn spend_finding(payees: Vec<(Address<NetworkUnchecked>, u64)>, internal_change:
         },
         derived_addresses: HashSet::new(),
         ranged_addresses: HashSet::new(),
+        conflicted_txids: Default::default(),
     };
 
     let mut findings = Vec::new();
@@ -338,6 +339,7 @@ fn history_for(
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
         ranged_addresses: HashSet::new(),
+        conflicted_txids: Default::default(),
     }
 }
 
