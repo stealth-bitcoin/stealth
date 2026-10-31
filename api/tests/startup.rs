@@ -85,14 +85,6 @@ impl Drop for RunningApi {
     }
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 async fn preflight_allow_origin(port: u16, origin: &str) -> Option<String> {
     let response = reqwest::Client::new()
         .request(
@@ -112,36 +104,14 @@ async fn preflight_allow_origin(port: u16, origin: &str) -> Option<String> {
 
 #[tokio::test]
 async fn configured_origins_reach_the_running_server() {
-    let port = free_port();
-    let _api = RunningApi(
-        Command::new(env!("CARGO_BIN_EXE_stealth-api"))
-            .args([
-                "--allow-origin",
-                "https://flag.example",
-                "--allow-origin=https://equals.example",
-            ])
-            .env("STEALTH_API_ALLOW_ORIGINS", "https://env.example")
-            .env("STEALTH_API_BIND", format!("127.0.0.1:{port}"))
-            .env("STEALTH_RPC_URL", "http://127.0.0.1:1")
-            .env("STEALTH_RPC_USER", "u")
-            .env("STEALTH_RPC_PASS", "p")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
+    let (_api, port, _) = spawn_api_on_any_port(
+        &[
+            "--allow-origin",
+            "https://flag.example",
+            "--allow-origin=https://equals.example",
+        ],
+        &[("STEALTH_API_ALLOW_ORIGINS", "https://env.example")],
     );
-    let mut ready = false;
-    for _ in 0..100 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            ready = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert!(ready, "stealth-api did not start listening on port {port}");
 
     for origin in [
         "https://flag.example",
