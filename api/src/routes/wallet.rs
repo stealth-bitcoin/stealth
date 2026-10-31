@@ -572,6 +572,20 @@ mod tests {
                 .unwrap()
         }
 
+        async fn get_job(app: &Router, id: &str) -> Value {
+            let polled = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/wallet/scans/{id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            read_json(polled).await
+        }
+
         /// Starts a scan job and polls it until it ends.
         async fn finished_job(app: &Router, body: Value) -> Value {
             let created = post(app, "/api/wallet/scans", body).await;
@@ -620,6 +634,37 @@ mod tests {
             );
             let error = job["error"].as_str().unwrap();
             assert!(error.contains("6000 transactions"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn deleting_a_job_that_stopped_at_the_limit_answers_failed() {
+            let (app, _) = app();
+            let created = post(&app, "/api/wallet/scans", scan(json!({}))).await;
+            let id = read_json(created).await["scan_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let job = loop {
+                let job = get_job(&app, &id).await;
+                if job["state"] == "failed" {
+                    break job;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
+            assert!(job["limit_exceeded"].is_object(), "{job}");
+            let deleted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/wallet/scans/{id}"))
+                        .method("DELETE")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(deleted.status(), StatusCode::OK);
+            assert_eq!(read_json(deleted).await["state"], "failed");
         }
 
         #[tokio::test]
