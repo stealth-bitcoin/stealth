@@ -139,7 +139,12 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
     if authority.contains(['/', '?', '#']) {
         return Err(invalid("an origin has no path, query or trailing slash"));
     }
-    if authority.contains(['@', '*', '<', '>', '^', '|'])
+    if authority.contains('*') {
+        return Err(invalid(
+            "wildcards are not supported; list each origin explicitly",
+        ));
+    }
+    if authority.contains(['@', '<', '>', '^', '|'])
         || authority
             .chars()
             .any(|c| c.is_whitespace() || c.is_control())

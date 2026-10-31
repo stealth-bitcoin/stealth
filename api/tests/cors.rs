@@ -377,3 +377,17 @@ fn malformed_authority_gets_a_specific_reason() {
         );
     }
 }
+
+#[test]
+fn wildcard_origins_are_refused_as_unsupported() {
+    for raw in ["https://*.example.org", "http://*", "http://localhost:*"] {
+        let result = stealth_api::AllowedOrigins::localhost().with_extra([raw]);
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("{raw:?} was accepted"));
+        assert!(
+            error.to_string().contains("wildcards are not supported"),
+            "error for {raw:?}: {error}"
+        );
+    }
+}

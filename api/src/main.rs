@@ -22,8 +22,8 @@ Environment:
   STEALTH_API_BIND           Listen address (default 127.0.0.1:20899)
   STEALTH_API_ALLOW_ORIGINS  Extra web origins, comma-separated
   STEALTH_RPC_URL            bitcoind RPC endpoint (default: auto-detected)
-  STEALTH_RPC_USER           RPC username
-  STEALTH_RPC_PASS           RPC password
+  STEALTH_RPC_USER           RPC username (used only when both are set)
+  STEALTH_RPC_PASS           RPC password (used only when both are set)
   STEALTH_RPC_COOKIE         Path to the RPC .cookie file
   RUST_LOG                   Log filter (default info)
   HOME                       Used to find the node's cookie under ~/.bitcoin

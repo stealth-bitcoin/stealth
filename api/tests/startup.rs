@@ -221,6 +221,7 @@ fn help_prints_usage_and_exits_successfully() {
             "STEALTH_RPC_PASS",
             "STEALTH_RPC_COOKIE",
             "RUST_LOG",
+            "used only when both are set",
             "HOME",
         ] {
             assert!(
