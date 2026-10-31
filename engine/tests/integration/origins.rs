@@ -489,42 +489,18 @@ fn detect_tainted_utxo_merge() {
     assert!(has_finding(&report, VulnerabilityType::TaintedUtxoMerge));
 }
 
-// Alice merges one wpkh coin and three taproot coins into `dest`, then the
-// scan sees only her wpkh descriptors, as a zpub scan would.
-fn merge_across_script_types_into(
-    node: &Node,
-    dest: impl Fn(&corepc_node::Client) -> Address,
-) -> stealth_engine::Report {
-    let da = node.client.new_address().unwrap();
-    mine(node, 110, &da);
-    let alice = node.create_wallet("alice").unwrap();
-    let taproot = (0..3)
-        .map(|_| alice.new_address_with_type(AddressType::Bech32m).unwrap())
-        .collect();
-    let mut inputs = fund_coins_at(node, &alice, vec![alice.new_address().unwrap()], 300_000);
-    inputs.extend(fund_coins_at(node, &alice, taproot, 300_000));
-    merge_into(node, &[&alice], &inputs, dest(&alice), 1_200_000);
-
-    let wpkh: Vec<String> = wallet_descriptors(&alice)
-        .into_iter()
-        .filter(|d| d.starts_with("wpkh("))
-        .collect();
-    assert_eq!(wpkh.len(), 2, "receive and change wpkh descriptors");
+fn scan_descriptors(node: &Node, descriptors: Vec<String>) -> stealth_engine::Report {
     let gateway = gateway_for(node);
     AnalysisEngine::new(&gateway, EngineSettings::default())
-        .analyze(ScanTarget::Descriptors(wpkh))
+        .analyze(ScanTarget::Descriptors(descriptors))
         .expect("descriptor scan failed")
 }
 
 #[test]
 fn ranged_scan_warns_when_a_consolidation_pays_our_change_address() {
     let node = node();
-    let report = merge_across_script_types_into(&node, |alice| {
-        let change: String = alice
-            .call("getrawchangeaddress", &[serde_json::json!("bech32")])
-            .unwrap();
-        change.parse::<Address<_>>().unwrap().assume_checked()
-    });
+    let (_alice, wpkh) = merge_across_script_types_into(&node, change_address);
+    let report = scan_descriptors(&node, wpkh);
     assert_consolidation_warning(&report, 1, 3, 0);
     let warning = report
         .warnings
@@ -541,6 +517,31 @@ fn ranged_scan_warns_when_a_consolidation_pays_our_change_address() {
 #[test]
 fn ranged_scan_is_silent_when_a_consolidation_pays_our_receive_address() {
     let node = node();
-    let report = merge_across_script_types_into(&node, |alice| alice.new_address().unwrap());
+    let (_alice, wpkh) =
+        merge_across_script_types_into(&node, |alice| alice.new_address().unwrap());
+    let report = scan_descriptors(&node, wpkh);
     assert_no_consolidation(&report);
+}
+
+// Carol consolidates three of her coins into one of her receive addresses.
+fn someone_consolidates_own_coins(node: &Node) -> (corepc_node::Client, Address) {
+    let carol = node.create_wallet("carol").unwrap();
+    let dest = carol.new_address().unwrap();
+    let inputs = fund_coins(node, &carol, 3, 300_000);
+    merge_into(node, &[&carol], &inputs, dest.clone(), 900_000);
+    (carol, dest)
+}
+
+#[test]
+fn a_coin_at_a_fixed_address_beside_a_ranged_descriptor_warns() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let (_carol, dest) = someone_consolidates_own_coins(&node);
+
+    // The ranged descriptors say nothing about the coin at `dest`.
+    let mut descriptors = wallet_descriptors(&alice);
+    descriptors.push(format!("addr({dest})"));
+    assert_consolidation_warning(&scan_descriptors(&node, descriptors), 0, 3, 0);
 }

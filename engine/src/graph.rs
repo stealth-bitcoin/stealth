@@ -35,10 +35,10 @@ pub struct TxGraph {
     /// that spends that output. Built once from `input_cache` so child
     /// lookups during detection are O(1) instead of O(N·M).
     pub spending_index: HashMap<(Txid, u32), Txid>,
-    /// True when no descriptor of the scan is ranged (a UTXO scan without
-    /// ranged ownership descriptors, or fixed scripts such as `addr()`), so
-    /// the scan knows only a few of the user's addresses.
-    pub partial_ownership: bool,
+    /// Addresses derived from ranged descriptors. A coin elsewhere sits where
+    /// the scan knows only fixed scripts, so it cannot vouch for whose the
+    /// coin's unrecognised inputs are.
+    pub ranged_addrs: HashSet<Address<NetworkUnchecked>>,
 }
 
 /// A UTXO entry from `listunspent`.
@@ -238,13 +238,14 @@ impl TxGraph {
             input_cache,
             output_cache,
             spending_index,
-            partial_ownership: false,
+            ranged_addrs: history.derived_addresses,
         }
     }
 
-    /// Mark whether the scan knows only some of the user's addresses.
-    pub fn with_partial_ownership(mut self, partial: bool) -> Self {
-        self.partial_ownership = partial;
+    /// Replace the addresses derived from ranged descriptors, which default
+    /// to every derived address (a Core wallet's descriptors are ranged).
+    pub fn with_ranged_addresses(mut self, ranged: HashSet<Address<NetworkUnchecked>>) -> Self {
+        self.ranged_addrs = ranged;
         self
     }
 }

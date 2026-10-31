@@ -383,8 +383,8 @@ const XPUB: &str = "tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7we1vwNCpn8tGbBcgfVYjXyhW
 const PUBKEY: &str = "03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd";
 const PUBKEY2: &str = "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
 
-fn ranged(descriptors: &[String]) -> bool {
-    crate::engine::has_ranged_descriptor(descriptors)
+fn ranged(descriptor: &str) -> bool {
+    crate::engine::is_ranged(descriptor)
 }
 
 #[test]
@@ -399,9 +399,8 @@ fn a_single_script_descriptor_is_not_ranged() {
         format!("wsh(multi(1,{PUBKEY},{PUBKEY2}))"),
         format!("wpkh({XPUB}/0/5)"),
     ] {
-        assert!(!ranged(std::slice::from_ref(&d)), "{d}");
+        assert!(!ranged(&d), "{d}");
     }
-    assert!(!ranged(&[]));
 }
 
 #[test]
@@ -411,12 +410,6 @@ fn a_wildcard_descriptor_is_ranged() {
         format!("wpkh({XPUB}/1/*')#qwer"),
         format!("wsh(multi(1,{XPUB}/0/*,{PUBKEY}))"),
     ] {
-        assert!(ranged(std::slice::from_ref(&d)), "{d}");
+        assert!(ranged(&d), "{d}");
     }
-}
-
-#[test]
-fn a_list_with_one_wildcard_descriptor_is_ranged() {
-    let list = [format!("addr({ADDR})"), format!("wpkh({XPUB}/0/*)")];
-    assert!(ranged(&list));
 }

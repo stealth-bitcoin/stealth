@@ -391,7 +391,7 @@ fn own_consolidation_pasted_alone(node: &Node) -> (corepc_node::Client, Vec<Utxo
 }
 
 #[test]
-fn utxo_scan_of_own_consolidation_change_warns() {
+fn utxo_scan_of_own_consolidation_on_a_receive_address_warns() {
     let node = node();
     let (_alice, utxos) = own_consolidation_pasted_alone(&node);
 
@@ -462,18 +462,13 @@ fn utxo_scan_with_address_only_ownership_descriptors_still_warns() {
     let addrs: Vec<Address> = (0..3).map(|_| alice.new_address().unwrap()).collect();
     let known = addrs[0].clone();
     let inputs = fund_coins_at(&node, &alice, addrs, 300_000);
-    merge_into(
-        &node,
-        &[&alice],
-        &inputs,
-        alice.new_address().unwrap(),
-        900_000,
-    );
+    let dest = alice.new_address().unwrap();
+    merge_into(&node, &[&alice], &inputs, dest.clone(), 900_000);
 
-    // One input address is named; the other two stay unknown to the scan.
+    // One input address and the coin's own are named; two inputs stay unknown.
     let gateway = gateway_for(&node);
     let settings = EngineSettings {
-        ownership_descriptors: vec![format!("addr({known})")],
+        ownership_descriptors: vec![format!("addr({known})"), format!("addr({dest})")],
         ..EngineSettings::default()
     };
     let engine = AnalysisEngine::new(&gateway, settings);
@@ -481,4 +476,52 @@ fn utxo_scan_with_address_only_ownership_descriptors_still_warns() {
         .analyze(ScanTarget::Utxos(utxo_inputs_for(&alice)))
         .expect("utxo scan failed");
     assert_consolidation_warning(&report, 1, 2, 0);
+}
+
+#[test]
+fn utxo_scan_with_ownership_descriptors_warns_on_a_merge_into_our_change() {
+    let node = node();
+    let (alice, wpkh) = merge_across_script_types_into(&node, change_address);
+
+    let gateway = gateway_for(&node);
+    let settings = EngineSettings {
+        ownership_descriptors: wpkh,
+        ..EngineSettings::default()
+    };
+    let report = AnalysisEngine::new(&gateway, settings)
+        .analyze(ScanTarget::Utxos(utxo_inputs_for(&alice)))
+        .expect("utxo scan failed");
+    assert_consolidation_warning(&report, 1, 3, 0);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.description.contains("your change address")));
+}
+
+#[test]
+fn utxo_scan_warns_on_a_coin_outside_the_ownership_descriptors() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let carol = node.create_wallet("carol").unwrap();
+    let inputs = fund_coins(&node, &carol, 3, 300_000);
+    merge_into(
+        &node,
+        &[&carol],
+        &inputs,
+        carol.new_address().unwrap(),
+        900_000,
+    );
+
+    // Alice's descriptors are given, but the pasted coin is carol's.
+    let gateway = gateway_for(&node);
+    let settings = EngineSettings {
+        ownership_descriptors: wallet_descriptors(&alice),
+        ..EngineSettings::default()
+    };
+    let report = AnalysisEngine::new(&gateway, settings)
+        .analyze(ScanTarget::Utxos(utxo_inputs_for(&carol)))
+        .expect("utxo scan failed");
+    assert_consolidation_warning(&report, 0, 3, 0);
 }

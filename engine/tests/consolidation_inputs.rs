@@ -101,9 +101,15 @@ fn sweep_of_addressless_prevouts() -> WalletHistory {
     }
 }
 
-fn scan(partial: bool) -> Report {
+// `ranged` says whether our coin's address came from a ranged descriptor.
+fn scan(ranged: bool) -> Report {
+    let addrs = if ranged {
+        HashSet::from([wpkh(1)])
+    } else {
+        HashSet::new()
+    };
     TxGraph::from_wallet_history(sweep_of_addressless_prevouts())
-        .with_partial_ownership(partial)
+        .with_ranged_addresses(addrs)
         .detect_all(&Default::default(), None, None)
 }
 
@@ -118,12 +124,12 @@ fn consolidation_count(report: &Report) -> usize {
 
 #[test]
 fn addressless_known_prevouts_are_not_unresolved_in_a_full_scan() {
-    assert_eq!(consolidation_count(&scan(false)), 0);
+    assert_eq!(consolidation_count(&scan(true)), 0);
 }
 
 #[test]
 fn addressless_known_prevouts_count_as_unrecognised() {
-    let report = scan(true);
+    let report = scan(false);
     assert_eq!(consolidation_count(&report), 1);
     let warning = report
         .warnings

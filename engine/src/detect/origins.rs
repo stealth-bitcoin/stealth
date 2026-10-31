@@ -80,7 +80,8 @@ impl TxGraph {
             } else {
                 // Only the user's wallet pays its own change chain, so it likely built this merge.
                 let on_change = self.addr_map.get(&utxo.address).is_some_and(|m| m.internal);
-                if !(self.partial_ownership || unresolved > 0 || on_change) {
+                let vouched = self.ranged_addrs.contains(&utxo.address);
+                if vouched && unresolved == 0 && !on_change {
                     continue;
                 }
                 let coin = format!(

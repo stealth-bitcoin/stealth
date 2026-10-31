@@ -312,3 +312,34 @@ pub fn has_warning(report: &stealth_engine::Report, vtype: VulnerabilityType) ->
         .iter()
         .any(|f| f.vulnerability_type == vtype)
 }
+
+pub fn change_address(wallet: &corepc_node::Client) -> Address {
+    let change: String = wallet
+        .call("getrawchangeaddress", &[serde_json::json!("bech32")])
+        .unwrap();
+    change.parse::<Address<_>>().unwrap().assume_checked()
+}
+
+// Alice merges one wpkh coin and three taproot coins into `dest`; returns her
+// wpkh descriptors, the view a zpub scan has.
+pub fn merge_across_script_types_into(
+    node: &Node,
+    dest: impl Fn(&corepc_node::Client) -> Address,
+) -> (corepc_node::Client, Vec<String>) {
+    let da = node.client.new_address().unwrap();
+    mine(node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let taproot = (0..3)
+        .map(|_| alice.new_address_with_type(AddressType::Bech32m).unwrap())
+        .collect();
+    let mut inputs = fund_coins_at(node, &alice, vec![alice.new_address().unwrap()], 300_000);
+    inputs.extend(fund_coins_at(node, &alice, taproot, 300_000));
+    merge_into(node, &[&alice], &inputs, dest(&alice), 1_200_000);
+
+    let wpkh: Vec<String> = wallet_descriptors(&alice)
+        .into_iter()
+        .filter(|d| d.starts_with("wpkh("))
+        .collect();
+    assert_eq!(wpkh.len(), 2, "receive and change wpkh descriptors");
+    (alice, wpkh)
+}
