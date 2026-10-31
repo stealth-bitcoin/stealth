@@ -91,9 +91,11 @@ serve the history, the scan completes on the pasted outputs alone and
 **Transactions left out:** some wallet transactions are left out of the
 analysis in any scan and listed in `stats`, as hex txids:
 `conflicted_txids` for those Core reports at negative confirmations (it, or a
-transaction it depends on, conflicts with another one), `replaced_txids` for
-those replaced by a transaction that is not confirmed yet (each an object with
-`txid` and `replaced_by`; the replacement itself is analyzed), and
+transaction it depends on, conflicts with another one), `mempool_conflicted_txids`
+for unconfirmed ones a transaction in the mempool conflicts with, such as the
+original of a fee bump or a payment double-spent by a raw transaction (each an
+object with `txid` and `conflicts_with`; the conflicting transaction is
+analyzed only when the wallet lists it and the scan keeps it), and
 `abandoned_txids` for those abandoned in the wallet. Any other wallet
 transaction the node cannot serve still fails the scan.
 
