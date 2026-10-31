@@ -2807,6 +2807,38 @@ mod tests {
     }
 
     #[test]
+    fn a_confirmed_output_the_node_cannot_find_still_fails_the_scan() {
+        // Only listunspent says the tx is confirmed.
+        let rpc = serve_node(|method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "getmempoolinfo" => json!({ "loaded": true, "size": 0 }),
+                "listtransactions" => json!([]),
+                "listunspent" => json!([{
+                    "txid": ORIGINAL, "vout": 0, "address": ADDR, "amount": 0.001,
+                    "confirmations": 3, "spendable": true, "solvable": true, "safe": true,
+                }]),
+                "getrawtransaction" => {
+                    let batch = json!([{ "id": 0, "result": null, "error": not_found() }]);
+                    return ("200 OK", batch.to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        });
+        let error = rpc
+            .load_history_for_wallet("bob")
+            .expect_err("a confirmed output the node cannot find is a real failure");
+        assert!(
+            matches!(error, AnalysisError::TransactionNotFound(_)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn a_confirmed_wallet_tx_the_node_cannot_find_still_fails_the_scan() {
         let error = node_failing_to_serve(3, not_found())
             .load_history_for_wallet("bob")
