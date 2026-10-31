@@ -368,3 +368,40 @@ pub fn assert_change_address_wording(warning: &stealth_engine::Finding) {
         "{correction}"
     );
 }
+
+/// Alice receives 1 BTC at one address, then pays bob 0.3 BTC from it with the
+/// change sent back to that same address. Returns the reused address.
+pub fn pay_with_change_back_to_input(node: &Node, alice: &corepc_node::Client) -> Address {
+    let da = node.client.new_address().unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let funded = alice.new_address().unwrap();
+    node.client
+        .send_to_address(&funded, Amount::ONE_BTC)
+        .unwrap();
+    mine(node, 1, &da);
+
+    let coin = alice.list_unspent().unwrap().0.remove(0);
+    let coin_sats = (coin.amount * 1e8).round() as u64;
+    let payment = Amount::from_sat(30_000_000);
+    let change = Amount::from_sat(coin_sats - 30_000_000 - 10_000);
+    let raw = alice
+        .create_raw_transaction(
+            &[Input {
+                txid: coin.txid.parse().unwrap(),
+                vout: coin.vout as u64,
+                sequence: None,
+            }],
+            &[
+                Output::new(bob.new_address().unwrap(), payment),
+                Output::new(funded.clone(), change),
+            ],
+        )
+        .unwrap();
+    let tx = raw.transaction().unwrap();
+    let signed = alice.sign_raw_transaction_with_wallet(&tx).unwrap();
+    alice
+        .send_raw_transaction(&signed.into_model().unwrap().tx)
+        .unwrap();
+    mine(node, 1, &da);
+    funded
+}

@@ -163,6 +163,8 @@ fn the_derivation_path_heuristic_counts_once_however_many_payments() {
         reasons(&finding),
         vec!["Change uses an internal (BIP-44 /1/*) derivation path"]
     );
+    let correction = finding.correction.as_deref().unwrap_or_default();
+    assert!(correction.starts_with("Use PayJoin"), "{correction}");
 }
 
 #[test]
@@ -248,4 +250,236 @@ fn every_counted_heuristic_keeps_a_reason_line_under_the_cap() {
         "{} vs {reasons:?}",
         finding.description
     );
+}
+
+/// A spent coin: its address (`None` for a script with no address) and whether its parent is loaded.
+struct Coin {
+    address: Option<Address<NetworkUnchecked>>,
+    sats: u64,
+    loaded: bool,
+}
+
+fn coin(address: &Address<NetworkUnchecked>, sats: u64) -> Coin {
+    Coin {
+        address: Some(address.clone()),
+        sats,
+        loaded: true,
+    }
+}
+
+fn op_return(n: u32) -> TxOutput {
+    TxOutput {
+        n,
+        address: None,
+        value: Amount::from_sat(0),
+        script_type: DescriptorType::Unknown,
+    }
+}
+
+/// Change findings for one spend of `coins` to `vout`, scanned by a wallet owning `ours`.
+fn findings_for(
+    coins: Vec<Coin>,
+    vout: Vec<TxOutput>,
+    ours: &[&Address<NetworkUnchecked>],
+) -> Vec<Finding> {
+    let spend = txid(100);
+    let mut wallet_txs = Vec::new();
+    let mut transactions = HashMap::new();
+    let mut vin = Vec::new();
+    let mut spends_ours = false;
+    for (i, coin) in coins.iter().enumerate() {
+        let fund = txid(i as u32 + 1);
+        vin.push(TxInputRef {
+            previous_txid: fund,
+            previous_vout: 0,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        });
+        let funded = TxOutput {
+            n: 0,
+            address: coin.address.clone(),
+            value: Amount::from_sat(coin.sats),
+            script_type: DescriptorType::P2wpkh,
+        };
+        if coin.loaded {
+            transactions.insert(fund, tx(fund, vec![], vec![funded]));
+        }
+        if let Some(addr) = coin.address.as_ref().filter(|a| ours.contains(a)) {
+            wallet_txs.push(entry(fund, Some(addr), WalletTxCategory::Receive));
+            spends_ours = true;
+        }
+    }
+    if spends_ours {
+        wallet_txs.push(entry(spend, None, WalletTxCategory::Send));
+    }
+    for o in &vout {
+        if let Some(addr) = o.address.as_ref().filter(|a| ours.contains(a)) {
+            wallet_txs.push(entry(spend, Some(addr), WalletTxCategory::Receive));
+        }
+    }
+    transactions.insert(spend, tx(spend, vin, vout));
+    let history = WalletHistory {
+        wallet_txs,
+        utxos: vec![],
+        transactions,
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::new(),
+        ranged_addresses: HashSet::new(),
+    };
+    let mut findings = Vec::new();
+    TxGraph::from_wallet_history(history).detect_change_detection(&mut findings);
+    findings
+}
+
+fn back_to_input(n: u32, sats: u64) -> String {
+    format!("Change went back to an input address (output {n}, {sats} sats)")
+}
+
+#[test]
+fn change_back_to_the_input_address_is_named_as_the_change() {
+    let funded = wpkh(1);
+    let findings = findings_for(
+        vec![coin(&funded, 50_000)],
+        vec![
+            out(0, &wpkh(101), 46_543),
+            out(1, &wpkh(102), 1_234),
+            out(2, &funded, 2_107),
+        ],
+        &[&funded],
+    );
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(reasons(&findings[0]), vec![back_to_input(2, 2_107)]);
+    assert!(
+        findings[0]
+            .description
+            .ends_with("(1 heuristic(s) matched)"),
+        "{}",
+        findings[0].description
+    );
+    let correction = findings[0].correction.as_deref().unwrap_or_default();
+    assert!(
+        correction.starts_with("Send change to a fresh change address"),
+        "{correction}"
+    );
+}
+
+#[test]
+fn change_back_to_an_input_address_wins_over_a_heuristic_pointing_elsewhere() {
+    let funded = wpkh(1);
+    let own_other = wpkh(3);
+    let findings = findings_for(
+        vec![coin(&funded, 600_000)],
+        vec![
+            out(0, &wpkh(101), 100_000),
+            out(1, &own_other, 412_345),
+            out(2, &funded, 2_107),
+        ],
+        &[&funded, &own_other],
+    );
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(
+        reasons(&findings[0]),
+        vec![
+            back_to_input(2, 2_107),
+            "Round payment (100000 sats) vs non-round change (2107 sats)".to_string(),
+        ]
+    );
+    assert!(
+        findings[0]
+            .description
+            .ends_with("(2 heuristic(s) matched)"),
+        "{}",
+        findings[0].description
+    );
+}
+
+#[test]
+fn two_outputs_back_to_input_addresses_count_as_one_heuristic() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let findings = findings_for(
+        vec![coin(&a, 30_000), coin(&b, 30_000)],
+        vec![
+            out(0, &wpkh(101), 40_001),
+            out(1, &a, 7_777),
+            out(2, &b, 8_888),
+        ],
+        &[&a, &b],
+    );
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(
+        reasons(&findings[0]),
+        vec![back_to_input(1, 7_777), back_to_input(2, 8_888)]
+    );
+    assert!(
+        findings[0]
+            .description
+            .ends_with("(1 heuristic(s) matched)"),
+        "{}",
+        findings[0].description
+    );
+}
+
+#[test]
+fn a_self_transfer_back_to_the_input_addresses_claims_no_change() {
+    let (a, b) = (wpkh(1), wpkh(2));
+    let all_back = findings_for(
+        vec![coin(&a, 30_000), coin(&b, 30_000)],
+        vec![out(0, &a, 20_000), out(1, &b, 39_000)],
+        &[&a, &b],
+    );
+    assert!(all_back.is_empty(), "{all_back:?}");
+
+    let own_fresh = wpkh(3);
+    let to_own = findings_for(
+        vec![coin(&a, 30_000)],
+        vec![out(0, &a, 2_107), out(1, &own_fresh, 27_000)],
+        &[&a, &own_fresh],
+    );
+    assert!(to_own.is_empty(), "{to_own:?}");
+}
+
+#[test]
+fn an_input_whose_parent_is_not_loaded_matches_no_output() {
+    let (known, unknown) = (wpkh(1), wpkh(2));
+    let mut missing = coin(&unknown, 30_000);
+    missing.loaded = false;
+    let findings = findings_for(
+        vec![coin(&known, 30_000), missing],
+        vec![out(0, &wpkh(101), 46_543), out(1, &unknown, 12_345)],
+        &[&known, &unknown],
+    );
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn outputs_and_inputs_without_an_address_never_match() {
+    let funded = wpkh(1);
+    let findings = findings_for(
+        vec![
+            coin(&funded, 30_000),
+            Coin {
+                address: None,
+                sats: 10_000,
+                loaded: true,
+            },
+        ],
+        vec![
+            out(0, &wpkh(101), 26_543),
+            op_return(1),
+            out(2, &wpkh(2), 12_345),
+        ],
+        &[&funded, &wpkh(2)],
+    );
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn the_receiver_gets_no_finding_for_the_senders_change_back_to_its_input() {
+    let (sender, user) = (wpkh(1), wpkh(2));
+    let findings = findings_for(
+        vec![coin(&sender, 60_000)],
+        vec![out(0, &user, 46_543), out(1, &sender, 12_345)],
+        &[&user],
+    );
+    assert!(findings.is_empty(), "{findings:?}");
 }

@@ -29,6 +29,33 @@ fn detect_change_detection() {
     assert!(has_finding(&report, VulnerabilityType::ChangeDetection));
 }
 
+#[test]
+fn change_back_to_the_input_address_is_the_named_change() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    pay_with_change_back_to_input(&node, &alice);
+
+    let report = scan_wallet(&gateway_for(&node), "alice");
+    let change: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.vulnerability_type == VulnerabilityType::ChangeDetection)
+        .collect();
+    assert_eq!(change.len(), 1, "{change:?}");
+    let reasons = change[0].details.as_ref().unwrap()["reasons"].to_string();
+    assert!(
+        reasons.contains("Change went back to an input address (output 1, 69990000 sats)"),
+        "{reasons}"
+    );
+    let correction = change[0].correction.as_deref().unwrap();
+    assert!(
+        correction.starts_with("Send change to a fresh change address"),
+        "{correction}"
+    );
+}
+
 // ─── 17. Toxic Change Detection ────────────────────────────────────────────
 
 #[test]

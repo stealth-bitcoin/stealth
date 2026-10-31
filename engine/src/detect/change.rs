@@ -50,7 +50,7 @@ impl TxGraph {
                 continue;
             }
 
-            let our_outs: Vec<_> = outputs
+            let mut our_outs: Vec<_> = outputs
                 .iter()
                 .filter(|o| self.is_ours(&o.address))
                 .collect();
@@ -75,6 +75,26 @@ impl TxGraph {
                     problems.push((heuristic, reason));
                 }
             };
+            // Change back to an input address is certain, so it is the only change judged.
+            let back_to_input: Vec<_> = our_outs
+                .iter()
+                .copied()
+                .filter(|o| our_in.iter().any(|ia| ia.address == o.address))
+                .collect();
+            for change in &back_to_input {
+                note(
+                    "input_address",
+                    format!(
+                        "Change went back to an input address (output {}, {} sats)",
+                        change.index,
+                        change.value.to_sat()
+                    ),
+                );
+            }
+            let change_back = !back_to_input.is_empty();
+            if change_back {
+                our_outs = back_to_input;
+            }
             for change in &our_outs {
                 let ch_sats = change.value.to_sat();
                 let ch_round = ch_sats % 100_000 == 0 || ch_sats % 1_000_000 == 0;
@@ -129,11 +149,16 @@ impl TxGraph {
                         "txid": txid,
                         "reasons": problems,
                     })),
-                    correction: Some(
-                        "Use PayJoin (BIP-78) so the receiver also contributes an input. \
-                         Avoid sending round amounts so the change amount is not the obvious leftover."
-                            .into(),
-                    ),
+                    correction: Some(format!(
+                        "{}Use PayJoin (BIP-78) so the receiver also contributes an input. \
+                         Avoid sending round amounts so the change amount is not the obvious leftover.",
+                        if change_back {
+                            "Send change to a fresh change address, never back to the address \
+                             you spent from; wallets do this by default. "
+                        } else {
+                            ""
+                        }
+                    )),
                 });
             }
         }
