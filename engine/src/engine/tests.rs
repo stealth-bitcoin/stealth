@@ -78,7 +78,7 @@ fn chain_history(payments: u32, still_unspent: u32) -> WalletHistory {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([addr()]),
         ranged_addresses: HashSet::new(),
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     }
 }
 
@@ -631,7 +631,7 @@ fn dust_whose_spend_is_in_the_history_needs_no_node_call() {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([addr()]),
         ranged_addresses: HashSet::new(),
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     };
     let mut gateway = FakeGateway::new(Ok(history));
     let report = dust_scan(&mut gateway);
@@ -690,7 +690,7 @@ fn dust_descriptor_scan(
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([addr()]),
         ranged_addresses: HashSet::new(),
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     });
     AnalysisEngine::new(&*gateway, EngineSettings::default())
         .analyze(ScanTarget::Descriptor(format!("addr({ADDR})")))
@@ -815,7 +815,7 @@ fn pasted_dust_with_a_confirmed_spend_in_the_history_is_spent_without_asking() {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([addr()]),
         ranged_addresses: HashSet::new(),
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     };
     let mut gateway = FakeGateway::new(Ok(history));
     gateway.unspent = Err("node unreachable".into());
@@ -857,7 +857,7 @@ fn unconfirmed_dust_listed_by_the_address_history_is_unspent_without_asking() {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([addr()]),
         ranged_addresses: HashSet::new(),
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     };
     let mut gateway = FakeGateway::new(Ok(history));
     gateway.transactions.insert(txid(DUST_PARENT), parent);
@@ -950,7 +950,7 @@ fn a_failed_creating_tx_lookup_still_reports_present_dust_unspent() {
 }
 
 fn with_conflicted(mut history: WalletHistory, conflicted: &[u32]) -> WalletHistory {
-    history.conflicted_txids = conflicted.iter().map(|&n| txid(n)).collect();
+    history.left_out.conflicted = conflicted.iter().map(|&n| txid(n)).collect();
     history
 }
 
@@ -991,4 +991,33 @@ fn conflicted_txids_come_out_in_the_order_they_are_printed() {
         .map(Txid::to_string)
         .collect();
     assert_eq!(printed, [txid(3).to_string(), txid(0x200).to_string()]);
+}
+
+#[test]
+fn replaced_and_abandoned_txs_reach_the_report_in_printed_order() {
+    let mut history = chain_history(2, 1);
+    history.left_out.replaced = [(txid(0x200), txid(50)), (txid(3), txid(51))].into();
+    history.left_out.abandoned = [txid(0x300), txid(4)].into();
+    let gateway = FakeGateway::new(Ok(history));
+    let report = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Descriptor(format!("addr({ADDR})")))
+        .expect("descriptor scan");
+    let replaced: Vec<(Txid, Txid)> = report
+        .stats
+        .replaced_txids
+        .iter()
+        .map(|r| (r.txid, r.replaced_by))
+        .collect();
+    assert_eq!(replaced, [(txid(3), txid(51)), (txid(0x200), txid(50))]);
+    assert_eq!(report.stats.abandoned_txids, [txid(4), txid(0x300)]);
+}
+
+#[test]
+fn a_utxo_scan_names_the_replaced_and_abandoned_txs_of_the_address_history() {
+    let mut history = chain_history(12, 1);
+    history.left_out.replaced = [(txid(40), txid(41))].into();
+    history.left_out.abandoned = [txid(42)].into();
+    let report = scan(&FakeGateway::new(Ok(history)));
+    assert_eq!(report.stats.replaced_txids.len(), 1);
+    assert_eq!(report.stats.abandoned_txids, [txid(42)]);
 }

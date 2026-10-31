@@ -107,7 +107,7 @@ fn sweep_of_addressless_prevouts(ranged: bool, internal: bool) -> WalletHistory 
         } else {
             HashSet::new()
         },
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     }
 }
 

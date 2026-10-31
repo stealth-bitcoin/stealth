@@ -71,8 +71,17 @@ impl TxGraph {
         }
 
         // In the order they are printed, which reverses the bytes a Txid sorts by.
-        let mut conflicted_txids: Vec<Txid> = self.conflicted_txids.iter().copied().collect();
+        let mut conflicted_txids: Vec<Txid> = self.left_out.conflicted.iter().copied().collect();
         conflicted_txids.sort_by_cached_key(Txid::to_string);
+        let mut replaced_txids: Vec<ReplacedTx> = self
+            .left_out
+            .replaced
+            .iter()
+            .map(|(&txid, &replaced_by)| ReplacedTx { txid, replaced_by })
+            .collect();
+        replaced_txids.sort_by_cached_key(|r| r.txid.to_string());
+        let mut abandoned_txids: Vec<Txid> = self.left_out.abandoned.iter().copied().collect();
+        abandoned_txids.sort_by_cached_key(Txid::to_string);
 
         let stats = Stats {
             transactions_analyzed: self.our_txids.len(),
@@ -80,6 +89,8 @@ impl TxGraph {
             utxos_current: self.utxos.len(),
             addresses_without_history: 0,
             conflicted_txids,
+            replaced_txids,
+            abandoned_txids,
         };
 
         Report::new(stats, findings, warnings)

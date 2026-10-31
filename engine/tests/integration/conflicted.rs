@@ -156,3 +156,126 @@ fn txs_depending_on_a_conflicted_one_are_left_out_and_named_too() {
     expected.sort_by_key(Txid::to_string);
     assert_eq!(report.stats.conflicted_txids, expected);
 }
+
+/// A node that keeps new wallet txs out of its mempool, so they can be abandoned.
+fn node_without_wallet_broadcast() -> Node {
+    let exe = corepc_node::exe_path().expect("bitcoind not found");
+    let mut conf = corepc_node::Conf::default();
+    conf.args.push("-txindex");
+    conf.args.push("-walletbroadcast=0");
+    Node::with_conf(exe, &conf).expect("failed to start bitcoind")
+}
+
+/// Like [`fund_sender`], on a node that does not broadcast wallet txs itself.
+fn fund_without_broadcast(node: &Node, miner: &Address) -> corepc_node::Client {
+    let alice = node.create_wallet("alice").unwrap();
+    let txid = node
+        .client
+        .send_to_address(&alice.new_address().unwrap(), Amount::from_sat(1_000_000))
+        .unwrap()
+        .txid()
+        .unwrap();
+    let funding: Value = node
+        .client
+        .call("gettransaction", &[json!(txid.to_string())])
+        .unwrap();
+    let _: Value = node
+        .client
+        .call("sendrawtransaction", &[funding["hex"].clone()])
+        .unwrap();
+    mine(node, 1, miner);
+    alice
+}
+
+fn pay_bob(node: &Node, alice: &corepc_node::Client, replaceable: bool) -> Txid {
+    let to = node.create_wallet("bob").unwrap().new_address().unwrap();
+    let txid: String = alice
+        .call(
+            "sendtoaddress",
+            &[
+                json!(to.to_string()),
+                json!(0.001),
+                json!(""),
+                json!(""),
+                json!(false),
+                json!(replaceable),
+            ],
+        )
+        .expect("sendtoaddress");
+    txid.parse().unwrap()
+}
+
+#[test]
+fn a_tx_replaced_by_one_still_in_the_mempool_is_left_out_and_named() {
+    let node = node();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let (alice, _) = fund_sender(&node, &miner, "alice", 1_000_000);
+    let original = pay_bob(&node, &alice, true);
+    let bumped: Value = alice
+        .call("bumpfee", &[json!(original.to_string())])
+        .expect("bumpfee");
+    let replacement: Txid = bumped["txid"].as_str().unwrap().parse().unwrap();
+
+    let history = gateway_for(&node)
+        .scan_wallet("alice")
+        .expect("a replaced tx must not fail the scan");
+    let graph = TxGraph::from_wallet_history(history);
+    assert!(!graph.our_txids.contains(&original));
+    assert!(graph.our_txids.contains(&replacement));
+    assert!(graph.tx_cache.contains_key(&replacement));
+
+    let report = graph.detect_all(&Default::default(), None, None);
+    let replaced: Vec<(Txid, Txid)> = report
+        .stats
+        .replaced_txids
+        .iter()
+        .map(|r| (r.txid, r.replaced_by))
+        .collect();
+    assert_eq!(replaced, vec![(original, replacement)]);
+    assert!(report.stats.conflicted_txids.is_empty());
+}
+
+#[test]
+fn an_abandoned_tx_is_left_out_and_named() {
+    let node = node_without_wallet_broadcast();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let alice = fund_without_broadcast(&node, &miner);
+    let abandoned = pay_bob(&node, &alice, false);
+    let _: Value = alice
+        .call("abandontransaction", &[json!(abandoned.to_string())])
+        .expect("abandontransaction");
+
+    let history = gateway_for(&node)
+        .scan_wallet("alice")
+        .expect("an abandoned tx must not fail the scan");
+    let graph = TxGraph::from_wallet_history(history);
+    assert!(!graph.our_txids.contains(&abandoned));
+    let report = graph.detect_all(&Default::default(), None, None);
+    assert_eq!(report.stats.abandoned_txids, vec![abandoned]);
+    assert_eq!(
+        report.stats.transactions_analyzed, 1,
+        "the funding tx stays"
+    );
+}
+
+#[test]
+fn an_unbroadcast_tx_the_node_cannot_serve_still_fails_the_scan() {
+    let node = node_without_wallet_broadcast();
+    let miner = node.client.new_address().unwrap();
+    mine(&node, 110, &miner);
+    let alice = fund_without_broadcast(&node, &miner);
+    pay_bob(&node, &alice, false);
+
+    let error = gateway_for(&node)
+        .scan_wallet("alice")
+        .expect_err("a wallet tx the node cannot serve must fail the scan");
+    assert!(
+        matches!(
+            error,
+            stealth_engine::error::AnalysisError::TransactionNotFound(_)
+        ),
+        "{error:?}"
+    );
+}

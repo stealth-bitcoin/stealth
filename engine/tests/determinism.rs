@@ -321,7 +321,7 @@ fn build_history() -> WalletHistory {
         internal_addresses,
         ranged_addresses: derived_addresses.clone(),
         derived_addresses,
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     }
 }
 
@@ -469,7 +469,7 @@ fn spend_history(
         internal_addresses: HashSet::new(),
         derived_addresses: ours.iter().cloned().collect(),
         ranged_addresses: ours.iter().cloned().collect(),
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     }
 }
 

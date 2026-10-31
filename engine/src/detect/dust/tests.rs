@@ -97,7 +97,7 @@ fn spend_of(
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
         ranged_addresses: HashSet::new(),
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     }
 }
 
@@ -264,7 +264,7 @@ fn unspent_dust_advice_freezes_first_then_offers_a_standard_fee_only_spend() {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
         ranged_addresses: HashSet::new(),
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     };
     let mut findings = Vec::new();
     TxGraph::from_wallet_history(history)
@@ -422,7 +422,7 @@ fn spent_dust_with(
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
         ranged_addresses: HashSet::new(),
-        conflicted_txids: Default::default(),
+        left_out: Default::default(),
     };
     let mut findings = Vec::new();
     TxGraph::from_wallet_history(history)

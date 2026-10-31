@@ -233,6 +233,8 @@ mod ordering {
             utxos_current: 1,
             addresses_without_history: 0,
             conflicted_txids: Vec::new(),
+            replaced_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
         };
         stealth_engine::Report::new(stats, findings, warnings)
     }
@@ -268,6 +270,8 @@ mod ordering {
             utxos_current: 0,
             addresses_without_history: 0,
             conflicted_txids: Vec::new(),
+            replaced_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert_eq!(
@@ -296,6 +300,8 @@ mod ordering {
             utxos_current: 2,
             addresses_without_history: 2,
             conflicted_txids: Vec::new(),
+            replaced_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(
             stats,
@@ -320,6 +326,8 @@ mod ordering {
             utxos_current: 2,
             addresses_without_history: 1,
             conflicted_txids: Vec::new(),
+            replaced_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert!(text.contains("No privacy issues found."), "{text}");
@@ -376,6 +384,8 @@ mod ordering {
             utxos_current: 0,
             addresses_without_history: 0,
             conflicted_txids: vec![CONFLICTED.parse().unwrap()],
+            replaced_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert!(text.contains(CONFLICTED), "{text}");

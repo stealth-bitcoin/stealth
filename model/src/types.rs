@@ -186,6 +186,21 @@ pub struct Stats {
     /// sorted by their displayed hex.
     #[serde(default)]
     pub conflicted_txids: Vec<Txid>,
+    /// Wallet transactions left out because a tx not confirmed yet replaced
+    /// them, sorted by their displayed hex.
+    #[serde(default)]
+    pub replaced_txids: Vec<ReplacedTx>,
+    /// Wallet transactions left out because they were abandoned in the
+    /// wallet, sorted by their displayed hex.
+    #[serde(default)]
+    pub abandoned_txids: Vec<Txid>,
+}
+
+/// A wallet transaction replaced by one that is not confirmed yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacedTx {
+    pub txid: Txid,
+    pub replaced_by: Txid,
 }
 
 /// Summary of the scan results.
@@ -242,6 +257,8 @@ mod summary_tests {
             utxos_current: 0,
             addresses_without_history: 0,
             conflicted_txids: Vec::new(),
+            replaced_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
         }
     }
 
@@ -260,7 +277,7 @@ mod summary_tests {
     }
 
     #[test]
-    fn conflicted_txids_go_out_as_hex_and_may_be_absent() {
+    fn left_out_txids_go_out_as_hex_and_may_be_absent() {
         let txid = "515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb";
         let mut with = stats(2);
         with.conflicted_txids = vec![txid.parse().unwrap()];
@@ -272,6 +289,21 @@ mod summary_tests {
         }))
         .unwrap();
         assert!(older.conflicted_txids.is_empty());
+        assert!(older.replaced_txids.is_empty());
+        assert!(older.abandoned_txids.is_empty());
+
+        let other = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
+        with.replaced_txids = vec![ReplacedTx {
+            txid: txid.parse().unwrap(),
+            replaced_by: other.parse().unwrap(),
+        }];
+        with.abandoned_txids = vec![other.parse().unwrap()];
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(
+            json["replaced_txids"],
+            serde_json::json!([{ "txid": txid, "replaced_by": other }])
+        );
+        assert_eq!(json["abandoned_txids"], serde_json::json!([other]));
     }
 
     #[test]

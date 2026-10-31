@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, OutPoint, Txid};
@@ -258,10 +258,29 @@ pub struct WalletHistory {
     /// The subset of `derived_addresses` that came from ranged descriptors.
     #[serde(default, with = "serde_addr_set")]
     pub ranged_addresses: HashSet<Address<NetworkUnchecked>>,
-    /// Wallet transactions Core reports as conflicted (negative confirmations):
-    /// each, or a tx it depends on, conflicts with another one, so they are left out above.
+    /// Wallet transactions left out above, by why.
     #[serde(default)]
-    pub conflicted_txids: BTreeSet<Txid>,
+    pub left_out: LeftOut,
+}
+
+/// Wallet transactions kept out of the history, which the report names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftOut {
+    /// Core reports them as conflicted (negative confirmations): each, or a
+    /// tx it depends on, conflicts with another one.
+    pub conflicted: BTreeSet<Txid>,
+    /// Replaced by a tx that is not confirmed yet, keyed to their replacement.
+    pub replaced: BTreeMap<Txid, Txid>,
+    /// Abandoned in the wallet.
+    pub abandoned: BTreeSet<Txid>,
+}
+
+impl LeftOut {
+    pub fn extend(&mut self, other: LeftOut) {
+        self.conflicted.extend(other.conflicted);
+        self.replaced.extend(other.replaced);
+        self.abandoned.extend(other.abandoned);
+    }
 }
 
 /// A participant (input or output) in a transaction, enriched with

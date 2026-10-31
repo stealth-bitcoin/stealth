@@ -19,8 +19,9 @@ use stealth_model::config::AnalysisConfig;
 use stealth_model::descriptor::is_ranged;
 use stealth_model::error::AnalysisError;
 use stealth_model::gateway::{
-    BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, TxFetchResults,
-    TxInputRef, TxOutput, Utxo, UtxoSetResults, WalletHistory, WalletTxCategory, WalletTxEntry,
+    BlockchainGateway, DecodedTransaction, DescriptorType, LeftOut, ResolvedDescriptor,
+    TxFetchResults, TxInputRef, TxOutput, Utxo, UtxoSetResults, WalletHistory, WalletTxCategory,
+    WalletTxEntry,
 };
 use stealth_model::progress::{ScanPhase, ScanProgress};
 use stealth_model::types::btc_to_amount;
@@ -460,9 +461,9 @@ impl BitcoinCoreRpc {
     }
 
     fn load_history_for_wallet(&self, wallet_name: &str) -> Result<WalletHistory, AnalysisError> {
-        let (wallet_txs, mut conflicted_txids) = self.list_transactions(wallet_name)?;
+        let (wallet_txs, mut left_out) = self.list_transactions(wallet_name)?;
         let (utxos, conflicted_utxos) = self.list_unspent(wallet_name)?;
-        conflicted_txids.extend(conflicted_utxos);
+        left_out.conflicted.extend(conflicted_utxos);
         let mut txids = wallet_txs
             .iter()
             .map(|entry| entry.txid)
@@ -508,15 +509,15 @@ impl BitcoinCoreRpc {
             internal_addresses: HashSet::new(),
             derived_addresses: HashSet::new(),
             ranged_addresses: HashSet::new(),
-            conflicted_txids,
+            left_out,
         })
     }
 
-    /// The wallet's entries except those Core reports as conflicted, and those txids.
+    /// The wallet's entries, except those left out of the history, and why those were.
     fn list_transactions(
         &self,
         wallet_name: &str,
-    ) -> Result<(Vec<WalletTxEntry>, BTreeSet<Txid>), AnalysisError> {
+    ) -> Result<(Vec<WalletTxEntry>, LeftOut), AnalysisError> {
         // A block landing mid-pagination shifts the skip windows; refetch once.
         let tip = self.block_count()?;
         let mut entries = self.fetch_transaction_pages(wallet_name)?;
@@ -528,17 +529,26 @@ impl BitcoinCoreRpc {
 
     fn convert_list_transactions(
         entries: Vec<ListTransactionEntry>,
-    ) -> Result<(Vec<WalletTxEntry>, BTreeSet<Txid>), AnalysisError> {
+    ) -> Result<(Vec<WalletTxEntry>, LeftOut), AnalysisError> {
         let mut kept = Vec::new();
-        let mut conflicted = BTreeSet::new();
+        let mut left_out = LeftOut::default();
         for entry in entries {
+            let txid = || parse_txid("listtransactions", &entry.txid);
+            // Core serves neither a replaced nor an abandoned tx outside the wallet.
+            let unconfirmed = depth(entry.confirmations) == 0;
             if is_conflicted(entry.confirmations) {
-                conflicted.insert(parse_txid("listtransactions", &entry.txid)?);
+                left_out.conflicted.insert(txid()?);
+            } else if unconfirmed && entry.abandoned == Some(true) {
+                left_out.abandoned.insert(txid()?);
+            } else if let (true, Some(by)) = (unconfirmed, entry.replaced_by_txid.as_deref()) {
+                left_out
+                    .replaced
+                    .insert(txid()?, parse_txid("listtransactions", by)?);
             } else {
                 kept.push(Self::convert_list_transaction_entry(entry)?);
             }
         }
-        Ok((kept, conflicted))
+        Ok((kept, left_out))
     }
 
     fn convert_list_transaction_entry(
@@ -1765,6 +1775,8 @@ struct ListTransactionEntry {
     amount: f64,
     confirmations: Option<i64>,
     blockheight: Option<u32>,
+    abandoned: Option<bool>,
+    replaced_by_txid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2371,9 +2383,9 @@ mod tests {
             },
         ]))
         .expect("a negative confirmation count must parse");
-        let (kept, conflicted) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
         assert_eq!(
-            conflicted.into_iter().collect::<Vec<_>>(),
+            left_out.conflicted.into_iter().collect::<Vec<_>>(),
             vec![ORIGINAL.parse::<Txid>().unwrap()]
         );
         let kept: Vec<_> = kept
@@ -2388,6 +2400,61 @@ mod tests {
                 (IN_MEMPOOL.to_owned(), 0, 0),
             ]
         );
+    }
+
+    #[test]
+    fn replaced_and_abandoned_unconfirmed_entries_are_left_out_and_named() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            {
+                "address": ADDR, "amount": -0.001, "bip125-replaceable": "yes",
+                "category": "send", "confirmations": 0, "abandoned": false,
+                "replaced_by_txid": REPLACEMENT, "trusted": false, "txid": ORIGINAL,
+                "vout": 0, "walletconflicts": [REPLACEMENT],
+            },
+            {
+                "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 0,
+                "abandoned": false, "replaces_txid": ORIGINAL, "trusted": true,
+                "txid": REPLACEMENT, "vout": 0, "walletconflicts": [ORIGINAL],
+            },
+            {
+                "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 0,
+                "abandoned": true, "trusted": false, "txid": IN_MEMPOOL, "vout": 0,
+                "walletconflicts": [],
+            },
+            {
+                "address": ADDR, "amount": 0.01, "category": "receive", "confirmations": 0,
+                "abandoned": false, "trusted": false, "txid": TXID, "vout": 0,
+                "walletconflicts": [],
+            },
+        ]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            left_out.replaced.into_iter().collect::<Vec<_>>(),
+            vec![(txid(ORIGINAL), txid(REPLACEMENT))]
+        );
+        assert_eq!(
+            left_out.abandoned.into_iter().collect::<Vec<_>>(),
+            vec![txid(IN_MEMPOOL)]
+        );
+        assert!(left_out.conflicted.is_empty());
+        let kept: Vec<_> = kept.iter().map(|e| e.txid).collect();
+        assert_eq!(kept, vec![txid(REPLACEMENT), txid(TXID)]);
+    }
+
+    #[test]
+    fn a_confirmed_entry_is_kept_whatever_its_flags() {
+        // Mined after all: the replacement lost, and a mined tx is no longer abandoned.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([{
+            "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 3,
+            "blockheight": 110, "abandoned": true, "replaced_by_txid": REPLACEMENT,
+            "txid": ORIGINAL, "vout": 0,
+        }]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert_eq!(left_out, Default::default());
+        assert_eq!(kept.len(), 1);
     }
 
     #[test]
@@ -2431,7 +2498,7 @@ mod tests {
         let history = rpc.load_history_for_wallet("alice").unwrap();
         assert!(history.utxos.is_empty());
         assert_eq!(
-            history.conflicted_txids.into_iter().collect::<Vec<_>>(),
+            history.left_out.conflicted.into_iter().collect::<Vec<_>>(),
             vec![ORIGINAL.parse::<Txid>().unwrap()]
         );
     }
