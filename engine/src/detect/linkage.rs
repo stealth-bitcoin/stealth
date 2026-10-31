@@ -118,11 +118,6 @@ impl TxGraph {
                 origins.push(Origin {
                     funding_txid: ia.funding_txid,
                     address: ia.address.clone(),
-                    payers: self
-                        .get_input_addresses(&ia.funding_txid)
-                        .into_iter()
-                        .map(|p| p.address)
-                        .collect(),
                     coinbase: parent_tx.vin.iter().any(|v| v.coinbase),
                 });
             }
@@ -417,16 +412,14 @@ impl TxGraph {
 struct Origin {
     funding_txid: Txid,
     address: Address<NetworkUnchecked>,
-    payers: HashSet<Address<NetworkUnchecked>>,
     coinbase: bool,
 }
 
 impl Origin {
-    /// Same funding tx, same own address, a payer in common, or both coinbase.
+    /// Same funding tx, same own address, or both coinbase.
     fn same_chain(&self, other: &Origin) -> bool {
         self.funding_txid == other.funding_txid
             || self.address == other.address
-            || !self.payers.is_disjoint(&other.payers)
             || (self.coinbase && other.coinbase)
     }
 }

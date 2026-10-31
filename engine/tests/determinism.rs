@@ -481,32 +481,26 @@ fn cluster_merges(history: &WalletHistory) -> Vec<String> {
 
 #[test]
 fn cluster_merge_ignores_the_mainnet_same_chain_spend() {
-    // Mainnet shape of dfa822be…: `payer` funds `source`, and `child` spends `source:1`, also at `payer`.
-    let (w1, w2) = (wpkh(201), wpkh(204));
+    // Mainnet shape of dfa822be…: both coins at the scanned address, funded by `source` and by `child`.
+    let w = wpkh(201);
     let payer = wpkh(202);
-    let earlier = txid(0x500);
     let source = txid(0x501);
     let child = txid(0x502);
     let spend = txid(0x503);
     let txs = vec![
         tx(
-            earlier,
-            vec![vin(txid(0x5F0), 0)],
-            vec![out(0, &payer, 1_100_000)],
-        ),
-        tx(
             source,
-            vec![vin(earlier, 0)],
-            vec![out(0, &w1, 400_000), out(1, &payer, 600_000)],
+            vec![vin(txid(0x5F1), 0)],
+            vec![out(0, &w, 400_000), out(1, &payer, 600_000)],
         ),
         tx(
             child,
             vec![vin(txid(0x5F2), 0), vin(source, 1)],
-            vec![out(0, &w2, 500_000)],
+            vec![out(0, &w, 500_000)],
         ),
     ];
     let history = spend_history(
-        &[w1, w2],
+        std::slice::from_ref(&w),
         &[source, child],
         tx(
             spend,
@@ -553,10 +547,11 @@ fn two_receipts_paid_by(
 }
 
 #[test]
-fn cluster_merge_ignores_coins_paid_by_the_same_address() {
+fn cluster_merge_flags_coins_paid_by_the_same_address() {
+    // Two withdrawals from one exchange hot wallet to two fresh addresses: the spend is what links them.
     let exchange = wpkh(214);
     let history = two_receipts_paid_by(&exchange, &exchange);
-    assert_eq!(cluster_merges(&history), Vec::<String>::new());
+    assert_eq!(cluster_merges(&history).len(), 1);
 }
 
 #[test]
@@ -724,38 +719,24 @@ fn cluster_merge_flags_a_counterparty_paid_from_the_same_batch() {
 
 #[test]
 fn cluster_merge_groups_inputs_linked_only_through_a_third() {
-    // `a` and `c` share an own address, `c` and `b` share a payer; `a` and `b` share nothing.
+    // `a` and `c` share an own address, `c` and `b` share a funding tx; `a` and `b` share nothing.
     let (x, y) = (wpkh(121), wpkh(122));
-    let (payer_a, payer_bc) = (wpkh(123), wpkh(124));
-    let (pa, pb, pc) = (txid(0x571), txid(0x572), txid(0x573));
-    let (fa, fb, fc) = (txid(0x574), txid(0x575), txid(0x576));
+    let (fa, fbc) = (txid(0x574), txid(0x575));
     let spend = txid(0x577);
     let txs = vec![
+        tx(fa, vec![vin(txid(0x5FC), 0)], vec![out(0, &x, 400_000)]),
         tx(
-            pa,
-            vec![vin(txid(0x5FC), 0)],
-            vec![out(0, &payer_a, 900_000)],
-        ),
-        tx(
-            pb,
+            fbc,
             vec![vin(txid(0x5FD), 0)],
-            vec![out(0, &payer_bc, 900_000)],
+            vec![out(0, &y, 400_000), out(1, &x, 400_000)],
         ),
-        tx(
-            pc,
-            vec![vin(txid(0x5FE), 0)],
-            vec![out(0, &payer_bc, 900_000)],
-        ),
-        tx(fa, vec![vin(pa, 0)], vec![out(0, &x, 400_000)]),
-        tx(fb, vec![vin(pb, 0)], vec![out(0, &y, 400_000)]),
-        tx(fc, vec![vin(pc, 0)], vec![out(0, &x, 400_000)]),
     ];
     let history = spend_history(
         &[x, y],
-        &[fa, fb, fc],
+        &[fa, fbc],
         tx(
             spend,
-            vec![vin(fa, 0), vin(fb, 0), vin(fc, 0)],
+            vec![vin(fa, 0), vin(fbc, 0), vin(fbc, 1)],
             vec![out(0, &wpkh(125), 1_190_000)],
         ),
         txs,
