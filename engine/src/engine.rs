@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bitcoin::{Amount, Txid};
+use bitcoin::{Amount, OutPoint, Txid};
 
 use crate::descriptor::{expand_input, is_ranged, normalize_descriptors};
 use crate::error::AnalysisError;
@@ -82,7 +82,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
         self.mark_phase(ScanPhase::Analyzing);
         let mut graph = TxGraph::from_wallet_history(history);
-        self.ask_dust_status(&mut graph);
+        self.ask_dust_status(&mut graph, false);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -98,7 +98,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         let addresses_without_history = self.merge_address_history(&mut history)?;
         self.mark_phase(ScanPhase::Analyzing);
         let mut graph = TxGraph::from_wallet_history(history);
-        self.ask_dust_status(&mut graph);
+        self.ask_dust_status(&mut graph, true);
         let mut report = graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -108,37 +108,58 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         Ok(report)
     }
 
-    /// Own dust outside the UTXO list whose spend the history does not settle
-    /// is looked up on the node. Absent from the UTXO set means spent only
-    /// while the creating tx still exists; any other output stays unknown.
-    fn ask_dust_status(&self, graph: &mut TxGraph) {
-        let outpoints = graph.dust_needing_chain_status(&self.settings.config.thresholds);
+    /// Own dust whose spend the history does not settle (and, for a UTXO
+    /// scan, the pasted dust) is looked up on the node. Absent from the UTXO
+    /// set means spent only while the creating tx is confirmed or still known
+    /// to the node; an output without such an answer gets no entry.
+    fn ask_dust_status(&self, graph: &mut TxGraph, include_listed: bool) {
+        let thresholds = &self.settings.config.thresholds;
+        let mut outpoints = graph.dust_needing_chain_status(thresholds);
+        if include_listed {
+            outpoints.extend(graph.listed_dust(thresholds));
+        }
         if outpoints.is_empty() {
             return;
         }
         let Ok(answers) = self.gateway.outputs_in_utxo_set(&outpoints) else {
             return;
         };
-        let mut creating_tx_exists: HashMap<Txid, bool> = HashMap::new();
-        for (op, answer) in answers {
-            let unspent = match answer {
-                Ok(true) => true,
-                Ok(false) => {
-                    let exists = *creating_tx_exists.entry(op.txid).or_insert_with(|| {
-                        graph
-                            .tx_cache
-                            .get(&op.txid)
-                            .is_some_and(|tx| tx.confirmations > 0)
-                            || self.gateway.get_transaction(op.txid).is_ok()
-                    });
-                    if !exists {
-                        continue;
-                    }
-                    false
-                }
-                Err(_) => continue,
-            };
-            graph.chain_unspent.insert((op.txid, op.vout), unspent);
+        let answers: Vec<(OutPoint, bool)> = answers
+            .into_iter()
+            .filter_map(|(op, answer)| answer.ok().map(|in_set| (op, in_set)))
+            .collect();
+
+        let unconfirmed: BTreeSet<Txid> = answers
+            .iter()
+            .filter(|(op, in_set)| {
+                !in_set
+                    && !graph
+                        .tx_cache
+                        .get(&op.txid)
+                        .is_some_and(|tx| tx.confirmations > 0)
+            })
+            .map(|(op, _)| op.txid)
+            .collect();
+        let still_known: HashSet<Txid> = if unconfirmed.is_empty() {
+            HashSet::new()
+        } else {
+            let txids: Vec<Txid> = unconfirmed.iter().copied().collect();
+            self.gateway
+                .get_transactions(&txids)
+                .map(|fetched| {
+                    fetched
+                        .into_iter()
+                        .filter(|(_, tx)| tx.is_ok())
+                        .map(|(txid, _)| txid)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        for (op, in_set) in answers {
+            if in_set || !unconfirmed.contains(&op.txid) || still_known.contains(&op.txid) {
+                graph.chain_unspent.insert((op.txid, op.vout), in_set);
+            }
         }
     }
 

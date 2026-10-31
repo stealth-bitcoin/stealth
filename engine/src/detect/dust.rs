@@ -22,27 +22,48 @@ impl TxGraph {
     pub(super) fn detect_dust(&self, thresholds: &DetectorThresholds, findings: &mut Vec<Finding>) {
         let dust = thresholds.dust;
 
-        // Current UTXOs
+        // Current UTXOs; only a pasted one is checked on the node, and it
+        // stays as pasted when the node gives no answer.
         for utxo in &self.utxos {
-            if self.is_ours(&utxo.address) && utxo.amount <= dust {
-                findings.push(self.unspent_dust_finding(
+            if !self.is_ours(&utxo.address) || utxo.amount > dust {
+                continue;
+            }
+            let finding = if self.chain_unspent.get(&(utxo.txid, utxo.vout)) == Some(&false) {
+                let mut finding = self.spent_dust_finding(
                     &utxo.txid,
                     utxo.vout,
                     &utxo.address,
                     utxo.amount,
                     thresholds,
-                ));
-            }
+                );
+                finding.description = format!(
+                    "Dust output {}:{} at {} ({} sats) was pasted as unspent but is already spent",
+                    utxo.txid,
+                    utxo.vout,
+                    utxo.address.assume_checked_ref(),
+                    utxo.amount.to_sat(),
+                );
+                finding
+            } else {
+                self.unspent_dust_finding(
+                    &utxo.txid,
+                    utxo.vout,
+                    &utxo.address,
+                    utxo.amount,
+                    thresholds,
+                )
+            };
+            findings.push(finding);
         }
 
-        // Own dust outside the UTXO list: what the node said when asked,
-        // else spent when the history shows the spend, else unknown.
+        // Own dust outside the UTXO list: spent when a confirmed tx in the
+        // history spends it, else the node's answer, else unknown.
         for (txid, out) in self.dust_outside_utxos(dust) {
             let key = (txid, out.index);
-            let unspent = match self.chain_unspent.get(&key) {
-                Some(&unspent) => Some(unspent),
-                None if self.spending_index.contains_key(&key) => Some(false),
-                None => None,
+            let unspent = if self.confirmed_spend(&key) {
+                Some(false)
+            } else {
+                self.chain_unspent.get(&key).copied()
             };
             let finding = match unspent {
                 Some(true) => Self::unspent_dust_finding,
@@ -58,6 +79,24 @@ impl TxGraph {
                 thresholds,
             ));
         }
+    }
+
+    /// A confirmed tx in the history spends this output; an unconfirmed one
+    /// may still be replaced.
+    fn confirmed_spend(&self, key: &(Txid, u32)) -> bool {
+        self.spending_index
+            .get(key)
+            .and_then(|child| self.tx_cache.get(child))
+            .is_some_and(|child| child.confirmations > 0)
+    }
+
+    /// Outpoints of own dust in the UTXO list.
+    pub(crate) fn listed_dust(&self, thresholds: &DetectorThresholds) -> Vec<OutPoint> {
+        self.utxos
+            .iter()
+            .filter(|u| self.is_ours(&u.address) && u.amount <= thresholds.dust)
+            .map(|u| OutPoint::new(u.txid, u.vout))
+            .collect()
     }
 
     /// Own outputs at or under `dust` that are not in the UTXO list, once each.
@@ -89,12 +128,7 @@ impl TxGraph {
     ) -> Vec<OutPoint> {
         self.dust_outside_utxos(thresholds.dust)
             .into_iter()
-            .filter(|(txid, out)| {
-                self.spending_index
-                    .get(&(*txid, out.index))
-                    .and_then(|child| self.tx_cache.get(child))
-                    .is_none_or(|child| child.confirmations == 0)
-            })
+            .filter(|(txid, out)| !self.confirmed_spend(&(*txid, out.index)))
             .map(|(txid, out)| OutPoint::new(txid, out.index))
             .collect()
     }
@@ -275,7 +309,7 @@ impl TxGraph {
             description,
             details: Some(details),
             correction: Some(
-                "The node could not say whether this output is still unspent. \
+                "Stealth could not confirm whether this output was spent. \
                  Check it in your wallet before relying on this entry."
                     .into(),
             ),

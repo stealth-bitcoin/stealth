@@ -225,6 +225,15 @@ fn dust_outside_the_utxo_list_with_no_known_spend_is_unknown() {
         parent_dust(unspent_history(&[1])),
         vec![("unknown".to_string(), 0), ("unspent".to_string(), 1)],
     );
+    let unknown = findings(unspent_history(&[1]), VulnerabilityType::Dust)
+        .into_iter()
+        .find(|f| f.description.contains("spend status unknown"))
+        .expect("unknown dust finding");
+    let correction = unknown.correction.unwrap_or_default();
+    assert!(
+        correction.starts_with("Stealth could not confirm whether this output was spent"),
+        "{correction}"
+    );
 }
 
 const ATTACK: u64 = 0x50;
