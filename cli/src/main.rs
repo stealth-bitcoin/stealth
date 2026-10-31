@@ -248,6 +248,25 @@ fn text_report(report: &stealth_engine::Report) -> String {
         ));
     }
 
+    let conflicted = &report.stats.conflicted_txids;
+    if !conflicted.is_empty() {
+        let one = conflicted.len() == 1;
+        lines.push(format!(
+            "Left out {} transaction{} Core reports as conflicted: {} with another \
+             transaction, so {} not part of the wallet's history.",
+            conflicted.len(),
+            if one { "" } else { "s" },
+            if one {
+                "it conflicts"
+            } else {
+                "each conflicts"
+            },
+            if one { "it is" } else { "they are" },
+        ));
+        lines.extend(conflicted.iter().map(|txid| format!("  {txid}")));
+        lines.push(String::new());
+    }
+
     if is_empty_report(&report.summary) {
         lines.push("No transactions found for this input.".to_owned());
         lines.push(

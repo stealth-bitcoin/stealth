@@ -329,6 +329,32 @@ mod ordering {
         );
     }
 
+    const CONFLICTED: &str = "515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb";
+
+    #[test]
+    fn the_text_report_names_each_conflicted_tx_it_left_out() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.conflicted_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction Core reports as conflicted: it conflicts with \
+                 another transaction, so it is not part of the wallet's history.\n  {CONFLICTED}\n"
+            )),
+            "{text}"
+        );
+        assert!(
+            position(&text, CONFLICTED) < position(&text, "No privacy issues found."),
+            "the note comes before the verdict:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_report_without_conflicted_txs_has_no_note() {
+        let text = text_report(&report(Vec::new(), Vec::new()));
+        assert!(!text.contains("conflicted"), "{text}");
+    }
+
     #[test]
     fn a_findings_only_report_ends_with_its_blank_line() {
         let text = text_report(&report(
