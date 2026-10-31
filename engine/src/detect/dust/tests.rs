@@ -207,7 +207,8 @@ fn unspent_dust_advice_freezes_first_then_offers_a_standard_fee_only_spend() {
         // A bare 0-value OP_RETURN makes a 61-byte tx, under Core's 65-byte minimum.
         "one 0-value OP_RETURN output carrying 4 bytes of data",
         "mempool fee rates are low enough for it to confirm",
-        "a 546-sat coin pays about 6 sat/vB",
+        // About 83-94 vB from segwit or taproot, about 173 vB from legacy P2PKH.
+        "a 546-sat coin pays about 6 sat/vB from a segwit or taproot address, about 3 from a legacy one",
         // With no runestone or other output, runes are burned, not paid to the miner.
         "an ordinals inscription goes to the miner and runes are burned; either way they are lost",
     ] {
