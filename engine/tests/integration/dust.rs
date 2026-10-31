@@ -250,3 +250,44 @@ fn detect_dust_attack() {
         dust_findings
     );
 }
+
+// A dust attack that also pays many outputs back to the sender's own input
+// address (the shape of mainnet tx 707545c7...): those outputs are the
+// sender's change, so they must not dilute the address-diversity ratio.
+
+fn dust_attack_with_self_outputs(node: &Node) -> stealth_engine::Report {
+    let da = node.client.new_address().unwrap();
+    mine(node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let (attacker, attacker_addr) = fund_sender(node, &da, "attacker", 1_000_000);
+
+    let mut outputs = vec![(alice.new_address().unwrap(), 330)];
+    for _ in 0..11 {
+        outputs.push((node.client.new_address().unwrap(), 330));
+    }
+    for _ in 0..12 {
+        outputs.push((attacker_addr.clone(), 900));
+    }
+    spend_to(&attacker, &outputs, &attacker_addr);
+    mine(node, 1, &da);
+
+    scan_wallet(&gateway_for(node), "alice")
+}
+
+#[test]
+fn dust_attack_ignores_sender_self_outputs() {
+    let node = node();
+    let report = dust_attack_with_self_outputs(&node);
+
+    let escalated = report.findings.iter().find(|f| {
+        f.vulnerability_type == VulnerabilityType::Dust
+            && f.severity == stealth_engine::Severity::Critical
+    });
+    let evidence = escalated
+        .and_then(|f| f.details.as_ref())
+        .and_then(|d| d.get("dust_attack"))
+        .unwrap_or_else(|| panic!("expected a dust-attack finding: {:?}", report.findings));
+    assert_eq!(evidence["total_outputs"], 12);
+    assert_eq!(evidence["unique_addresses"], 12);
+}

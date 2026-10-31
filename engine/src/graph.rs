@@ -76,6 +76,20 @@ impl TxGraph {
         self.output_cache.get(txid).cloned().unwrap_or_default()
     }
 
+    /// Outputs of a transaction that do not pay back to any of its own input
+    /// addresses; those are the sender's change, not recipients.
+    pub(crate) fn recipient_outputs(&self, txid: &Txid) -> Vec<OutputInfo> {
+        let inputs: HashSet<Address<NetworkUnchecked>> = self
+            .get_input_addresses(txid)
+            .into_iter()
+            .map(|ia| ia.address)
+            .collect();
+        self.get_output_addresses(txid)
+            .into_iter()
+            .filter(|o| !inputs.contains(&o.address))
+            .collect()
+    }
+
     /// Build a [`TxGraph`] from a pre-fetched [`WalletHistory`] produced
     /// by a [`BlockchainGateway`](crate::gateway::BlockchainGateway).
     ///

@@ -153,7 +153,8 @@ impl TxGraph {
 
     /// If `parent_txid` matches the dust-attack signature (many outputs,
     /// many dust outputs, high address diversity, and not one of our own
-    /// sends), return a JSON evidence blob suitable for attaching to a
+    /// sends), judged on its outputs that do not pay back to its own input
+    /// addresses, return a JSON evidence blob suitable for attaching to a
     /// Dust finding; otherwise return `None`.
     fn dust_attack_evidence(
         &self,
@@ -171,7 +172,7 @@ impl TxGraph {
             return None;
         }
 
-        let outputs = self.get_output_addresses(parent_txid);
+        let outputs = self.recipient_outputs(parent_txid);
         if outputs.len() < min_outputs {
             return None;
         }
