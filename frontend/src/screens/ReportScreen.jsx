@@ -147,6 +147,14 @@ const LEFT_OUT = {
     beforeOne: 'the conflicting one reached the mempool',
     beforeMany: 'the conflicting ones reached the mempool',
   },
+  // Several left out against one mempool tx.
+  mempoolConflictedWithOne: {
+    settled: false,
+    one: 'that conflicts, or depends on one that conflicts, with a transaction in the mempool',
+    many: 'that conflict, or depend on ones that conflict, with a transaction in the mempool',
+    beforeOne: 'the conflicting one reached the mempool',
+    beforeMany: 'the conflicting one reached the mempool',
+  },
   abandoned: {
     settled: false,
     one: 'that was abandoned in the wallet',
@@ -162,7 +170,8 @@ const LEFT_OUT = {
     beforeOne: null,
     beforeMany: null,
     // What would stop it from confirming.
-    unless: 'a conflicting transaction is mined',
+    unlessOne: 'it or a transaction it depends on has a conflicting transaction mined',
+    unlessMany: 'they or a transaction they depend on has a conflicting transaction mined',
   },
   orphaned: {
     settled: false,
@@ -177,8 +186,9 @@ const LEFT_OUT = {
 }
 
 // "may still confirm", with what would stop it when the reason says.
-function mayConfirm(reason) {
-  return reason.unless ? `may still confirm unless ${reason.unless}` : 'may still confirm'
+function mayConfirm(reason, one) {
+  const unless = one ? reason.unlessOne : reason.unlessMany
+  return unless ? `may still confirm, unless ${unless}` : 'may still confirm'
 }
 
 // Whether the transactions are out for good, may still confirm, or could come back.
@@ -188,7 +198,7 @@ function standing(reason, one) {
     return `. ${one ? reason.comesBackOne : reason.comesBackMany}; until then ${part} not part of the history the wallet sees.`
   }
   if (reason.settled) return `, so ${part} not part of the wallet's history.`
-  return `. ${one ? 'It' : 'They'} ${mayConfirm(reason)}; until then ${part} not part of the history the wallet sees.`
+  return `. ${one ? 'It' : 'They'} ${mayConfirm(reason, one)}; until then ${part} not part of the history the wallet sees.`
 }
 
 function LeftOutNote({ items, reason }) {
@@ -220,6 +230,10 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
   const inMempoolConflict = (stats.mempool_conflicted_txids ?? []).map(
     (r) => `${r.txid}: it, or a transaction it depends on, conflicts with ${r.conflicts_with}, which is in the mempool and not confirmed yet`,
   )
+  // The conflicting side counts the mempool txs, not the txs left out.
+  const conflicting = new Set((stats.mempool_conflicted_txids ?? []).map((r) => r.conflicts_with))
+  const mempoolReason =
+    conflicting.size === 1 ? LEFT_OUT.mempoolConflictedWithOne : LEFT_OUT.mempoolConflicted
   const abandoned = stats.abandoned_txids ?? []
   const unavailable = stats.unavailable_txids ?? []
   const orphaned = stats.orphaned_txids ?? []
@@ -293,7 +307,7 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
 
         {/* Wallet transactions left out */}
         <LeftOutNote items={conflicted} reason={LEFT_OUT.conflicted} />
-        <LeftOutNote items={inMempoolConflict} reason={LEFT_OUT.mempoolConflicted} />
+        <LeftOutNote items={inMempoolConflict} reason={mempoolReason} />
         <LeftOutNote items={abandoned} reason={LEFT_OUT.abandoned} />
         <LeftOutNote items={unavailable} reason={LEFT_OUT.unavailable} />
         <LeftOutNote items={orphaned} reason={LEFT_OUT.orphaned} />

@@ -101,8 +101,8 @@ analyzed only when the wallet lists it and the scan keeps it),
 only come back if a reorg restores that block; Core also marks them abandoned,
 but they are listed here instead), and `unavailable_txids` for unconfirmed ones the node no longer has (replaced or
 double-spent, expired or evicted from the mempool, never broadcast, or
-depending on a transaction that was; such a one may still confirm unless a
-conflicting transaction is mined). The abandoned list fills only
+depending on a transaction that was; such a one may still confirm, unless it or a
+transaction it depends on has a conflicting transaction mined). The abandoned list fills only
 when someone abandons a transaction in Stealth's cache wallet; one abandoned in
 the user's own wallet lands in `unavailable_txids`. A wallet transaction the
 node cannot serve still fails the scan when it is confirmed, or when the node

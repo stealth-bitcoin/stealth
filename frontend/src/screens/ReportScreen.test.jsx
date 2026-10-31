@@ -444,6 +444,12 @@ describe('ReportScreen — replaced and abandoned transactions left out', () => 
     expect(screen.queryByText(new RegExp(`^${child} conflicts with`))).toBeNull()
   })
 
+  it('names a single conflicting transaction in the singular for several left out', () => {
+    const child = 'f5561a23e573423aeb6d9200aaf74db3ac73c83fae52f5261520d28506dadcd9'
+    show(makeReport({ txs: 2, replaced: [{ txid: original, conflicts_with: other }, { txid: child, conflicts_with: other }] }))
+    expect(screen.getByText(/left out 2 transactions that conflict, or depend on ones that conflict, with a transaction in the mempool\. they may still confirm; until then they are not part of the history the wallet sees\. they may still have been seen by the network before the conflicting one reached the mempool; stealth does not analyze them\./i)).toBeTruthy()
+  })
+
   it('counts several replaced transactions', () => {
     show(makeReport({ txs: 2, replaced: [{ txid: original, conflicts_with: other }, { txid: other, conflicts_with: original }] }))
     expect(screen.getByText(/left out 2 transactions that conflict, or depend on ones that conflict, with transactions in the mempool\. they may still confirm; until then they are not part of the history the wallet sees\. they may still have been seen by the network before the conflicting ones reached the mempool; stealth does not analyze them\./i)).toBeTruthy()
@@ -490,13 +496,13 @@ describe('ReportScreen — unconfirmed transactions the node no longer has', () 
 
   it('names one and says why it was left out', () => {
     show(makeReport({ txs: 2, unavailable: [original] }))
-    expect(screen.getByText(/left out 1 transaction that is unconfirmed and that this node no longer has \(it may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. it may still confirm unless a conflicting transaction is mined; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 1 transaction that is unconfirmed and that this node no longer has \(it may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. it may still confirm, unless it or a transaction it depends on has a conflicting transaction mined; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
     expect(screen.getByText(original)).toBeTruthy()
   })
 
   it('counts several', () => {
     show(makeReport({ txs: 2, unavailable: [original, other] }))
-    expect(screen.getByText(/left out 2 transactions that are unconfirmed and that this node no longer has \(they may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. they may still confirm unless a conflicting transaction is mined; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
+    expect(screen.getByText(/left out 2 transactions that are unconfirmed and that this node no longer has \(they may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. they may still confirm, unless they or a transaction they depend on has a conflicting transaction mined; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
     expect(screen.getByText(other)).toBeTruthy()
   })
 

@@ -481,6 +481,28 @@ mod ordering {
     }
 
     #[test]
+    fn several_left_out_against_one_mempool_tx_name_it_in_the_singular() {
+        // A raw double spend and the child of the payment it replaced, or a double bump.
+        let child = "f5561a23e573423aeb6d9200aaf74db3ac73c83fae52f5261520d28506dadcd9";
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.mempool_conflicted_txids = vec![
+            replaced(CONFLICTED, REPLACEMENT),
+            replaced(child, REPLACEMENT),
+        ];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(
+                "Left out 2 transactions that conflict, or depend on ones that conflict, with \
+                 a transaction in the mempool. They may still confirm; until then they are not \
+                 part of the history the wallet sees. They may still have been seen by the \
+                 network before the conflicting one reached the mempool; Stealth does not \
+                 analyze them.\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn the_text_report_names_abandoned_txs() {
         let mut clean = report(Vec::new(), Vec::new());
         clean.stats.abandoned_txids = vec![CONFLICTED.parse().unwrap()];
@@ -546,8 +568,8 @@ mod ordering {
                 "Left out 1 transaction that is unconfirmed and that this node no longer has (it \
                  may have been replaced or double-spent, expired or been evicted from the \
                  mempool, never been broadcast, or depend on a transaction that was). It may \
-                 still confirm unless a conflicting transaction is mined; until then it is not \
-                 part of the history the wallet sees. Stealth does not analyze it.\n  \
+                 still confirm, unless it or a transaction it depends on has a conflicting \
+                 transaction mined; until then it is not part of the history the wallet sees. Stealth does not analyze it.\n  \
                  {CONFLICTED}\n"
             )),
             "{text}"
@@ -562,8 +584,8 @@ mod ordering {
                 "Left out 2 transactions that are unconfirmed and that this node no longer has \
                  (they may have been replaced or double-spent, expired or been evicted from the \
                  mempool, never been broadcast, or depend on a transaction that was). They may \
-                 still confirm unless a conflicting transaction is mined; until then they are not \
-                 part of the history the wallet sees. Stealth does not analyze them.\n  \
+                 still confirm, unless they or a transaction they depend on has a conflicting \
+                 transaction mined; until then they are not part of the history the wallet sees. Stealth does not analyze them.\n  \
                  {CONFLICTED}\n  {REPLACEMENT}\n"
             )),
             "{text}"

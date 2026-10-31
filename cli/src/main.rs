@@ -265,7 +265,8 @@ fn text_report(report: &stealth_engine::Report) -> String {
                    with another one",
             before_one: Some("it became conflicted"),
             before_many: Some("they became conflicted"),
-            unless: None,
+            unless_one: None,
+            unless_many: None,
             comes_back_one: None,
             comes_back_many: None,
         },
@@ -280,16 +281,33 @@ fn text_report(report: &stealth_engine::Report) -> String {
             )
         })
         .collect();
+    // The conflicting side counts the mempool txs, not the txs left out.
+    let one_conflict = stats
+        .mempool_conflicted_txids
+        .iter()
+        .map(|c| c.conflicts_with)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        == 1;
     left_out_note(
         &mut lines,
         &in_mempool_conflict,
         &LeftOutReason {
             settled: false,
             one: "that conflicts, or depends on one that conflicts, with a transaction in the mempool",
-            many: "that conflict, or depend on ones that conflict, with transactions in the mempool",
+            many: if one_conflict {
+                "that conflict, or depend on ones that conflict, with a transaction in the mempool"
+            } else {
+                "that conflict, or depend on ones that conflict, with transactions in the mempool"
+            },
             before_one: Some("the conflicting one reached the mempool"),
-            before_many: Some("the conflicting ones reached the mempool"),
-            unless: None,
+            before_many: Some(if one_conflict {
+                "the conflicting one reached the mempool"
+            } else {
+                "the conflicting ones reached the mempool"
+            }),
+            unless_one: None,
+            unless_many: None,
             comes_back_one: None,
             comes_back_many: None,
         },
@@ -308,7 +326,8 @@ fn text_report(report: &stealth_engine::Report) -> String {
             many: "that were abandoned in the wallet",
             before_one: Some("it was abandoned"),
             before_many: Some("they were abandoned"),
-            unless: None,
+            unless_one: None,
+            unless_many: None,
             comes_back_one: None,
             comes_back_many: None,
         },
@@ -332,7 +351,12 @@ fn text_report(report: &stealth_engine::Report) -> String {
                    broadcast, or depend on a transaction that was)",
             before_one: None,
             before_many: None,
-            unless: Some("a conflicting transaction is mined"),
+            unless_one: Some(
+                "it or a transaction it depends on has a conflicting transaction mined",
+            ),
+            unless_many: Some(
+                "they or a transaction they depend on has a conflicting transaction mined",
+            ),
             comes_back_one: None,
             comes_back_many: None,
         },
@@ -352,7 +376,8 @@ fn text_report(report: &stealth_engine::Report) -> String {
             many: "that are coinbases from blocks no longer in the chain",
             before_one: None,
             before_many: None,
-            unless: None,
+            unless_one: None,
+            unless_many: None,
             comes_back_one: Some("It can only come back if a reorg restores that block"),
             comes_back_many: Some("They can only come back if a reorg restores those blocks"),
         },
@@ -407,7 +432,8 @@ struct LeftOutReason {
     before_one: Option<&'static str>,
     before_many: Option<&'static str>,
     /// What would stop a tx that may still confirm from confirming.
-    unless: Option<&'static str>,
+    unless_one: Option<&'static str>,
+    unless_many: Option<&'static str>,
     /// How a tx that cannot confirm as it stands could come back.
     comes_back_one: Option<&'static str>,
     comes_back_many: Option<&'static str>,
@@ -418,7 +444,7 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
     if items.is_empty() {
         return;
     }
-    let (count, why, part, may, before, comes_back, them) = if items.len() == 1 {
+    let (count, why, part, may, before, comes_back, unless, them) = if items.len() == 1 {
         (
             "1 transaction".to_owned(),
             reason.one,
@@ -426,6 +452,7 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
             "It",
             reason.before_one,
             reason.comes_back_one,
+            reason.unless_one,
             "it",
         )
     } else {
@@ -437,6 +464,7 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
             "They",
             reason.before_many,
             reason.comes_back_many,
+            reason.unless_many,
             "them",
         )
     };
@@ -445,9 +473,7 @@ fn left_out_note(lines: &mut Vec<String>, items: &[String], reason: &LeftOutReas
     } else if reason.settled {
         format!(", so {part} not part of the wallet's history.")
     } else {
-        let unless = reason
-            .unless
-            .map_or(String::new(), |unless| format!(" unless {unless}"));
+        let unless = unless.map_or(String::new(), |unless| format!(", unless {unless}"));
         format!(
             ". {may} may still confirm{unless}; until then {part} not part of the history the \
              wallet sees."
