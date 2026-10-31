@@ -124,7 +124,8 @@ fn answer_at_the_prompt(
     // SAFETY: both descriptors were just opened and are owned by nobody else.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_stealth-cli"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stealth-cli"));
+    child
         .arg("scan")
         .args(input)
         .args(["--rpc-url", &node.rpc_url()])
@@ -135,9 +136,9 @@ fn answer_at_the_prompt(
         .env_remove("STEALTH_RPC_PASS")
         .stdin(Stdio::from(slave.try_clone().expect("dup slave")))
         .stderr(Stdio::from(slave))
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("run stealth-cli");
+        .stdout(Stdio::piped());
+    controlled_by_the_terminal(&mut child);
+    let mut child = child.spawn().expect("run stealth-cli");
     let mut stdout = child.stdout.take().expect("stdout");
     let mut keyboard = File::from(master.try_clone().expect("dup master"));
 
@@ -314,5 +315,111 @@ fn a_yes_typed_after_the_node_closed_the_idle_connection_still_finishes_the_scan
         "{printed}{report}"
     );
     assert!(matches!(code, Some(0 | 1)), "{code:?}: {printed}");
+    assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
+}
+
+/// Makes the pseudo-terminal on stdin the child's controlling terminal, in a
+/// session of its own, as a shell would.
+#[cfg(unix)]
+fn controlled_by_the_terminal(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid and ioctl are async-signal-safe and touch only the child.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scan_started_in_the_background_stops_with_the_hint_instead_of_asking() {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::time::{Duration, Instant};
+
+    let (node, aa) = node_with_an_address_paid_five_times();
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty writes two fresh descriptors, owned below.
+    let opened = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    assert_eq!(opened, 0, "openpty failed");
+    // SAFETY: both descriptors were just opened and are owned by nobody else.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+
+    // A job-control shell on the terminal starts the scan as a background job.
+    let mut shell = Command::new("bash");
+    shell
+        .args([
+            "-c",
+            "set -m; \"$0\" \"$@\" & echo $!; wait $!; echo \"exit $?\"",
+        ])
+        .arg(env!("CARGO_BIN_EXE_stealth-cli"))
+        .args([
+            "scan",
+            "--descriptor",
+            &format!("addr({aa})"),
+            "--max-txs",
+            "3",
+        ])
+        .args(["--rpc-url", &node.rpc_url()])
+        .arg("--rpc-cookie")
+        .arg(&node.params.cookie_file)
+        .env_remove("STEALTH_RPC_USER")
+        .env_remove("STEALTH_RPC_PASS")
+        .stdin(Stdio::from(slave.try_clone().expect("dup slave")))
+        .stderr(Stdio::from(slave))
+        .stdout(Stdio::piped());
+    controlled_by_the_terminal(&mut shell);
+    let spawned = shell.spawn().expect("run bash");
+    // The command holds the terminal's other end; the output ends only once it is gone.
+    drop(shell);
+    let mut shell = spawned;
+    let mut lines = BufReader::new(shell.stdout.take().expect("stdout")).lines();
+    let job: i32 = lines
+        .next()
+        .expect("job pid")
+        .expect("read")
+        .parse()
+        .expect("pid");
+    let terminal = std::thread::spawn(move || {
+        let mut master = File::from(master);
+        let mut shown = Vec::new();
+        let _ = master.read_to_end(&mut shown);
+        String::from_utf8_lossy(&shown).into_owned()
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while shell.try_wait().expect("poll bash").is_none() {
+        if Instant::now() > deadline {
+            // SAFETY: only the job and the shell started above are signalled.
+            unsafe {
+                libc::kill(job, libc::SIGKILL);
+                libc::kill(shell.id() as i32, libc::SIGKILL);
+            }
+            panic!("the background scan never ended (stopped by SIGTTIN?)");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A job stopped by SIGTTIN outlives the shell; it must not outlive the test.
+    // SAFETY: only the job started above is signalled.
+    let _ = unsafe { libc::kill(job, libc::SIGKILL) };
+    let ended: Vec<String> = lines.map_while(Result::ok).collect();
+    assert!(ended.iter().any(|line| line == "exit 2"), "{ended:?}");
+    let shown = terminal.join().expect("terminal output");
+    assert!(!shown.contains("[y/N]"), "{shown}");
+    assert!(shown.contains("holds 5 transactions"), "{shown}");
+    assert!(shown.contains("--no-limits"), "{shown}");
     assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
 }

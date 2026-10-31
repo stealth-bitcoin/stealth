@@ -910,10 +910,15 @@ mod history_limit {
 
     #[test]
     fn only_a_terminal_on_both_stdin_and_stderr_is_asked() {
-        assert!(should_ask(true, true));
-        assert!(!should_ask(true, false));
-        assert!(!should_ask(false, true));
-        assert!(!should_ask(false, false));
+        assert!(should_ask(true, true, true));
+        assert!(!should_ask(true, false, true));
+        assert!(!should_ask(false, true, true));
+        assert!(!should_ask(false, false, true));
+    }
+
+    #[test]
+    fn a_background_job_is_not_asked() {
+        assert!(!should_ask(true, true, false));
     }
 
     #[test]

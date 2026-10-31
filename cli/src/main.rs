@@ -57,8 +57,12 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
         }
     });
 
-    let ask = should_ask(io::stdin().is_terminal(), io::stderr().is_terminal())
-        .then(|| terminal_ask(|| io::stdin().lock(), io::stderr, Arc::clone(&interrupts)));
+    let ask = should_ask(
+        io::stdin().is_terminal(),
+        io::stderr().is_terminal(),
+        in_the_foreground(),
+    )
+    .then(|| terminal_ask(|| io::stdin().lock(), io::stderr, Arc::clone(&interrupts)));
     let mut settings = opts.engine_settings()?;
     settings.history_limit = opts.history_limit(ask);
     let engine = AnalysisEngine::new(&gateway, settings);
@@ -104,8 +108,22 @@ fn die_by_interrupt() -> ! {
 }
 
 /// The question is asked only where someone can both read it and answer it.
-fn should_ask(stdin_is_terminal: bool, stderr_is_terminal: bool) -> bool {
-    stdin_is_terminal && stderr_is_terminal
+fn should_ask(stdin_is_terminal: bool, stderr_is_terminal: bool, in_the_foreground: bool) -> bool {
+    // A background job reading the terminal gets SIGTTIN and stops with the wallet loaded.
+    stdin_is_terminal && stderr_is_terminal && in_the_foreground
+}
+
+/// Whether this process is the terminal's foreground job; without a
+/// controlling terminal it is not.
+#[cfg(unix)]
+fn in_the_foreground() -> bool {
+    use nix::unistd::{getpgrp, tcgetpgrp};
+    tcgetpgrp(io::stdin()).is_ok_and(|foreground| foreground == getpgrp())
+}
+
+#[cfg(not(unix))]
+fn in_the_foreground() -> bool {
+    true
 }
 
 /// Asks on `output` whether to load a history above the limit.
