@@ -111,3 +111,46 @@ fn rpc_error_reports_the_node_message_not_the_http_status() {
         "an RPC error is not a transport failure, got: {text}"
     );
 }
+
+#[test]
+fn a_single_fetch_of_an_unknown_txid_is_not_found_and_names_it() {
+    let node = node();
+    let gateway = gateway_for(&node);
+    let unknown: Txid = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        .parse()
+        .expect("txid");
+
+    let err = gateway
+        .get_transaction(unknown)
+        .expect_err("an unknown txid must fail");
+
+    assert!(
+        matches!(
+            err,
+            stealth_engine::error::AnalysisError::TransactionNotFound(_)
+        ),
+        "a lookup miss must be classified like the batch fetch, got: {err:?}"
+    );
+    assert!(err.to_string().contains(&unknown.to_string()), "{err}");
+}
+
+#[test]
+fn txindex_synced_reflects_the_node() {
+    let indexed = node();
+    let gateway = gateway_for(&indexed);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !gateway.txindex_synced().unwrap() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        gateway.txindex_synced().unwrap(),
+        "a -txindex node must report a synced index"
+    );
+
+    let exe = corepc_node::exe_path().expect("bitcoind not found");
+    let plain = Node::with_conf(exe, &corepc_node::Conf::default()).expect("bitcoind");
+    assert!(
+        !gateway_for(&plain).txindex_synced().unwrap(),
+        "a node without -txindex has no index to rely on"
+    );
+}

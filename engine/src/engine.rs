@@ -94,7 +94,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
     fn analyze_utxos(&self, utxos: Vec<UtxoInput>) -> Result<Report, AnalysisError> {
         self.mark_phase(ScanPhase::LoadingHistory);
         let mut history = self.resolve_utxo_history(&utxos)?;
-        let addresses_without_history = self.merge_address_history(&mut history);
+        let addresses_without_history = self.merge_address_history(&mut history)?;
         self.mark_phase(ScanPhase::Analyzing);
         let graph = TxGraph::from_wallet_history(history);
         let mut report = graph.detect_all(
@@ -110,8 +110,9 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
     /// address's history, fetched the way a single-address scan fetches it.
     /// One scan covers every address, so the node serves all of them or
     /// none; the return value is how many it could not serve, in which case
-    /// the pasted outputs stay as their only history.
-    fn merge_address_history(&self, history: &mut WalletHistory) -> usize {
+    /// the pasted outputs stay as their only history. Any other error, such
+    /// as invalid data in the history it did serve, fails the scan.
+    fn merge_address_history(&self, history: &mut WalletHistory) -> Result<usize, AnalysisError> {
         let addresses: BTreeSet<String> = history
             .utxos
             .iter()
@@ -119,7 +120,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .map(|a| a.assume_checked_ref().to_string())
             .collect();
         if addresses.is_empty() {
-            return 0;
+            return Ok(0);
         }
         let raw: Vec<String> = addresses.iter().map(|a| format!("addr({a})")).collect();
         let fetched = normalize_descriptors(
@@ -131,9 +132,23 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         match fetched {
             Ok(full) => {
                 merge_chain_history(history, full);
-                0
+                Ok(0)
             }
-            Err(_) => addresses.len(),
+            // A user whose rpcwhitelist leaves out a call this load needs
+            // cannot have the history served either.
+            Err(AnalysisError::HistoryUnavailable(_) | AnalysisError::RpcForbidden { .. }) => {
+                Ok(addresses.len())
+            }
+            // Without a synced txindex the node cannot look up the address's
+            // older txs; with one, a missing wallet tx is a real failure.
+            Err(AnalysisError::TransactionNotFound(message)) => {
+                if self.gateway.txindex_synced()? {
+                    Err(AnalysisError::TransactionNotFound(message))
+                } else {
+                    Ok(addresses.len())
+                }
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -148,7 +163,10 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         for utxo in utxos {
             // Fetch the UTXO's parent transaction.
             if let std::collections::hash_map::Entry::Vacant(e) = transactions.entry(utxo.txid) {
-                let tx = self.gateway.get_transaction(utxo.txid)?;
+                let tx = self
+                    .gateway
+                    .get_transaction(utxo.txid)
+                    .map_err(|error| name_pasted_output(error, utxo))?;
                 fetch_queue.extend(
                     tx.vin
                         .iter()
@@ -200,8 +218,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         // Fetch ancestor transactions for input resolution, bounded by
         // max_ancestor_depth to prevent unbounded graph traversal.
         // A depth of 0 means we only keep the UTXO's own transaction.
-        // Level-order so the gateway can batch each frontier; failed
-        // ancestor fetches are skipped, transport errors propagate.
+        // Level-order so the gateway can batch each frontier; ancestors the
+        // node cannot find are skipped, any other error fails the scan.
         let max_depth = self.settings.config.max_ancestor_depth;
         let mut frontier: Vec<Txid> = fetch_queue
             .into_iter()
@@ -266,6 +284,21 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             derived.extend(addrs);
         }
         Ok((internal, derived))
+    }
+}
+
+/// Prefix a node error with the pasted output it came from, so the user
+/// knows which one to check or remove.
+fn name_pasted_output(error: AnalysisError, utxo: &UtxoInput) -> AnalysisError {
+    let place = format!("pasted output {}:{}", utxo.txid, utxo.vout);
+    match error {
+        AnalysisError::EnvironmentUnavailable(message) => {
+            AnalysisError::EnvironmentUnavailable(format!("{place}: {message}"))
+        }
+        AnalysisError::TransactionNotFound(message) => {
+            AnalysisError::TransactionNotFound(format!("{place}: {message}"))
+        }
+        other => other,
     }
 }
 

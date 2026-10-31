@@ -3,6 +3,7 @@ use bitcoin::{Address, Amount, Txid};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::error::AnalysisError;
 use crate::gateway::WalletTxCategory;
 
 /// Serde helper: serialize an [`Address<NetworkUnchecked>`] via its checked
@@ -268,9 +269,18 @@ mod summary_tests {
     }
 }
 
-/// Convert a BTC f64 value to an [`Amount`].
-pub fn btc_to_amount(btc: f64) -> Amount {
-    Amount::from_sat((btc * 1e8).round() as u64)
+/// Convert a BTC f64 value, as the node reports it, to an [`Amount`].
+///
+/// A negative, non-finite or above-supply value is an error: casting it
+/// would saturate to a plausible-looking amount instead.
+pub fn btc_to_amount(btc: f64) -> Result<Amount, AnalysisError> {
+    let max_btc = Amount::MAX_MONEY.to_btc();
+    if !btc.is_finite() || btc < 0.0 || btc > max_btc {
+        return Err(AnalysisError::EnvironmentUnavailable(format!(
+            "invalid BTC amount from the node: {btc}"
+        )));
+    }
+    Ok(Amount::from_sat((btc * 1e8).round() as u64))
 }
 
 /// Metadata about a derived address.
@@ -310,4 +320,38 @@ pub struct WalletTx {
     pub category: WalletTxCategory,
     pub amount: Amount,
     pub confirmations: u32,
+}
+
+#[cfg(test)]
+mod amount_tests {
+    use super::*;
+
+    #[test]
+    fn valid_amounts_convert_to_the_nearest_satoshi() {
+        let cases = [
+            (0.0, 0),
+            (0.00000001, 1),
+            (0.1, 10_000_000),
+            (1.23456789, 123_456_789),
+            (20_999_999.99999999, 2_099_999_999_999_999),
+            (21_000_000.0, 2_100_000_000_000_000),
+        ];
+        for (btc, sat) in cases {
+            assert_eq!(btc_to_amount(btc).unwrap(), Amount::from_sat(sat), "{btc}");
+        }
+    }
+
+    #[test]
+    fn values_that_cannot_be_an_amount_are_errors_not_zero() {
+        for btc in [
+            -0.00000001,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            21_000_000.00000001,
+        ] {
+            assert!(btc_to_amount(btc).is_err(), "{btc} must be rejected");
+        }
+    }
 }

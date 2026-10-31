@@ -91,15 +91,21 @@ fn pasted() -> UtxoInput {
 
 struct FakeGateway {
     transactions: HashMap<Txid, DecodedTransaction>,
-    history: Result<WalletHistory, String>,
+    broken: HashSet<Txid>,
+    normalize_error: Option<AnalysisError>,
+    txindex: Result<bool, AnalysisError>,
+    history: Result<WalletHistory, AnalysisError>,
     scanned: RefCell<Vec<String>>,
     persisted: RefCell<Vec<bool>>,
 }
 
 impl FakeGateway {
-    fn new(history: Result<WalletHistory, String>) -> Self {
+    fn new(history: Result<WalletHistory, AnalysisError>) -> Self {
         Self {
             transactions: HashMap::from([(txid(1), payment(1))]),
+            broken: HashSet::new(),
+            normalize_error: None,
+            txindex: Ok(false),
             history,
             scanned: RefCell::new(Vec::new()),
             persisted: RefCell::new(Vec::new()),
@@ -109,7 +115,10 @@ impl FakeGateway {
 
 impl BlockchainGateway for FakeGateway {
     fn normalize_descriptor(&self, descriptor: &str) -> Result<String, AnalysisError> {
-        Ok(descriptor.to_owned())
+        match &self.normalize_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(descriptor.to_owned()),
+        }
     }
 
     fn derive_addresses(
@@ -128,9 +137,7 @@ impl BlockchainGateway for FakeGateway {
         self.scanned
             .borrow_mut()
             .extend(descriptors.iter().map(|d| d.desc.clone()));
-        self.history
-            .clone()
-            .map_err(AnalysisError::EnvironmentUnavailable)
+        self.history.clone()
     }
 
     fn list_wallet_descriptors(&self, _: &str) -> Result<Vec<ResolvedDescriptor>, AnalysisError> {
@@ -145,11 +152,18 @@ impl BlockchainGateway for FakeGateway {
         Ok(HashSet::new())
     }
 
+    fn txindex_synced(&self) -> Result<bool, AnalysisError> {
+        self.txindex.clone()
+    }
+
     fn get_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
+        if self.broken.contains(&txid) {
+            return Err(AnalysisError::EnvironmentUnavailable(format!("bad {txid}")));
+        }
         self.transactions
             .get(&txid)
             .cloned()
-            .ok_or_else(|| AnalysisError::EnvironmentUnavailable(format!("unknown {txid}")))
+            .ok_or_else(|| AnalysisError::TransactionNotFound(format!("unknown {txid}")))
     }
 }
 
@@ -191,7 +205,9 @@ fn the_address_history_comes_through_the_single_address_scan_path() {
 
 #[test]
 fn an_address_whose_history_the_node_cannot_serve_is_counted_not_fatal() {
-    let gateway = FakeGateway::new(Err("wallet support is disabled".into()));
+    let gateway = FakeGateway::new(Err(AnalysisError::HistoryUnavailable(
+        "Method not found".into(),
+    )));
     let report = scan(&gateway);
     assert_eq!(report.stats.addresses_without_history, 1);
     assert!(address_reuse(&report).is_none());
@@ -239,4 +255,126 @@ fn utxo_mode_never_keeps_a_cache_wallet_for_its_addresses() {
         .analyze(ScanTarget::Utxos(vec![pasted()]))
         .expect("utxo scan");
     assert_eq!(gateway.persisted.borrow().as_slice(), [false]);
+}
+
+#[test]
+fn an_ancestor_the_node_cannot_find_is_skipped() {
+    let gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    let fetched = gateway.get_transactions(&[txid(1001)]).expect("lookup");
+    assert!(matches!(
+        fetched[0].1,
+        Err(AnalysisError::TransactionNotFound(_))
+    ));
+    scan(&gateway);
+}
+
+#[test]
+fn an_ancestor_with_invalid_data_fails_the_scan() {
+    let mut gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    gateway.broken.insert(txid(1001));
+    let result = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn invalid_data_in_the_address_history_fails_the_scan() {
+    let bad = AnalysisError::EnvironmentUnavailable("invalid amount -1 BTC in listunspent".into());
+    let gateway = FakeGateway::new(Err(bad.clone()));
+    let result = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]));
+    assert_eq!(result.err(), Some(bad));
+}
+
+#[test]
+fn a_pasted_output_the_node_cannot_find_is_named_in_the_error() {
+    let gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    let missing = UtxoInput {
+        txid: txid(7),
+        vout: 3,
+        value: None,
+        address: None,
+    };
+    let error = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![missing]))
+        .expect_err("an unknown pasted output must fail the scan");
+    assert!(
+        matches!(error, AnalysisError::TransactionNotFound(_)),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains(&format!("{}:3", txid(7))),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_pasted_output_the_node_fails_on_is_named_in_the_error() {
+    let mut gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    gateway.broken.insert(txid(1));
+    let error = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]))
+        .expect_err("a node error on a pasted output must fail the scan");
+    assert!(
+        error.to_string().contains(&format!("{}:0", txid(1))),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_address_history_the_node_cannot_look_up_is_counted_not_fatal() {
+    let gateway = FakeGateway::new(Err(AnalysisError::TransactionNotFound(
+        "No such mempool transaction. Use -txindex".into(),
+    )));
+    let report = scan(&gateway);
+    assert_eq!(report.stats.addresses_without_history, 1);
+}
+
+#[test]
+fn a_descriptor_scan_still_fails_on_a_wallet_tx_the_node_cannot_find() {
+    let missing = AnalysisError::TransactionNotFound("No such mempool transaction".into());
+    let gateway = FakeGateway::new(Err(missing.clone()));
+    let result = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Descriptor(format!("addr({ADDR})")));
+    assert_eq!(result.err(), Some(missing));
+}
+
+#[test]
+fn a_node_error_while_normalizing_the_address_history_keeps_its_variant() {
+    let mut gateway = FakeGateway::new(Ok(chain_history(1, 1)));
+    let busy = AnalysisError::EnvironmentUnavailable("Loading block index...".into());
+    gateway.normalize_error = Some(busy.clone());
+    let result = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]));
+    assert_eq!(result.err(), Some(busy));
+}
+
+#[test]
+fn a_wallet_tx_a_synced_txindex_cannot_find_fails_the_utxo_scan() {
+    let missing = AnalysisError::TransactionNotFound("evicted".into());
+    let mut gateway = FakeGateway::new(Err(missing.clone()));
+    gateway.txindex = Ok(true);
+    let result = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]));
+    assert_eq!(result.err(), Some(missing));
+}
+
+#[test]
+fn a_call_the_whitelist_forbids_during_the_address_history_is_counted_not_fatal() {
+    let gateway = FakeGateway::new(Err(AnalysisError::RpcForbidden {
+        method: "listunspent".into(),
+        detail: String::new(),
+    }));
+    let report = scan(&gateway);
+    assert_eq!(report.stats.addresses_without_history, 1);
+}
+
+#[test]
+fn a_failed_index_probe_fails_the_utxo_scan() {
+    let mut gateway = FakeGateway::new(Err(AnalysisError::TransactionNotFound("gone".into())));
+    let busy = AnalysisError::EnvironmentUnavailable("getindexinfo: Loading".into());
+    gateway.txindex = Err(busy.clone());
+    let result = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Utxos(vec![pasted()]));
+    assert_eq!(result.err(), Some(busy));
 }
