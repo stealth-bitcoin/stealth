@@ -199,12 +199,13 @@ impl TxGraph {
                     vulnerability_type: VulnerabilityType::ToxicChange,
                     severity: Severity::High,
                     description: format!(
-                        "Toxic change ({} sats) from TX {} was later merged with a larger \
+                        "Toxic change ({} sats) from TX {}:{} was later merged with a larger \
                          UTXO in TX {}, linking both transactions",
-                        sats, txid, child_txid
+                        sats, txid, out.index, child_txid
                     ),
                     details: Some(json!({
                         "source_txid": txid.to_string(),
+                        "change_vout": out.index,
                         "change_address": out.address.assume_checked_ref().to_string(),
                         "change_sats": sats,
                         "spending_txid": child_txid.to_string(),

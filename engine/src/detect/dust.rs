@@ -92,18 +92,15 @@ impl TxGraph {
 
         // Historical dust (already spent)
         let txids = self.ordered_txids();
-        let current_keys: HashSet<(Txid, String)> = self
-            .utxos
-            .iter()
-            .map(|u| (u.txid, u.address.assume_checked_ref().to_string()))
-            .collect();
+        let current_keys: HashSet<(Txid, u32)> =
+            self.utxos.iter().map(|u| (u.txid, u.vout)).collect();
         let mut seen = HashSet::new();
         for txid in &txids {
             let outputs = self.get_output_addresses(txid);
             for out in &outputs {
                 let amt = out.value;
                 if amt <= dust && self.is_ours(&out.address) {
-                    let key = (*txid, out.address.assume_checked_ref().to_string());
+                    let key = (*txid, out.index);
                     if !current_keys.contains(&key) && seen.insert(key) {
                         let attack = self.dust_attack_evidence(txid, thresholds);
                         let severity = if attack.is_some() {
@@ -116,6 +113,7 @@ impl TxGraph {
                             "address": out.address.assume_checked_ref().to_string(),
                             "sats": amt.to_sat(),
                             "txid": txid,
+                            "vout": out.index,
                         });
                         if let Some(ev) = attack.as_ref() {
                             details["dust_attack"] = ev.clone();
