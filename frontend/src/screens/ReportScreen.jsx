@@ -140,12 +140,12 @@ const LEFT_OUT = {
     beforeOne: 'it became conflicted',
     beforeMany: 'they became conflicted',
   },
-  replaced: {
+  mempoolConflicted: {
     settled: false,
-    one: 'the wallet replaced',
-    many: 'the wallet replaced',
-    beforeOne: 'it was replaced',
-    beforeMany: 'they were replaced',
+    one: 'that conflicts with one in the mempool',
+    many: 'that conflict with ones in the mempool',
+    beforeOne: 'the conflicting one reached the mempool',
+    beforeMany: 'the conflicting ones reached the mempool',
   },
   abandoned: {
     settled: false,
@@ -184,11 +184,11 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
   const { stats, findings, warnings, summary } = report
   const kind = effectiveKind(rawKind, descriptor)
   const conflicted = stats.conflicted_txids ?? []
-  const replaced = (stats.mempool_conflicted_txids ?? []).map(
-    (r) => `${r.txid} was replaced by ${r.conflicts_with}, which is not confirmed yet`,
+  const inMempoolConflict = (stats.mempool_conflicted_txids ?? []).map(
+    (r) => `${r.txid} conflicts with ${r.conflicts_with}, which is in the mempool and not confirmed yet`,
   )
   const abandoned = stats.abandoned_txids ?? []
-  const anyLeftOut = conflicted.length + replaced.length + abandoned.length > 0
+  const anyLeftOut = conflicted.length + inMempoolConflict.length + abandoned.length > 0
   const emptyScan = summary.analyzed_nothing && findings.length === 0 && warnings.length === 0
 
   return (
@@ -252,7 +252,7 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
 
         {/* Wallet transactions left out */}
         <LeftOutNote items={conflicted} reason={LEFT_OUT.conflicted} />
-        <LeftOutNote items={replaced} reason={LEFT_OUT.replaced} />
+        <LeftOutNote items={inMempoolConflict} reason={LEFT_OUT.mempoolConflicted} />
         <LeftOutNote items={abandoned} reason={LEFT_OUT.abandoned} />
 
         {/* Nothing-analyzed banner; the notes above already say why, when they are shown */}

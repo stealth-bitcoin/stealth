@@ -415,10 +415,11 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(&format!(
-                "Left out 1 transaction the wallet replaced. It may still confirm; until then \
-                 it is not part of the history the wallet sees. It may still have been seen by the network before it was replaced; \
-                 Stealth does not analyze it.\n  {CONFLICTED} was replaced by {REPLACEMENT}, \
-                 which is not confirmed yet\n"
+                "Left out 1 transaction that conflicts with one in the mempool. It may still \
+                 confirm; until then it is not part of the history the wallet sees. It may still \
+                 have been seen by the network before the conflicting one reached the mempool; \
+                 Stealth does not analyze it.\n  {CONFLICTED} conflicts with {REPLACEMENT}, \
+                 which is in the mempool and not confirmed yet\n"
             )),
             "{text}"
         );
@@ -438,9 +439,10 @@ mod ordering {
         let text = text_report(&clean);
         assert!(
             text.contains(
-                "Left out 2 transactions the wallet replaced. They may still confirm; until \
-                 then they are not part of the history the wallet sees. They may still have been seen by the network before they \
-                 were replaced; Stealth does not analyze them.\n"
+                "Left out 2 transactions that conflict with ones in the mempool. They may still \
+                 confirm; until then they are not part of the history the wallet sees. They may \
+                 still have been seen by the network before the conflicting ones reached the \
+                 mempool; Stealth does not analyze them.\n"
             ),
             "{text}"
         );

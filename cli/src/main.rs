@@ -267,25 +267,25 @@ fn text_report(report: &stealth_engine::Report) -> String {
             before_many: "they became conflicted",
         },
     );
-    let replaced: Vec<String> = stats
+    let in_mempool_conflict: Vec<String> = stats
         .mempool_conflicted_txids
         .iter()
         .map(|r| {
             format!(
-                "{} was replaced by {}, which is not confirmed yet",
+                "{} conflicts with {}, which is in the mempool and not confirmed yet",
                 r.txid, r.conflicts_with
             )
         })
         .collect();
     left_out_note(
         &mut lines,
-        &replaced,
+        &in_mempool_conflict,
         &LeftOutReason {
             settled: false,
-            one: "the wallet replaced",
-            many: "the wallet replaced",
-            before_one: "it was replaced",
-            before_many: "they were replaced",
+            one: "that conflicts with one in the mempool",
+            many: "that conflict with ones in the mempool",
+            before_one: "the conflicting one reached the mempool",
+            before_many: "the conflicting ones reached the mempool",
         },
     );
     let abandoned: Vec<String> = stats
@@ -306,7 +306,8 @@ fn text_report(report: &stealth_engine::Report) -> String {
     );
 
     // The notes say why nothing was analyzed; the empty-scan hint would contradict them.
-    let any_left_out = !(conflicted.is_empty() && replaced.is_empty() && abandoned.is_empty());
+    let any_left_out =
+        !(conflicted.is_empty() && in_mempool_conflict.is_empty() && abandoned.is_empty());
     if is_empty_report(&report.summary) && any_left_out {
         lines.push("Nothing else was left to analyze.".to_owned());
         return lines.join("\n") + "\n";
