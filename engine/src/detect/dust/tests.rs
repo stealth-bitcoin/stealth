@@ -13,6 +13,7 @@ use crate::gateway::{
 };
 use crate::graph::TxGraph;
 use crate::types::{Finding, Severity};
+use serde_json::json;
 
 fn txid(n: u32) -> Txid {
     format!("{n:064x}").parse().expect("txid")
@@ -770,4 +771,425 @@ fn two_unattributed_inputs_with_two_equal_outputs_still_count() {
     let a = wpkh(1);
     let findings = dust_spending(with_outputs(dust_with_strangers(&a, 2), equal_outputs(2)));
     assert_eq!(findings.len(), 1, "{findings:?}");
+}
+
+/// A 100,000-sat coin at `a` peeled by `hops` spends, each paying a stranger and sending its
+/// change to the next own address, the last change being `change_sats` at `wpkh(10)`. The
+/// scan knows that last address, and the earlier ones when `inputs_known`. When `spent_with`
+/// is given, the last change is then spent with that coin (`wpkh(2)`, known) to a stranger;
+/// otherwise it is still unspent.
+fn own_change(
+    hops: u32,
+    change_sats: u64,
+    inputs_known: bool,
+    spent_with: Option<u64>,
+) -> WalletHistory {
+    let last = wpkh(10);
+    let fund = txid(1);
+    let mut transactions =
+        HashMap::from([(fund, tx(fund, vec![], vec![out(0, &wpkh(1), 100_000)]))]);
+    let mut wallet_txs = Vec::new();
+    if inputs_known {
+        wallet_txs.push(entry(fund, Some(&wpkh(1)), WalletTxCategory::Receive));
+    }
+    let (mut prev, mut held) = (fund, 100_000u64);
+    for hop in 1..=hops {
+        let id = txid(1 + hop);
+        let change = if hop == hops { change_sats } else { held / 2 };
+        let to = if hop == hops {
+            last.clone()
+        } else {
+            wpkh(20 + hop as u8)
+        };
+        let vin = vec![TxInputRef {
+            previous_txid: prev,
+            previous_vout: 1.min(hop - 1),
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        }];
+        let vout = vec![
+            out(0, &wpkh(150 + hop as u8), held - change - 1_000),
+            out(1, &to, change),
+        ];
+        transactions.insert(id, tx(id, vin, vout));
+        if inputs_known {
+            wallet_txs.push(entry(id, None, WalletTxCategory::Send));
+        }
+        if inputs_known || hop == hops {
+            wallet_txs.push(entry(id, Some(&to), WalletTxCategory::Receive));
+        }
+        (prev, held) = (id, change);
+    }
+    let mut utxos = Vec::new();
+    match spent_with {
+        Some(sats) => {
+            let (other, child) = (txid(80), txid(81));
+            transactions.insert(other, tx(other, vec![], vec![out(0, &wpkh(2), sats)]));
+            wallet_txs.push(entry(other, Some(&wpkh(2)), WalletTxCategory::Receive));
+            let vin = [(prev, 1), (other, 0)]
+                .into_iter()
+                .map(|(previous_txid, previous_vout)| TxInputRef {
+                    previous_txid,
+                    previous_vout,
+                    sequence: 0xffff_fffd,
+                    coinbase: false,
+                })
+                .collect();
+            let vout = vec![out(0, &wpkh(160), sats + change_sats - 1_000)];
+            transactions.insert(child, tx(child, vin, vout));
+            wallet_txs.push(entry(child, None, WalletTxCategory::Send));
+        }
+        None => utxos.push(Utxo {
+            txid: prev,
+            vout: 1,
+            address: Some(last.clone()),
+            amount: Amount::from_sat(change_sats),
+            confirmations: 3,
+            script_type: DescriptorType::P2wpkh,
+        }),
+    }
+    WalletHistory {
+        wallet_txs,
+        utxos,
+        transactions,
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::new(),
+        ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
+    }
+}
+
+/// Dust findings of `history`, from a partial scan when `partial`.
+fn dust_in(history: WalletHistory, partial: bool) -> Vec<Finding> {
+    let mut graph = TxGraph::from_wallet_history(history);
+    graph.partial_scan = partial;
+    let mut findings = Vec::new();
+    graph.detect_dust(&DetectorThresholds::default(), &mut findings);
+    findings
+}
+
+fn only(findings: &[Finding]) -> &Finding {
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    &findings[0]
+}
+
+fn origin(f: &Finding) -> &str {
+    f.details
+        .as_ref()
+        .and_then(|d| d["origin"].as_str())
+        .unwrap_or_default()
+}
+
+/// The unspent finding of own change: Low, named as change of the user's spend, freeze first.
+fn assert_unspent_own_change(f: &Finding, parent: Txid, from: &Address<NetworkUnchecked>) {
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "own_change", "{f:?}");
+    let from = from.assume_checked_ref().to_string();
+    assert!(
+        f.description.contains(&format!(
+            "small change of your own spend in TX {parent}, which spends your coins at {from}"
+        )),
+        "{}",
+        f.description
+    );
+    assert!(
+        !f.description.contains("if that address"),
+        "{}",
+        f.description
+    );
+    let correction = f.correction.as_deref().expect("a correction");
+    assert!(correction.starts_with("Freeze it"), "{correction}");
+    for needle in [
+        "already linked to the coins that spend came from",
+        "spending it with coins of another origin links those to them as well",
+        "let a remainder this small go to the fee or stay in the same chain",
+        "spend it alone as fee",
+    ] {
+        assert!(correction.contains(needle), "{needle}: {correction}");
+    }
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(details["parent_input_addresses"], json!([from]));
+}
+
+#[test]
+fn own_change_under_1000_sats_is_low_and_named_as_change() {
+    for sats in [600, 400] {
+        let findings = dust_in(own_change(1, sats, true, None), false);
+        assert_unspent_own_change(only(&findings), txid(2), &wpkh(1));
+    }
+}
+
+#[test]
+fn the_last_change_of_a_peel_chain_is_own_change() {
+    let findings = dust_in(own_change(4, 600, true, None), false);
+    assert_unspent_own_change(only(&findings), txid(5), &wpkh(23));
+}
+
+/// A 100,000-sat coin of a stranger at `wpkh(200)` paying `sats` to `a`, still unspent, and
+/// `recipients` other strangers 500 sats each.
+fn received(sats: u64, recipients: u8) -> WalletHistory {
+    let (a, stranger) = (wpkh(1), wpkh(200));
+    let (theirs, fund) = (txid(90), txid(1));
+    let mut vout = vec![out(0, &a, sats)];
+    vout.extend((1..=recipients).map(|n| out(u32::from(n), &wpkh(100 + n), 500)));
+    vout.push(out(u32::from(recipients) + 1, &stranger, 50_000));
+    let vin = vec![TxInputRef {
+        previous_txid: theirs,
+        previous_vout: 0,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    }];
+    WalletHistory {
+        wallet_txs: vec![entry(fund, Some(&a), WalletTxCategory::Receive)],
+        utxos: vec![Utxo {
+            txid: fund,
+            vout: 0,
+            address: Some(a.clone()),
+            amount: Amount::from_sat(sats),
+            confirmations: 3,
+            script_type: DescriptorType::P2wpkh,
+        }],
+        transactions: HashMap::from([
+            (theirs, tx(theirs, vec![], vec![out(0, &stranger, 100_000)])),
+            (fund, tx(fund, vin, vout)),
+        ]),
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::new(),
+        ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
+    }
+}
+
+#[test]
+fn received_dust_keeps_its_severity_and_wording() {
+    for (sats, severity, label) in [
+        (600, Severity::Medium, "dust-class"),
+        (500, Severity::High, "STRICT_DUST"),
+    ] {
+        let findings = dust_in(received(sats, 0), false);
+        let f = only(&findings);
+        assert_eq!(f.severity, severity, "{f:?}");
+        assert_eq!(origin(f), "received", "{f:?}");
+        assert_eq!(
+            f.description,
+            format!(
+                "Dust UTXO {}:0 at {} ({sats} sats, {label}, unspent)",
+                txid(1),
+                wpkh(1).assume_checked_ref()
+            )
+        );
+        let correction = f.correction.as_deref().expect("a correction");
+        assert!(
+            correction.starts_with(
+                "Freeze it in your wallet: spending it with your other coins links your \
+                 other addresses to this one. To get rid of it"
+            ),
+            "{correction}"
+        );
+        assert!(!correction.contains("change"), "{correction}");
+    }
+}
+
+#[test]
+fn attack_shaped_dust_stays_critical_in_full_and_partial_scans() {
+    for partial in [false, true] {
+        let findings = dust_in(received(500, 9), partial);
+        let f = only(&findings);
+        assert_eq!(f.severity, Severity::Critical, "{f:?}");
+        assert_eq!(origin(f), "received", "{f:?}");
+        assert!(
+            f.description.ends_with("matches a dust-attack pattern"),
+            "{}",
+            f.description
+        );
+        assert!(!f.description.contains("change"), "{}", f.description);
+    }
+}
+
+#[test]
+fn own_change_spent_with_another_coin_is_a_low_historical_change_finding() {
+    let findings = dust_in(own_change(1, 600, true, Some(50_000)), false);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "own_change", "{f:?}");
+    assert_eq!(f.details.as_ref().expect("details")["status"], "spent");
+    assert!(
+        f.description.starts_with("Historical change output"),
+        "{}",
+        f.description
+    );
+    assert!(
+        f.description.contains(&format!(
+            "small change of your own spend in TX {}, which spent your coins at {}",
+            txid(2),
+            wpkh(1).assume_checked_ref()
+        )),
+        "{}",
+        f.description
+    );
+    let correction = f.correction.as_deref().expect("a correction");
+    assert!(
+        correction.starts_with("This change has already been spent."),
+        "{correction}"
+    );
+    for needle in [
+        "freeze small change like this in your wallet's coin control",
+        "never spent with coins of another origin",
+        "let a remainder this small go to the fee or stay in the same chain",
+    ] {
+        assert!(correction.contains(needle), "{needle}: {correction}");
+    }
+}
+
+#[test]
+fn received_dust_spent_with_another_coin_keeps_its_historical_finding() {
+    let findings = spent_dust(0, &[(&wpkh(2), 50_000)], vec![out(0, &wpkh(150), 49_000)]);
+    let f = spent_finding(&findings).expect("a spent dust finding");
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "received", "{f:?}");
+    assert!(
+        f.description.starts_with("Historical dust output"),
+        "{}",
+        f.description
+    );
+    assert!(!f.description.contains("change"), "{}", f.description);
+}
+
+#[test]
+fn a_partial_scan_words_change_of_unattributed_inputs_conditionally() {
+    let findings = dust_in(own_change(1, 500, false, None), true);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Medium, "{f:?}");
+    assert_eq!(origin(f), "possibly_own_change", "{f:?}");
+    let from = wpkh(1).assume_checked_ref().to_string();
+    assert!(
+        f.description.contains(&format!(
+            "; TX {} spends {from}, so it is small change of your own spend if that address \
+             is yours",
+            txid(2)
+        )),
+        "{}",
+        f.description
+    );
+    let correction = f.correction.as_deref().expect("a correction");
+    assert!(correction.starts_with("Freeze it"), "{correction}");
+    assert!(
+        correction.contains("If that address is yours, this coin is change of your own spend"),
+        "{correction}"
+    );
+    assert_eq!(
+        f.details.as_ref().expect("details")["parent_input_addresses"],
+        json!([from])
+    );
+    // The scan that knows the inputs is certain.
+    let findings = dust_in(own_change(1, 500, true, None), true);
+    assert_unspent_own_change(only(&findings), txid(2), &wpkh(1));
+}
+
+#[test]
+fn a_full_scan_does_not_call_a_strangers_spend_own_change() {
+    let findings = dust_in(own_change(1, 500, false, None), false);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::High, "{f:?}");
+    assert_eq!(origin(f), "received", "{f:?}");
+}
+
+#[test]
+fn a_partial_scan_words_spent_change_of_unattributed_inputs_conditionally() {
+    let findings = dust_in(own_change(1, 600, false, Some(50_000)), true);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "possibly_own_change", "{f:?}");
+    assert!(
+        f.description
+            .contains("so it was small change of your own spend if that address is yours"),
+        "{}",
+        f.description
+    );
+    let correction = f.correction.as_deref().expect("a correction");
+    assert!(
+        correction.starts_with("This dust has already been spent."),
+        "{correction}"
+    );
+    assert!(
+        correction.contains("If that address is yours, it was change of your own spend"),
+        "{correction}"
+    );
+}
+
+#[test]
+fn a_coinjoin_shaped_parent_in_a_partial_scan_is_received_dust() {
+    let mut history = received(500, 0);
+    let fund = txid(1);
+    let mut vin = Vec::new();
+    for i in 0..3u32 {
+        let theirs = txid(90 + i);
+        history.transactions.insert(
+            theirs,
+            tx(theirs, vec![], vec![out(0, &wpkh(200 + i as u8), 60_000)]),
+        );
+        vin.push(TxInputRef {
+            previous_txid: theirs,
+            previous_vout: 0,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        });
+    }
+    let vout = vec![
+        out(0, &wpkh(1), 500),
+        out(1, &wpkh(210), 50_000),
+        out(2, &wpkh(211), 50_000),
+    ];
+    history.transactions.insert(fund, tx(fund, vin, vout));
+    let findings = dust_in(history, true);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::High, "{f:?}");
+    assert_eq!(origin(f), "received", "{f:?}");
+}
+
+#[test]
+fn pasted_own_change_already_spent_is_named_as_change() {
+    let mut history = own_change(1, 600, true, Some(50_000));
+    history.utxos.push(Utxo {
+        txid: txid(2),
+        vout: 1,
+        address: Some(wpkh(10)),
+        amount: Amount::from_sat(600),
+        confirmations: 3,
+        script_type: DescriptorType::P2wpkh,
+    });
+    let findings = dust_in(history, false);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "own_change", "{f:?}");
+    assert!(
+        f.description.starts_with(&format!(
+            "Change output {}:1 at {} (600 sats) was pasted as unspent but is already spent",
+            txid(2),
+            wpkh(10).assume_checked_ref()
+        )),
+        "{}",
+        f.description
+    );
+}
+
+#[test]
+fn a_known_input_makes_change_certain_in_a_partial_scan_next_to_an_unattributed_one() {
+    let mut history = own_change(1, 500, true, None);
+    let (theirs, spend) = (txid(70), txid(2));
+    history
+        .transactions
+        .insert(theirs, tx(theirs, vec![], vec![out(0, &wpkh(201), 30_000)]));
+    if let Some(parent) = history.transactions.get_mut(&spend) {
+        parent.vin.push(TxInputRef {
+            previous_txid: theirs,
+            previous_vout: 0,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        });
+    }
+    let findings = dust_in(history, true);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "own_change", "{f:?}");
 }

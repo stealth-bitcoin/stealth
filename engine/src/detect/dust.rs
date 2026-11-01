@@ -22,6 +22,86 @@ const FEE_ONLY_SPEND: &str = "To get rid of it, spend it alone as fee: one coin 
      holds an ordinals inscription or runes, spending it as fee loses them: an ordinals \
      inscription goes to the miner and runes are burned; either way they are lost.";
 
+/// Advice for small change of the user's own spend, given after the freeze advice.
+const NEXT_TIME: &str = "Next time, let a remainder this small go to the fee or stay in the \
+     same chain instead of becoming a change output.";
+
+/// Whose spend made a dust coin, from the inputs of its parent tx.
+enum Origin {
+    /// No input of the parent is the wallet's: someone sent it.
+    Received,
+    /// The parent spends the wallet's coins at these addresses: it is the user's change.
+    OwnChange(Vec<String>),
+    /// In a partial scan, the parent spends coins at these addresses, which the scan cannot
+    /// attribute: it is the user's change if they are the user's.
+    PossiblyOwnChange(Vec<String>),
+}
+
+impl Origin {
+    fn label(&self) -> &'static str {
+        match self {
+            Origin::Received => "received",
+            Origin::OwnChange(_) => "own_change",
+            Origin::PossiblyOwnChange(_) => "possibly_own_change",
+        }
+    }
+
+    /// What the description calls the coin.
+    fn noun(&self) -> &'static str {
+        match self {
+            Origin::OwnChange(_) => "change",
+            _ => "dust",
+        }
+    }
+
+    /// Adds the origin, and the parent's input addresses for change, to `details`.
+    fn describe(&self, details: &mut serde_json::Value) {
+        details["origin"] = json!(self.label());
+        if let Origin::OwnChange(from) | Origin::PossiblyOwnChange(from) = self {
+            details["parent_input_addresses"] = json!(from);
+        }
+    }
+
+    /// The description's note on whose spend made the coin, in the present or past tense.
+    fn note(&self, parent: &Txid, spent: bool) -> String {
+        let (spends, is) = if spent {
+            ("spent", "was")
+        } else {
+            ("spends", "is")
+        };
+        match self {
+            Origin::Received => String::new(),
+            Origin::OwnChange(from) => format!(
+                "; it {is} small change of your own spend in TX {parent}, which {spends} your \
+                 coins at {}",
+                list_addresses(from)
+            ),
+            Origin::PossiblyOwnChange(from) => format!(
+                "; TX {parent} spends {}, so it {is} small change of your own spend {}",
+                list_addresses(from),
+                if_yours(from)
+            ),
+        }
+    }
+}
+
+/// `text` with its first letter in upper case.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+fn if_yours(addresses: &[String]) -> &'static str {
+    if addresses.len() == 1 {
+        "if that address is yours"
+    } else {
+        "if those addresses are yours"
+    }
+}
+
 impl TxGraph {
     // ── 3. Dust UTXO Detection ─────────────────────────────────────────────
     //
@@ -53,12 +133,16 @@ impl TxGraph {
                         utxo.amount,
                         thresholds,
                     );
+                    let attack = self.dust_attack_evidence(&utxo.txid, thresholds).is_some();
+                    let origin = self.dust_origin(&utxo.txid, attack);
                     finding.description = format!(
-                    "Dust output {}:{} at {} ({} sats) was pasted as unspent but is already spent",
+                    "{} output {}:{} at {} ({} sats) was pasted as unspent but is already spent{}",
+                    capitalized(origin.noun()),
                     utxo.txid,
                     utxo.vout,
                     utxo.address.assume_checked_ref(),
                     utxo.amount.to_sat(),
+                    origin.note(&utxo.txid, true),
                 );
                     finding
                 } else {
@@ -146,6 +230,36 @@ impl TxGraph {
         })
     }
 
+    /// Whose spend made a dust coin of `parent`: the wallet's own when the parent spends any
+    /// of its coins, possibly the wallet's when, in a partial scan, it spends coins the scan
+    /// cannot attribute, and received otherwise. An attack-shaped parent is always received.
+    fn dust_origin(&self, parent: &Txid, attack: bool) -> Origin {
+        if attack {
+            return Origin::Received;
+        }
+        let (mut own, mut unattributed) = (Vec::new(), Vec::new());
+        for input in self.get_input_addresses(parent) {
+            let list = if self.is_ours(&input.address) {
+                &mut own
+            } else if self.unattributed(parent, &input.address) {
+                &mut unattributed
+            } else {
+                continue;
+            };
+            let text = input.address.assume_checked_ref().to_string();
+            if !list.contains(&text) {
+                list.push(text);
+            }
+        }
+        if !own.is_empty() {
+            Origin::OwnChange(own)
+        } else if !unattributed.is_empty() {
+            Origin::PossiblyOwnChange(unattributed)
+        } else {
+            Origin::Received
+        }
+    }
+
     /// Outpoints of own dust in the UTXO list that no confirmed tx in the
     /// history spends.
     pub(crate) fn listed_dust(&self, thresholds: &DetectorThresholds) -> Vec<OutPoint> {
@@ -211,10 +325,13 @@ impl TxGraph {
             Severity::Medium
         };
         let attack = self.dust_attack_evidence(txid, thresholds);
-        let severity = if attack.is_some() {
-            Severity::Critical
-        } else {
-            base_severity
+        let origin = self.dust_origin(txid, attack.is_some());
+        let severity = match origin {
+            _ if attack.is_some() => Severity::Critical,
+            Origin::Received => base_severity,
+            // Change the scan cannot attribute may still be someone else's dust.
+            Origin::PossiblyOwnChange(_) => Severity::Medium,
+            Origin::OwnChange(_) => Severity::Low,
         };
         let mut details = json!({
             "status": "unspent",
@@ -224,6 +341,7 @@ impl TxGraph {
             "txid": txid,
             "vout": vout,
         });
+        origin.describe(&mut details);
         if let Some(ev) = attack.as_ref() {
             details["dust_attack"] = ev.clone();
         }
@@ -239,18 +357,36 @@ impl TxGraph {
             )
         } else {
             format!(
-                "Dust UTXO {}:{} at {} ({} sats, {}, unspent)",
+                "{} UTXO {}:{} at {} ({} sats, {}, unspent){}",
+                capitalized(origin.noun()),
                 txid,
                 vout,
                 address.assume_checked_ref(),
                 amt.to_sat(),
                 label,
+                origin.note(txid, false),
             )
         };
-        let correction = format!(
-            "Freeze it in your wallet: spending it with your other coins links your \
-             other addresses to this one. {FEE_ONLY_SPEND}"
-        );
+        let correction = match &origin {
+            Origin::OwnChange(_) => format!(
+                "Freeze it in your wallet: as change of your own spend, it is already linked \
+                 to the coins that spend came from, and spending it with coins of another origin links those to them as \
+                 well. If you spend it, spend it only with coins of that same chain. \
+                 {FEE_ONLY_SPEND} {NEXT_TIME}"
+            ),
+            Origin::PossiblyOwnChange(from) => format!(
+                "Freeze it in your wallet: spending it with your other coins links your \
+                 other addresses to this one. {}, this coin is change of your own spend, \
+                 already linked to the coins that spend came from, and spending it with \
+                 coins of another origin links those to them as well; next time, let a \
+                 remainder this small go to the fee or stay in the same chain. {FEE_ONLY_SPEND}",
+                capitalized(if_yours(from))
+            ),
+            Origin::Received => format!(
+                "Freeze it in your wallet: spending it with your other coins links your \
+                 other addresses to this one. {FEE_ONLY_SPEND}"
+            ),
+        };
         Finding {
             vulnerability_type: VulnerabilityType::Dust,
             severity,
@@ -269,6 +405,7 @@ impl TxGraph {
         thresholds: &DetectorThresholds,
     ) -> Finding {
         let attack = self.dust_attack_evidence(txid, thresholds);
+        let origin = self.dust_origin(txid, attack.is_some());
         let alone = self.spent_from_its_address_only(&(*txid, vout), address);
         let severity = if attack.is_some() && !alone {
             Severity::Critical
@@ -282,6 +419,7 @@ impl TxGraph {
             "txid": txid,
             "vout": vout,
         });
+        origin.describe(&mut details);
         if let Some(ev) = attack.as_ref() {
             details["dust_attack"] = ev.clone();
         }
@@ -296,29 +434,47 @@ impl TxGraph {
             )
         } else {
             format!(
-                "Historical dust output {}:{} at {} ({} sats, already spent)",
+                "Historical {} output {}:{} at {} ({} sats, already spent){}",
+                origin.noun(),
                 txid,
                 vout,
                 address.assume_checked_ref(),
                 amt.to_sat(),
+                origin.note(txid, true),
             )
+        };
+        let correction = match (&origin, alone) {
+            (Origin::OwnChange(_), true) => format!(
+                "This change has already been spent with no coins from your other \
+                 addresses, so it linked none of them to this one. {NEXT_TIME}"
+            ),
+            (Origin::OwnChange(_), false) => "This change has already been spent. From now \
+                 on, freeze small change like this in your wallet's coin control so it is \
+                 never spent with coins of another origin, and let a remainder this small go \
+                 to the fee or stay in the same chain."
+                .into(),
+            (_, true) => "This dust has already been spent with no coins from your other \
+                 addresses, so it linked none of them to this one. Keep any other dust \
+                 like it frozen in your wallet's coin control."
+                .into(),
+            (_, false) => "This dust has already been spent. From now on, freeze dust like \
+                 this in your wallet's coin control so it is never spent with your other coins."
+                .into(),
+        };
+        let correction = match &origin {
+            Origin::PossiblyOwnChange(from) => format!(
+                "{correction} {}, it was change of your own spend: next time, let a \
+                 remainder this small go to the fee or stay in the same chain.",
+                capitalized(if_yours(from))
+            ),
+            _ => correction,
         };
         Finding {
             vulnerability_type: VulnerabilityType::Dust,
             severity,
             description,
             details: Some(details),
-            correction: Some(
-                if alone {
-                    "This dust has already been spent with no coins from your other \
-                     addresses, so it linked none of them to this one. Keep any other dust \
-                     like it frozen in your wallet's coin control."
-                } else {
-                    "This dust has already been spent. From now on, freeze dust like this \
-                     in your wallet's coin control so it is never spent with your other coins."
-                }
-                .into(),
-            ),
+            correction: Some(correction),
         }
     }
 
@@ -331,6 +487,7 @@ impl TxGraph {
         thresholds: &DetectorThresholds,
     ) -> Finding {
         let attack = self.dust_attack_evidence(txid, thresholds);
+        let origin = self.dust_origin(txid, attack.is_some());
         let severity = if attack.is_some() {
             Severity::Critical
         } else {
@@ -343,6 +500,7 @@ impl TxGraph {
             "txid": txid,
             "vout": vout,
         });
+        origin.describe(&mut details);
         if let Some(ev) = attack.as_ref() {
             details["dust_attack"] = ev.clone();
         }
@@ -357,11 +515,13 @@ impl TxGraph {
             )
         } else {
             format!(
-                "Dust output {}:{} at {} ({} sats, spend status unknown)",
+                "{} output {}:{} at {} ({} sats, spend status unknown){}",
+                capitalized(origin.noun()),
                 txid,
                 vout,
                 address.assume_checked_ref(),
                 amt.to_sat(),
+                origin.note(txid, false),
             )
         };
         Finding {
