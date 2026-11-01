@@ -38,7 +38,10 @@
 //!
 //! Dust-attack patterns are detected as part of dust analysis (3): when the
 //! parent transaction matches the attack signature, the finding is escalated
-//! to CRITICAL and `dust_attack` evidence is attached to its details.
+//! to CRITICAL and `dust_attack` evidence is attached to its details. A small
+//! coin whose parent spends the wallet's own coins is the user's change, not
+//! received dust: its finding is LOW, or MEDIUM with conditional wording when a
+//! partial scan cannot attribute the parent's inputs.
 
 pub use stealth_model::config;
 pub use stealth_model::descriptor;
