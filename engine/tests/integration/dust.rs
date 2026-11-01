@@ -750,8 +750,9 @@ fn a_payout_leaving_change_under_1000_sats_is_own_change_not_received_dust() {
     assert_dust_advice(
         &report,
         VulnerabilityType::Dust,
-        "Next time, let a remainder this small go to the fee, or leave it in the payment \
-         instead of splitting it off as change.",
+        "If it is a remainder, next time let a remainder this small go to the fee, or leave it \
+         in the payment instead of splitting it off as change; if it carries an inscription or \
+         runes, or is a CoinJoin output, keep it as its own coin.",
     );
 
     // A scan of the change address alone cannot tell whose coin it spent.

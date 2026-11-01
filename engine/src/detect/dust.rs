@@ -22,9 +22,11 @@ const FEE_ONLY_SPEND: &str = "To get rid of it, spend it alone as fee: one coin 
      holds an ordinals inscription or runes, spending it as fee loses them: an ordinals \
      inscription goes to the miner and runes are burned; either way they are lost.";
 
-/// Advice for small change of the user's own spend, given after the freeze advice.
-const NEXT_TIME: &str = "Next time, let a remainder this small go to the fee, or leave it in \
-     the payment instead of splitting it off as change.";
+/// Advice for small change of the user's own spend, given after the freeze advice. The
+/// output may be the one the spend meant to make, such as inscription postage.
+const NEXT_TIME: &str = "If it is a remainder, next time let a remainder this small go to the \
+     fee, or leave it in the payment instead of splitting it off as change; if it carries an \
+     inscription or runes, or is a CoinJoin output, keep it as its own coin.";
 
 /// Whose spend made a dust coin, from the inputs of its parent tx.
 enum Origin {

@@ -1037,8 +1037,9 @@ fn own_change_spent_with_another_coin_is_a_low_historical_change_finding() {
 }
 
 /// The next-time line of the own change advice.
-const NEXT_TIME: &str = "Next time, let a remainder this small go to the fee, or leave it in \
-     the payment instead of splitting it off as change.";
+const NEXT_TIME: &str = "If it is a remainder, next time let a remainder this small go to the \
+     fee, or leave it in the payment instead of splitting it off as change; if it carries an \
+     inscription or runes, or is a CoinJoin output, keep it as its own coin.";
 
 /// The finding of the last change of [`own_change`] after it is spent alone to its own
 /// address, from a scan that knows the earlier inputs when `inputs_known`.
@@ -1416,5 +1417,65 @@ fn the_conditional_note_caps_the_named_inputs() {
             .as_array()
             .map(Vec::len),
         Some(7)
+    );
+}
+
+#[test]
+fn an_intended_small_output_of_an_own_spend_is_not_told_to_go_to_the_fee() {
+    // An inscription move: one own input, 546 sats of postage and a larger change.
+    let (a, postage, change) = (wpkh(1), wpkh(10), wpkh(11));
+    let (fund, moved) = (txid(1), txid(2));
+    let vin = vec![TxInputRef {
+        previous_txid: fund,
+        previous_vout: 0,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    }];
+    let history = WalletHistory {
+        wallet_txs: vec![
+            entry(fund, Some(&a), WalletTxCategory::Receive),
+            entry(moved, None, WalletTxCategory::Send),
+            entry(moved, Some(&postage), WalletTxCategory::Receive),
+            entry(moved, Some(&change), WalletTxCategory::Receive),
+        ],
+        utxos: vec![Utxo {
+            txid: moved,
+            vout: 0,
+            address: Some(postage.clone()),
+            amount: Amount::from_sat(546),
+            confirmations: 3,
+            script_type: DescriptorType::P2wpkh,
+        }],
+        transactions: HashMap::from([
+            (fund, tx(fund, vec![], vec![out(0, &a, 100_000)])),
+            (
+                moved,
+                tx(
+                    moved,
+                    vin,
+                    vec![out(0, &postage, 546), out(1, &change, 98_454)],
+                ),
+            ),
+        ]),
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::new(),
+        ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
+    };
+    let findings = dust_in(history, false);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "own_change", "{f:?}");
+    assert_eq!(
+        f.correction,
+        Some(format!(
+            "Freeze it in your wallet: as change of your own spend, it is already linked to \
+             the coins that spend came from, and spending it with coins of another origin \
+             links those to them as well. {} If it is a remainder, next time let a remainder \
+             this small go to the fee, or leave it in the payment instead of splitting it off \
+             as change; if it carries an inscription or runes, or is a CoinJoin output, keep \
+             it as its own coin.",
+            super::FEE_ONLY_SPEND
+        ))
     );
 }
