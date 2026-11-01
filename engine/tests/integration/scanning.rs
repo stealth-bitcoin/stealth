@@ -166,7 +166,8 @@ fn non_persistent_scan_leaves_no_cache_wallet() {
 fn cache_name_for(gateway: &BitcoinCoreRpc, descriptor: &str) -> String {
     let desc = gateway
         .normalize_descriptor(descriptor)
-        .expect("normalize descriptor");
+        .expect("normalize descriptor")
+        .remove(0);
     stealth_bitcoincore::cache_wallet_name(&[stealth_engine::gateway::ResolvedDescriptor {
         desc,
         internal: false,
@@ -240,7 +241,7 @@ fn a_cache_wallet_without_the_completion_marker_is_rescanned() {
     // A build that was cut short: descriptors present, history missing.
     blank_wallet(&node, &name);
     let wallet = node_wallet(&node, &name);
-    let desc = gateway.normalize_descriptor(&descriptor).unwrap();
+    let desc = gateway.normalize_descriptor(&descriptor).unwrap().remove(0);
     // Regtest rescans its recent blocks whatever the timestamp, so what
     // this wallet lacks is the marker a finished build sets last.
     wallet
@@ -331,7 +332,8 @@ fn a_descriptor_written_with_apostrophes_normalizes_to_the_h_form() {
 
     let normalized = gateway
         .normalize_descriptor(&apostrophes)
-        .expect("normalize");
+        .expect("normalize")
+        .remove(0);
     assert!(
         !normalized.contains('\''),
         "Core prints hardened steps as h; the normalized form must too, got: {normalized}"

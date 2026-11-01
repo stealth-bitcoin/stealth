@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use stealth_model::config::AnalysisConfig;
-use stealth_model::descriptor::is_ranged;
+use stealth_model::descriptor::{is_multipath, is_ranged};
 use stealth_model::error::AnalysisError;
 use stealth_model::gateway::{
     BlockchainGateway, DecodedTransaction, DescriptorType, LeftOut, ResolvedDescriptor,
@@ -1222,14 +1222,24 @@ fn fetch_scanning_progress(client: &Client, url: &str, user: &str, password: &st
 }
 
 impl BlockchainGateway for BitcoinCoreRpc {
-    fn normalize_descriptor(&self, descriptor: &str) -> Result<String, AnalysisError> {
+    fn normalize_descriptor(&self, descriptor: &str) -> Result<Vec<String>, AnalysisError> {
         // Core keeps the hardened marker it was given; one spelling keeps
         // the cache name and the stored descriptors comparable.
         let canonical = descriptor.replace('\'', "h");
         let response = self
             .call_rpc::<DescriptorInfo>(None, "getdescriptorinfo", vec![json!(canonical)])
             .map_err(|error| descriptor_info_error(descriptor, error))?;
-        Ok(response.descriptor)
+        match response.multipath_expansion {
+            Some(paths) if !paths.is_empty() => Ok(paths),
+            // `descriptor` alone would be the first path, a partial scan.
+            _ if is_multipath(&canonical) => Err(AnalysisError::DescriptorNormalization {
+                descriptor: descriptor.to_string(),
+                message: "this node does not expand multipath descriptors (Bitcoin Core 29.0 \
+                          or later does); pass each path as its own descriptor"
+                    .into(),
+            }),
+            _ => Ok(vec![response.descriptor]),
+        }
     }
 
     fn derive_addresses(
@@ -1858,6 +1868,8 @@ struct JsonRpcError {
 #[derive(Debug, Deserialize)]
 struct DescriptorInfo {
     descriptor: String,
+    #[serde(default)]
+    multipath_expansion: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3868,6 +3880,78 @@ mod tests {
             .expect_err("Core rejected it");
         assert!(
             matches!(error, AnalysisError::DescriptorNormalization { .. }),
+            "{error:?}"
+        );
+    }
+
+    const MULTIPATH: &str = "wpkh(tpubD6NzVbkrYhZ4X/<0;1>/*)";
+    const RECEIVE: &str = "wpkh(tpubD6NzVbkrYhZ4X/0/*)#aaaaaaaa";
+    const CHANGE: &str = "wpkh(tpubD6NzVbkrYhZ4X/1/*)#bbbbbbbb";
+
+    #[test]
+    fn a_multipath_descriptor_normalizes_to_every_path_core_expands() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = answering_node(vec![(
+            "getdescriptorinfo",
+            json!({ "descriptor": RECEIVE, "multipath_expansion": [RECEIVE, CHANGE] }),
+        )]);
+        assert_eq!(
+            rpc.normalize_descriptor(MULTIPATH).expect("normalize"),
+            vec![RECEIVE.to_owned(), CHANGE.to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_single_path_descriptor_normalizes_to_core_s_descriptor() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = answering_node(vec![(
+            "getdescriptorinfo",
+            json!({ "descriptor": RECEIVE }),
+        )]);
+        assert_eq!(
+            rpc.normalize_descriptor("wpkh(tpubD6NzVbkrYhZ4X/0/*)")
+                .expect("normalize"),
+            vec![RECEIVE.to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_multipath_descriptor_without_core_s_expansion_fails_instead_of_scanning_one_path() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = answering_node(vec![(
+            "getdescriptorinfo",
+            json!({ "descriptor": RECEIVE }),
+        )]);
+        let error = rpc
+            .normalize_descriptor(MULTIPATH)
+            .expect_err("only the first path would be scanned");
+        let AnalysisError::DescriptorNormalization {
+            descriptor,
+            message,
+        } = error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(descriptor, MULTIPATH);
+        assert!(message.contains("multipath"), "{message}");
+        assert!(message.contains("29.0"), "{message}");
+    }
+
+    #[test]
+    fn a_multipath_descriptor_with_an_empty_expansion_fails_instead_of_scanning_nothing() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = answering_node(vec![(
+            "getdescriptorinfo",
+            json!({ "descriptor": RECEIVE, "multipath_expansion": [] }),
+        )]);
+        let error = rpc
+            .normalize_descriptor(MULTIPATH)
+            .expect_err("no path would be scanned");
+        assert!(
+            matches!(
+                &error,
+                AnalysisError::DescriptorNormalization { message, .. } if message.contains("multipath")
+            ),
             "{error:?}"
         );
     }

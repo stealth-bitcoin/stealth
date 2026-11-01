@@ -136,10 +136,10 @@ impl FakeGateway {
 }
 
 impl BlockchainGateway for FakeGateway {
-    fn normalize_descriptor(&self, descriptor: &str) -> Result<String, AnalysisError> {
+    fn normalize_descriptor(&self, descriptor: &str) -> Result<Vec<String>, AnalysisError> {
         match &self.normalize_error {
             Some(error) => Err(error.clone()),
-            None => Ok(descriptor.to_owned()),
+            None => Ok(vec![descriptor.to_owned()]),
         }
     }
 

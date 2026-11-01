@@ -424,7 +424,7 @@ fn a_utxo_scan_sees_dust_given_away_alone_through_the_address_history() {
 /// Alice leaves 600 sats of change at `a`, then spends it with 20,000 sats at `a` and a
 /// 30,000-sat coin of `third` (hers or Bob's), and receives 50,000 sats at `a`. Returns the
 /// node, the address of the third coin, and that last coin as a pasted UTXO.
-fn dust_merged_with_a_third_coin(
+pub(crate) fn dust_merged_with_a_third_coin(
     third_is_alices: bool,
 ) -> (Node, Address, Address, stealth_engine::engine::UtxoInput) {
     let node = node();
@@ -485,7 +485,7 @@ fn dust_merged_with_a_third_coin(
 }
 
 /// The finding of `vtype` in `report`, which must be there.
-fn finding_of(
+pub(crate) fn finding_of(
     report: &stealth_engine::Report,
     vtype: VulnerabilityType,
 ) -> &stealth_engine::Finding {

@@ -107,11 +107,45 @@ fn recode(payload: &[u8], version: [u8; 4]) -> String {
 
 /// Trait for normalizing a raw descriptor string (e.g. via `getdescriptorinfo`).
 pub trait DescriptorNormalizer {
-    fn normalize(&self, descriptor: &str) -> Result<String, AnalysisError>;
+    /// The canonical form of `descriptor`, or of each single-path
+    /// descriptor a multipath one (`/<0;1>/*`) expands to, in order.
+    fn normalize(&self, descriptor: &str) -> Result<Vec<String>, AnalysisError>;
 }
 
-/// Normalize raw descriptor strings: strip checksums, infer receive/change
-/// pairs (`/0/*` ↔ `/1/*`), deduplicate.
+/// True when the descriptor has a multipath step such as `/<0;1>/*` (BIP 389).
+pub fn is_multipath(descriptor: &str) -> bool {
+    descriptor.split('<').skip(1).any(|rest| {
+        rest.split_once('>')
+            .is_some_and(|(step, _)| step.contains(';'))
+    })
+}
+
+fn strip_checksum(raw: &str) -> String {
+    raw.split('#')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string()
+}
+
+// A receive chain brings its change chain (`/0/*` ↔ `/1/*`) and the reverse.
+fn chain_pair(descriptor: String) -> Vec<(String, bool)> {
+    if descriptor.contains("/0/*") {
+        let change = descriptor.replace("/0/*", "/1/*");
+        vec![(descriptor, false), (change, true)]
+    } else if descriptor.contains("/1/*") {
+        vec![
+            (descriptor.replace("/1/*", "/0/*"), false),
+            (descriptor, true),
+        ]
+    } else {
+        vec![(descriptor, false)]
+    }
+}
+
+/// Normalize raw descriptor strings: strip checksums, expand multipath
+/// descriptors into their single paths, infer receive/change pairs
+/// (`/0/*` ↔ `/1/*`), deduplicate.
 ///
 /// When a `normalizer` is provided (typically a [`BlockchainGateway`]),
 /// each candidate is passed through `getdescriptorinfo` for canonical
@@ -124,44 +158,36 @@ pub fn normalize_descriptors<N: DescriptorNormalizer + ?Sized>(
     let mut resolved = Vec::new();
 
     for raw in raw_descriptors {
-        let without_checksum = raw
-            .split('#')
-            .next()
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_string();
+        let without_checksum = strip_checksum(raw);
 
         if without_checksum.is_empty() {
             return Err(AnalysisError::EmptyDescriptor);
         }
 
-        let candidates = if without_checksum.contains("/0/*") {
-            vec![
-                (without_checksum.clone(), false),
-                (without_checksum.replace("/0/*", "/1/*"), true),
-            ]
-        } else if without_checksum.contains("/1/*") {
-            vec![
-                (without_checksum.replace("/1/*", "/0/*"), false),
-                (without_checksum.clone(), true),
-            ]
+        // Each path of a multipath descriptor is taken as if given on its own.
+        let single_paths = if is_multipath(&without_checksum) {
+            normalizer
+                .normalize(&without_checksum)?
+                .iter()
+                .map(|path| strip_checksum(path))
+                .collect()
         } else {
-            vec![(without_checksum.clone(), false)]
+            vec![without_checksum]
         };
 
-        for (candidate, internal) in candidates {
+        for (candidate, internal) in single_paths.into_iter().flat_map(chain_pair) {
             // The normalizer tells an invalid descriptor from a node failure.
-            let normalized = normalizer.normalize(&candidate)?;
+            for normalized in normalizer.normalize(&candidate)? {
+                let descriptor = ResolvedDescriptor {
+                    desc: normalized,
+                    internal,
+                    active: true,
+                    range_end: derivation_range_end,
+                };
 
-            let descriptor = ResolvedDescriptor {
-                desc: normalized,
-                internal,
-                active: true,
-                range_end: derivation_range_end,
-            };
-
-            if !resolved.iter().any(|item| item == &descriptor) {
-                resolved.push(descriptor);
+                if !resolved.iter().any(|item| item == &descriptor) {
+                    resolved.push(descriptor);
+                }
             }
         }
     }
@@ -177,32 +203,13 @@ pub fn normalize_descriptors_raw(raw_descriptors: &[String]) -> Vec<(String, boo
     let mut result = Vec::new();
 
     for raw in raw_descriptors {
-        let without_checksum = raw
-            .split('#')
-            .next()
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_string();
+        let without_checksum = strip_checksum(raw);
 
         if without_checksum.is_empty() {
             continue;
         }
 
-        let candidates = if without_checksum.contains("/0/*") {
-            vec![
-                (without_checksum.clone(), false),
-                (without_checksum.replace("/0/*", "/1/*"), true),
-            ]
-        } else if without_checksum.contains("/1/*") {
-            vec![
-                (without_checksum.replace("/1/*", "/0/*"), false),
-                (without_checksum.clone(), true),
-            ]
-        } else {
-            vec![(without_checksum, false)]
-        };
-
-        for pair in candidates {
+        for pair in chain_pair(without_checksum) {
             if !result.contains(&pair) {
                 result.push(pair);
             }
@@ -219,8 +226,8 @@ mod tests {
     struct IdentityNormalizer;
 
     impl DescriptorNormalizer for IdentityNormalizer {
-        fn normalize(&self, descriptor: &str) -> Result<String, AnalysisError> {
-            Ok(descriptor.to_owned())
+        fn normalize(&self, descriptor: &str) -> Result<Vec<String>, AnalysisError> {
+            Ok(vec![descriptor.to_owned()])
         }
     }
 
@@ -231,6 +238,101 @@ mod tests {
         assert_eq!(resolved.len(), 2);
         assert!(resolved.iter().any(|d| d.internal));
         assert!(resolved.iter().any(|d| !d.internal));
+    }
+
+    // Expands `<a;b>` the way getdescriptorinfo does and checksums every path.
+    #[derive(Default)]
+    struct MultipathNormalizer {
+        calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl DescriptorNormalizer for MultipathNormalizer {
+        fn normalize(&self, descriptor: &str) -> Result<Vec<String>, AnalysisError> {
+            self.calls.borrow_mut().push(descriptor.to_owned());
+            let Some((head, rest)) = descriptor.split_once('<') else {
+                return Ok(vec![format!("{descriptor}#chk")]);
+            };
+            let (step, tail) = rest.split_once('>').expect("closed multipath step");
+            Ok(step
+                .split(';')
+                .map(|index| format!("{head}{index}{tail}#chk"))
+                .collect())
+        }
+    }
+
+    fn resolve(raw: &[&str]) -> Vec<ResolvedDescriptor> {
+        let raw: Vec<String> = raw.iter().map(|d| (*d).to_owned()).collect();
+        normalize_descriptors(&raw, 99, &MultipathNormalizer::default()).expect("normalize")
+    }
+
+    #[test]
+    fn a_multipath_descriptor_resolves_like_its_paths_given_separately() {
+        let separate = resolve(&["wpkh(xpub/0/*)", "wpkh(xpub/1/*)"]);
+        assert_eq!(resolve(&["wpkh(xpub/<0;1>/*)#checksum"]), separate);
+        assert_eq!(resolve(&["wpkh(xpub/<1;0>/*)"]), separate);
+        assert_eq!(
+            separate
+                .iter()
+                .map(|d| (d.desc.as_str(), d.internal))
+                .collect::<Vec<_>>(),
+            vec![("wpkh(xpub/0/*)#chk", false), ("wpkh(xpub/1/*)#chk", true)]
+        );
+    }
+
+    #[test]
+    fn every_path_of_a_longer_multipath_descriptor_is_scanned() {
+        assert_eq!(
+            resolve(&["wpkh(xpub/<0;1;2>/*)"]),
+            resolve(&["wpkh(xpub/0/*)", "wpkh(xpub/1/*)", "wpkh(xpub/2/*)"])
+        );
+    }
+
+    #[test]
+    fn a_multipath_step_before_the_last_one_resolves_like_its_paths() {
+        assert_eq!(
+            resolve(&["wpkh(xpub/<0;1>/0)"]),
+            resolve(&["wpkh(xpub/0/0)", "wpkh(xpub/1/0)"])
+        );
+    }
+
+    #[test]
+    fn a_multipath_descriptor_is_expanded_by_the_normalizer_before_pairing() {
+        let normalizer = MultipathNormalizer::default();
+        normalize_descriptors(&["wpkh(xpub/<0;1>/*)".to_owned()], 99, &normalizer)
+            .expect("normalize");
+        assert_eq!(
+            normalizer.calls.borrow()[0],
+            "wpkh(xpub/<0;1>/*)",
+            "the node, not Stealth, splits a multipath descriptor"
+        );
+    }
+
+    #[test]
+    fn a_multipath_descriptor_the_normalizer_rejects_fails_the_scan() {
+        struct Rejecting;
+        impl DescriptorNormalizer for Rejecting {
+            fn normalize(&self, descriptor: &str) -> Result<Vec<String>, AnalysisError> {
+                Err(AnalysisError::DescriptorNormalization {
+                    descriptor: descriptor.to_owned(),
+                    message: "no expansion".into(),
+                })
+            }
+        }
+        let error = normalize_descriptors(&["wpkh(xpub/<0;1>/*)".to_owned()], 99, &Rejecting)
+            .expect_err("a partial scan must not start");
+        assert!(
+            matches!(error, AnalysisError::DescriptorNormalization { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn only_a_step_with_alternatives_makes_a_descriptor_multipath() {
+        assert!(is_multipath("wpkh(xpub/<0;1>/*)"));
+        assert!(is_multipath("wsh(multi(2,xpubA/<0;1>/*,xpubB/<2;3>/*))"));
+        assert!(!is_multipath("wpkh(xpub/0/*)"));
+        assert!(!is_multipath("wpkh(xpub/<0>/*)"));
+        assert!(!is_multipath("addr(bcrt1qexample)"));
     }
 
     // ── expand_input ────────────────────────────────────────────────────
