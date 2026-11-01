@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::{env, fs, thread};
 
@@ -77,7 +78,15 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     let mut settings = opts.engine_settings()?;
     settings.history_limit = opts.history_limit(ask);
     let engine = AnalysisEngine::new(&gateway, settings);
-    let report = engine.analyze(target).map_err(scan_error)?;
+    let report = match engine.analyze(target) {
+        Ok(report) => report,
+        // The wallet is unloaded by now; dying by the signal stops an enclosing shell loop.
+        Err(error) if interrupts.answered_the_question() => {
+            eprintln!("error: {}", scan_error(error));
+            die_by_interrupt();
+        }
+        Err(error) => return Err(scan_error(error)),
+    };
 
     match opts.format.as_deref() {
         Some("text") | None => print_text_report(&report),
@@ -219,6 +228,7 @@ enum Moment {
 #[derive(Debug, Default)]
 struct Interrupts {
     moment: Mutex<Moment>,
+    answered_no: AtomicBool,
 }
 
 impl Interrupts {
@@ -228,10 +238,16 @@ impl Interrupts {
         match std::mem::take(&mut *moment) {
             Moment::Asking(reply) => {
                 let _ = reply.send(Reply::Interrupted);
+                self.answered_no.store(true, Ordering::Relaxed);
                 false
             }
             Moment::Scanning => true,
         }
+    }
+
+    /// Whether a Ctrl-C answered the question.
+    fn answered_the_question(&self) -> bool {
+        self.answered_no.load(Ordering::Relaxed)
     }
 
     fn begin_asking(&self, reply: mpsc::Sender<Reply>) {

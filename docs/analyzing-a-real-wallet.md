@@ -103,7 +103,12 @@ it loads any of them. Above 5,000 it stops and says how many there are, since
 loading them can take long and put a heavy load on the node:
 
 - **CLI:** in a terminal (stdin and stderr both, not a background job, and
-  Ctrl-C not ignored) it asks whether to go on; Ctrl-C there counts as no. Elsewhere it stops with an error; scan again
+  Ctrl-C not ignored) it asks whether to go on. Ctrl-C there counts as no:
+  the scan unloads its wallet, prints the count and the hint and ends by
+  SIGINT, so an enclosing shell loop stops. If the terminal closes while the
+  question waits (SIGHUP), the process ends with the scan wallet still loaded;
+  unload it by hand with `bitcoin-cli unloadwallet _stealth_scan_<...>` (see
+  `bitcoin-cli listwallets`). Elsewhere it stops with an error; scan again
   with `--no-limits`, or with `--max-txs` set to at least the count, higher
   if the history may grow.
 - **Frontend:** the scan screen shows the count with "Scan anyway" and

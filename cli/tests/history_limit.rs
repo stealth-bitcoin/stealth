@@ -1,5 +1,7 @@
 //! The CLI against a regtest node, at the history limit.
 
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output, Stdio};
 
 use corepc_node::client::bitcoin::{Address, Amount};
@@ -87,9 +89,13 @@ fn the_default_limit_lets_a_small_history_through() {
 /// Runs a scan on a pseudo-terminal, sends SIGINT once it asks whether to go
 /// on, and returns what it printed and how it exited.
 #[cfg(unix)]
-fn interrupt_at_the_prompt(node: &Node, input: &[String], flags: &[&str]) -> (String, Option<i32>) {
-    let (printed, _, code) = answer_at_the_prompt(node, input, flags, None);
-    (printed, code)
+fn interrupt_at_the_prompt(
+    node: &Node,
+    input: &[String],
+    flags: &[&str],
+) -> (String, std::process::ExitStatus) {
+    let (printed, _, status) = answer_at_the_prompt(node, input, flags, None);
+    (printed, status)
 }
 
 /// Runs a scan on a pseudo-terminal and, once it asks whether to go on,
@@ -101,7 +107,7 @@ fn answer_at_the_prompt(
     input: &[String],
     flags: &[&str],
     typed: Option<(std::time::Duration, &str)>,
-) -> (String, String, Option<i32>) {
+) -> (String, String, std::process::ExitStatus) {
     answer_at_the_prompt_typed_ahead(node, input, flags, "", typed)
 }
 
@@ -113,11 +119,10 @@ fn answer_at_the_prompt_typed_ahead(
     flags: &[&str],
     ahead: &str,
     typed: Option<(std::time::Duration, &str)>,
-) -> (String, String, Option<i32>) {
+) -> (String, String, std::process::ExitStatus) {
     use std::fs::File;
     use std::io::{Read, Write};
     use std::os::fd::{FromRawFd, OwnedFd};
-    use std::os::unix::process::ExitStatusExt;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -192,11 +197,10 @@ fn answer_at_the_prompt_typed_ahead(
     while let Ok(chunk) = shown.recv_timeout(Duration::from_millis(200)) {
         printed.extend(chunk);
     }
-    assert_eq!(status.signal(), None, "killed by a signal: {status:?}");
     (
         String::from_utf8_lossy(&printed).into_owned(),
         report,
-        status.code(),
+        status,
     )
 }
 
@@ -208,8 +212,10 @@ fn ctrl_c_at_the_prompt_is_a_no_and_leaves_no_wallet_loaded() {
         &["--max-txs", "3"][..],
         &["--max-txs", "3", "--cache-wallet"],
     ] {
-        let (printed, code) = interrupt_at_the_prompt(&node, &descriptor_input(&aa), flags);
-        assert_eq!(code, Some(2), "{flags:?}: {printed}");
+        let (printed, status) = interrupt_at_the_prompt(&node, &descriptor_input(&aa), flags);
+        // Dying by the signal stops an enclosing shell loop, as an unanswered Ctrl-C would.
+        assert_eq!(status.signal(), Some(libc::SIGINT), "{flags:?}: {printed}");
+        assert!(printed.contains("--no-limits"), "{flags:?}: {printed}");
         assert!(printed.contains("5 transactions"), "{flags:?}: {printed}");
         let error = printed.find("error:").expect("the error");
         assert!(
@@ -275,7 +281,6 @@ fn ctrl_c_outside_the_question_dies_by_sigint_at_once() {
         std::thread::sleep(Duration::from_millis(50));
     };
     // Shells stop a loop only for a child killed by the signal, as it was before.
-    use std::os::unix::process::ExitStatusExt;
     assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
 }
 
@@ -303,9 +308,9 @@ fn a_utxo_scan_asks_about_the_utxo_files_addresses_and_ctrl_c_is_a_no() {
     std::fs::write(&utxos, pasted.to_string()).expect("write utxos");
 
     let input = vec!["--utxos".to_owned(), utxos.display().to_string()];
-    let (printed, code) = interrupt_at_the_prompt(&node, &input, &["--max-txs", "3"]);
+    let (printed, status) = interrupt_at_the_prompt(&node, &input, &["--max-txs", "3"]);
     let _ = std::fs::remove_file(&utxos);
-    assert_eq!(code, Some(2), "{printed}");
+    assert_eq!(status.signal(), Some(libc::SIGINT), "{printed}");
     assert!(
         printed.contains(
             "The history of the addresses of the outputs in the UTXO file holds 5 transactions"
@@ -319,7 +324,7 @@ fn a_utxo_scan_asks_about_the_utxo_files_addresses_and_ctrl_c_is_a_no() {
 #[test]
 fn a_yes_typed_after_the_node_closed_the_idle_connection_still_finishes_the_scan() {
     let (node, aa) = node_with_an_address_paid_five_times_and(&["-rpcservertimeout=1"]);
-    let (printed, report, code) = answer_at_the_prompt(
+    let (printed, report, status) = answer_at_the_prompt(
         &node,
         &descriptor_input(&aa),
         &["--max-txs", "3"],
@@ -329,7 +334,10 @@ fn a_yes_typed_after_the_node_closed_the_idle_connection_still_finishes_the_scan
         report.contains("Scanned 5 transactions"),
         "{printed}{report}"
     );
-    assert!(matches!(code, Some(0 | 1)), "{code:?}: {printed}");
+    assert!(
+        matches!(status.code(), Some(0 | 1)),
+        "{status:?}: {printed}"
+    );
     assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
 }
 
@@ -491,7 +499,7 @@ fn a_scan_started_with_sigint_ignored_keeps_ignoring_it() {
 #[test]
 fn an_enter_typed_during_the_rescan_does_not_answer_the_question() {
     let (node, aa) = node_with_an_address_paid_five_times();
-    let (printed, report, code) = answer_at_the_prompt_typed_ahead(
+    let (printed, report, status) = answer_at_the_prompt_typed_ahead(
         &node,
         &descriptor_input(&aa),
         &["--max-txs", "3"],
@@ -502,5 +510,24 @@ fn an_enter_typed_during_the_rescan_does_not_answer_the_question() {
         report.contains("Scanned 5 transactions"),
         "{printed}{report}"
     );
-    assert!(matches!(code, Some(0 | 1)), "{code:?}: {printed}");
+    assert!(
+        matches!(status.code(), Some(0 | 1)),
+        "{status:?}: {printed}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_typed_no_exits_2_and_leaves_no_wallet_loaded() {
+    let (node, aa) = node_with_an_address_paid_five_times();
+    let (printed, _, status) = answer_at_the_prompt(
+        &node,
+        &descriptor_input(&aa),
+        &["--max-txs", "3"],
+        Some((std::time::Duration::ZERO, "n\n")),
+    );
+    assert_eq!(status.code(), Some(2), "{status:?}: {printed}");
+    assert_eq!(status.signal(), None);
+    assert!(printed.contains("--no-limits"), "{printed}");
+    assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
 }

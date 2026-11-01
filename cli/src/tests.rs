@@ -894,6 +894,7 @@ mod history_limit {
             "an answered interrupt does not exit"
         );
         assert!(asking.join().unwrap().is_err());
+        assert!(interrupts.answered_the_question());
         assert!(interrupts.interrupt(), "the next interrupt exits");
     }
 
@@ -920,7 +921,12 @@ mod history_limit {
 
     #[test]
     fn after_a_typed_no_the_next_interrupt_exits() {
-        assert!(interrupts_after_answering("n\n").interrupt());
+        let interrupts = interrupts_after_answering("n\n");
+        assert!(
+            !interrupts.answered_the_question(),
+            "a typed no keeps exit 2"
+        );
+        assert!(interrupts.interrupt());
     }
 
     #[test]
