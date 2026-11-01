@@ -1823,3 +1823,218 @@ fn dust_moved_more_often_than_the_walk_follows_is_received_dust() {
     assert_eq!(walk(16), (Severity::Low, "own_change".to_owned()));
     assert_eq!(walk(17), (Severity::Medium, "received".to_owned()));
 }
+
+#[test]
+fn an_own_input_of_exactly_1000_sats_is_dust_and_1001_a_normal_coin() {
+    for (sats, severity, expected) in [
+        (1_000, Severity::High, "received"),
+        (1_001, Severity::Low, "own_change"),
+    ] {
+        let history = moved(
+            received(600, 0),
+            (txid(1), 0),
+            &[sats],
+            vec![out(0, &wpkh(150), 800), out(1, &wpkh(12), 400)],
+            txid(3),
+        );
+        let findings = dust_in(history, false);
+        let f = finding_from(&findings, txid(3));
+        assert_eq!((f.severity, origin(f)), (severity, expected), "{f:?}");
+    }
+}
+
+/// [`own_change`] of 600 sats in a partial scan, its parent spending an unattributed coin
+/// of `sats` at `wpkh(1)`, and, when `normal`, one of 50,000 sats at `wpkh(2)` too.
+fn change_of_unattributed(sats: u64, normal: bool) -> Finding {
+    let mut history = own_change(1, 600, false, None);
+    if let Some(fund) = history.transactions.get_mut(&txid(1)) {
+        fund.vout[0].value = Amount::from_sat(sats);
+    }
+    if normal {
+        let other = txid(70);
+        history
+            .transactions
+            .insert(other, tx(other, vec![], vec![out(0, &wpkh(2), 50_000)]));
+        if let Some(parent) = history.transactions.get_mut(&txid(2)) {
+            parent.vin.push(TxInputRef {
+                previous_txid: other,
+                previous_vout: 0,
+                sequence: 0xffff_fffd,
+                coinbase: false,
+            });
+        }
+    }
+    let findings = dust_in(history, true);
+    only(&findings).clone()
+}
+
+#[test]
+fn change_of_unattributed_dust_only_may_be_moved_dust_of_unknown_origin() {
+    let f = change_of_unattributed(1_000, false);
+    assert_eq!(f.severity, Severity::Medium, "{f:?}");
+    assert_eq!(origin(&f), "possibly_moved_dust", "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Dust UTXO {}:1 at {} (600 sats, dust-class, unspent); if the inputs of TX {} at {} \
+             are yours, it may be dust moved from them, of unknown origin",
+            txid(2),
+            wpkh(10).assume_checked_ref(),
+            txid(2),
+            wpkh(1).assume_checked_ref()
+        )
+    );
+    assert_eq!(
+        f.correction.as_deref(),
+        Some(received_advice(600, false).as_str())
+    );
+    assert_eq!(
+        f.details.as_ref().expect("details")["parent_input_addresses"],
+        json!([wpkh(1).assume_checked_ref().to_string()])
+    );
+}
+
+#[test]
+fn an_unattributed_normal_coin_makes_the_change_possibly_own() {
+    for (sats, normal) in [(1_001, false), (1_000, true)] {
+        let f = change_of_unattributed(sats, normal);
+        assert_eq!(f.severity, Severity::Medium, "{f:?}");
+        assert_eq!(origin(&f), "possibly_own_change", "{f:?}");
+    }
+}
+
+#[test]
+fn the_dust_walk_visits_each_spend_of_a_diamond_once() {
+    // One own spend of a normal coin makes four dust outputs; each later level has two
+    // spends, each merging one output of each spend of the level before.
+    const LEVELS: u32 = 12;
+    let id = |level: u32, j: u32| txid(1_000 + level * 2 + j);
+    let addr = |level: u32, j: u32, k: u32| wpkh((60 + level * 4 + j * 2 + k) as u8);
+    let input = |previous_txid, previous_vout| TxInputRef {
+        previous_txid,
+        previous_vout,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    };
+    let (fund, first) = (txid(1), id(0, 0));
+    let mut wallet_txs = vec![
+        entry(fund, Some(&wpkh(1)), WalletTxCategory::Receive),
+        entry(first, None, WalletTxCategory::Send),
+    ];
+    let mut vout: Vec<TxOutput> = (0..4)
+        .map(|k| out(k, &addr(0, k / 2, k % 2), 800))
+        .collect();
+    vout.push(out(4, &wpkh(150), 90_000));
+    let mut transactions = HashMap::from([
+        (fund, tx(fund, vec![], vec![out(0, &wpkh(1), 100_000)])),
+        (first, tx(first, vec![input(fund, 0)], vout)),
+    ]);
+    for k in 0..4 {
+        wallet_txs.push(entry(
+            first,
+            Some(&addr(0, k / 2, k % 2)),
+            WalletTxCategory::Receive,
+        ));
+    }
+    for level in 1..=LEVELS {
+        for j in 0..2 {
+            let vin = if level == 1 {
+                vec![input(first, j * 2), input(first, j * 2 + 1)]
+            } else {
+                vec![input(id(level - 1, 0), j), input(id(level - 1, 1), j)]
+            };
+            let vout = vec![
+                out(0, &addr(level, j, 0), 700),
+                out(1, &addr(level, j, 1), 700),
+            ];
+            transactions.insert(id(level, j), tx(id(level, j), vin, vout));
+            wallet_txs.push(entry(id(level, j), None, WalletTxCategory::Send));
+            for k in 0..2 {
+                wallet_txs.push(entry(
+                    id(level, j),
+                    Some(&addr(level, j, k)),
+                    WalletTxCategory::Receive,
+                ));
+            }
+        }
+    }
+    let history = WalletHistory {
+        wallet_txs,
+        utxos: vec![],
+        transactions,
+        internal_addresses: HashSet::new(),
+        derived_addresses: HashSet::new(),
+        ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
+    };
+    let graph = TxGraph::from_wallet_history(history);
+    let mut lineages = super::Lineages::default();
+    let (found, evidence) = graph.dust_lineage(
+        &id(LEVELS, 0),
+        &DetectorThresholds::default(),
+        &mut lineages,
+    );
+    assert!(evidence.is_none());
+    assert_eq!(found.label(), "own_change");
+    // Without the memo the walk would take about 2^12 steps.
+    assert!(
+        lineages.computed <= 2 * LEVELS as usize + 1,
+        "{}",
+        lineages.computed
+    );
+    // And the findings of every coin of the scan come out the same.
+    let mut findings = Vec::new();
+    graph.detect_dust(&DetectorThresholds::default(), &mut findings);
+    assert!(
+        findings.iter().all(|f| origin(f) == "own_change"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn possibly_moved_dust_outranks_possibly_own_change_when_moved_together() {
+    // Dust at `wpkh(31)` moved from an unattributed 900-sat coin at `wpkh(30)`.
+    let mut history = own_change(1, 600, false, None);
+    let (fund, spend) = (txid(51), txid(50));
+    history
+        .transactions
+        .insert(fund, tx(fund, vec![], vec![out(0, &wpkh(30), 900)]));
+    let vin = vec![TxInputRef {
+        previous_txid: fund,
+        previous_vout: 0,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    }];
+    history
+        .transactions
+        .insert(spend, tx(spend, vin, vec![out(0, &wpkh(31), 500)]));
+    history.wallet_txs.extend([
+        entry(spend, None, WalletTxCategory::Send),
+        entry(spend, Some(&wpkh(31)), WalletTxCategory::Receive),
+    ]);
+    let mut history = moved(
+        history,
+        (txid(2), 1),
+        &[],
+        vec![out(0, &wpkh(12), 900)],
+        txid(3),
+    );
+    if let Some(merge) = history.transactions.get_mut(&txid(3)) {
+        merge.vin.push(TxInputRef {
+            previous_txid: spend,
+            previous_vout: 0,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        });
+    }
+    for reversed in [false, true] {
+        let mut history = history.clone();
+        if let Some(merge) = history.transactions.get_mut(&txid(3)).filter(|_| reversed) {
+            merge.vin.reverse();
+        }
+        let findings = dust_in(history, true);
+        let f = finding_from(&findings, txid(3));
+        assert_eq!(f.severity, Severity::Medium, "{f:?}");
+        assert_eq!(origin(f), "possibly_moved_dust", "{f:?}");
+    }
+}
