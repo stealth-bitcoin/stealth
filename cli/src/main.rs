@@ -819,6 +819,8 @@ fn usage() -> String {
         "  stealth-cli scan [OPTIONS]\n",
         "SCAN INPUT (one required, mutually exclusive):",
         "  --descriptor <DESC>      Output descriptor OR bare extended public key",
+        "                           A multipath descriptor (/<0;1>/*) is scanned",
+        "                           as all of its paths",
         "  --descriptors <FILE>     JSON array of descriptors",
         "  --utxos <FILE>           JSON array of {txid,vout,...}",
         "                           May be combined with --descriptors, which then",
