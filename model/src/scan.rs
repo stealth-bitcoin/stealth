@@ -176,7 +176,7 @@ mod tests {
         }
         .to_string();
         assert!(
-            message.starts_with("the wallet history holds 12345 transactions"),
+            message.starts_with("this scan's history holds 12345 transactions"),
             "{message}"
         );
         assert!(message.contains("limit of 5000"), "{message}");

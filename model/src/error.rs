@@ -44,7 +44,7 @@ pub enum AnalysisError {
 /// Whose history a scan counted against its limit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HistoryOf {
-    /// The scanned descriptors' wallet.
+    /// The scanned descriptors' (an xpub's, an address's) own history.
     #[default]
     Wallet,
     /// The addresses of the outputs a UTXO scan was given.
@@ -54,7 +54,7 @@ pub enum HistoryOf {
 impl std::fmt::Display for HistoryOf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Wallet => "the wallet history",
+            Self::Wallet => "this scan's history",
             Self::PastedAddresses => "the history of the pasted outputs' addresses",
         })
     }

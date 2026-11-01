@@ -830,7 +830,7 @@ mod history_limit {
     fn the_prompt_names_whose_history_it_counted() {
         let (_, wallet) = answer_about(HistoryOf::Wallet, "n\n");
         assert!(
-            wallet.starts_with("This wallet's history holds 12345"),
+            wallet.starts_with("This scan's history holds 12345"),
             "{wallet}"
         );
         let (_, pasted) = answer_about(HistoryOf::PastedAddresses, "n\n");
@@ -1108,7 +1108,7 @@ mod usage {
             .find("--no-limits")
             .map_or(text.len(), |end| flag + end)];
         let entry = entry.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(entry.contains("the wallet's history"), "{entry}");
+        assert!(entry.contains("this scan's history"), "{entry}");
         assert!(
             entry.contains(
                 "in UTXO mode, the history of the addresses of the outputs in the UTXO file"

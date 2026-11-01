@@ -104,7 +104,7 @@ fn scan_error(error: AnalysisError) -> String {
             limit,
         } => {
             let whose = match of {
-                HistoryOf::Wallet => "the wallet history",
+                HistoryOf::Wallet => "this scan's history",
                 HistoryOf::PastedAddresses => UTXO_FILE_HISTORY,
             };
             format!(
@@ -184,7 +184,7 @@ fn discard_typed_ahead() {}
 /// Asks on `output` whether to load a history above the limit.
 fn show_question(of: HistoryOf, tx_count: u64, limit: u64, output: &mut impl Write) {
     let whose = match of {
-        HistoryOf::Wallet => "This wallet's history",
+        HistoryOf::Wallet => "This scan's history",
         HistoryOf::PastedAddresses => {
             "The history of the addresses of the outputs in the UTXO file"
         }
@@ -815,7 +815,7 @@ fn usage() -> String {
         "                           node you trust.\n",
         "HISTORY LIMIT:",
         "  --max-txs <N>            Stop before loading a history of more than N",
-        "                           transactions (default: 5000): the wallet's history,",
+        "                           transactions (default: 5000): this scan's history,",
         "                           or in UTXO mode, the history of the addresses of",
         "                           the outputs in the UTXO file. Loading a large",
         "                           history can take long and put a heavy load on the",

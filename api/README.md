@@ -125,7 +125,7 @@ Accepts one mutually-exclusive source:
 | `descriptors` | `string[]` | Multiple descriptors |
 | `utxos` | `UtxoInput[]` | Raw UTXO set |
 | `cache_wallet` | `bool` | Optional, default `false`. Keep a watch-only wallet named after the descriptors on the node so repeat scans only pay Core's incremental catch-up. The viewing key stays in the node's wallet directory until removed by hand. |
-| `max_txs` | `number` | Optional, default `5000`. The most transactions the scan loads: of the wallet's history, or for a `utxos` body of the history of the pasted outputs' addresses; see below. |
+| `max_txs` | `number` | Optional, default `5000`. The most transactions the scan loads: of this scan's history, or for a `utxos` body of the history of the pasted outputs' addresses; see below. |
 | `no_limits` | `bool` | Optional, default `false`. Lifts `max_txs`. Cannot be combined with it. |
 
 **Descriptor scan flow:** creates a blank watch-only wallet, imports the
@@ -180,7 +180,7 @@ loading a large one makes `bitcoind` grow its memory and keep it. Above
 disk, complete, for the next scan) and fails with the count and the limit. A
 UTXO scan counts the history of the pasted outputs' addresses, which it loads
 in one wallet, the same way, and its message names "the history of the
-pasted outputs' addresses" instead of "the wallet history". An RPC user the
+pasted outputs' addresses" instead of "this scan's history". An RPC user the
 node refuses `getwalletinfo` (`rpcwhitelist`) gets no count, so its scans go
 on unchecked and the gateway warns once on stderr; allow `getwalletinfo` to
 have the limit checked. To go on, send the same scan again with
@@ -198,7 +198,7 @@ text, to a body whose field has the wrong type, so tell the two apart by
 {
   "error": {
     "code": "history_too_large",
-    "message": "analysis failed: the wallet history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
+    "message": "analysis failed: this scan's history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
     "of": "wallet",
     "tx_count": 12345,
     "limit": 5000
@@ -215,7 +215,7 @@ A job from `POST /api/wallet/scans` (same body) ends as `failed`, with
   "state": "failed",
   "progress": null,
   "report": null,
-  "error": "analysis failed: the wallet history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
+  "error": "analysis failed: this scan's history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
   "limit_exceeded": { "of": "wallet", "tx_count": 12345, "limit": 5000 }
 }
 ```
@@ -241,7 +241,7 @@ curl 'http://localhost:20899/api/wallet/scan' \
 |--------|---------|
 | `200` | Scan completed — body is a `Report` |
 | `400` | Invalid input (bad descriptor shape, empty UTXOs, …) |
-| `422` | The wallet history, or for a `utxos` body the history of the pasted outputs' addresses, is above `max_txs`, when `error.code` is `history_too_large`; a plain-text `422` is a body field of the wrong type |
+| `422` | This scan's history, or for a `utxos` body the history of the pasted outputs' addresses, is above `max_txs`, when `error.code` is `history_too_large`; a plain-text `422` is a body field of the wrong type |
 | `502` | bitcoind RPC unavailable/auth failed/connection failed |
 
 ## Environment variables

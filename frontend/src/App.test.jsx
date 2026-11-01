@@ -239,7 +239,7 @@ describe('App scan flow', () => {
   describe('a history above the limit', () => {
     const tooLarge = () =>
       job('failed', {
-        error: 'analysis failed: the wallet history holds 12345 transactions',
+        error: "analysis failed: this scan's history holds 12345 transactions",
         limit_exceeded: { tx_count: 12345, limit: 5000 },
       })
 
