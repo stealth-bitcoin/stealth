@@ -1040,9 +1040,10 @@ fn own_change_spent_with_another_coin_is_a_low_historical_change_finding() {
 const NEXT_TIME: &str = "Next time, let a remainder this small go to the fee, or leave it in \
      the payment instead of splitting it off as change.";
 
-#[test]
-fn own_change_spent_alone_at_its_address_linked_nothing() {
-    let mut history = own_change(1, 600, true, None);
+/// The finding of the last change of [`own_change`] after it is spent alone to its own
+/// address, from a scan that knows the earlier inputs when `inputs_known`.
+fn spent_alone(inputs_known: bool, partial: bool) -> Finding {
+    let mut history = own_change(1, 600, inputs_known, None);
     history.utxos.clear();
     let child = txid(81);
     let vin = vec![TxInputRef {
@@ -1060,24 +1061,55 @@ fn own_change_spent_alone_at_its_address_linked_nothing() {
     history
         .wallet_txs
         .push(entry(child, Some(&wpkh(10)), WalletTxCategory::Receive));
-    let findings = dust_in(history, false);
-    let f = findings
-        .iter()
+    let findings = dust_in(history, partial);
+    findings
+        .into_iter()
         .find(|f| {
             f.details
                 .as_ref()
                 .is_some_and(|d| d["txid"] == json!(txid(2)))
         })
-        .expect("the change's finding");
+        .expect("the change's finding")
+}
+
+#[test]
+fn own_change_spent_alone_at_its_address_added_no_new_link() {
+    let f = spent_alone(true, false);
     assert_eq!(f.severity, Severity::Low, "{f:?}");
-    assert_eq!(origin(f), "own_change", "{f:?}");
+    assert_eq!(origin(&f), "own_change", "{f:?}");
     assert_eq!(
         f.correction,
         Some(format!(
             "This change has already been spent with no coins from your other addresses, so \
-             it linked none of them to this one. {NEXT_TIME}"
+             this spend added no new link to it. {NEXT_TIME}"
         ))
     );
+}
+
+#[test]
+fn possibly_own_change_spent_alone_in_a_partial_scan_gets_the_received_advice() {
+    let f = spent_alone(false, true);
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(&f), "possibly_own_change", "{f:?}");
+    assert_eq!(
+        f.correction.as_deref(),
+        Some(
+            "This dust has already been spent with no coins from your other addresses, so it \
+             linked none of them to this one. Keep any other dust like it frozen in your \
+             wallet's coin control."
+        )
+    );
+}
+
+#[test]
+fn a_full_scan_without_the_parents_input_data_reports_received_dust() {
+    let mut history = own_change(1, 600, true, None);
+    // The coin the parent spends could not be loaded, so its address is unknown.
+    history.transactions.remove(&txid(1));
+    let findings = dust_in(history, false);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Medium, "{f:?}");
+    assert_eq!(origin(f), "received", "{f:?}");
 }
 
 #[test]

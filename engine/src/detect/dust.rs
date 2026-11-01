@@ -429,7 +429,7 @@ impl TxGraph {
         let correction = match (&origin, alone) {
             (Origin::OwnChange(_), true) => format!(
                 "This change has already been spent with no coins from your other \
-                 addresses, so it linked none of them to this one. {NEXT_TIME}"
+                 addresses, so this spend added no new link to it. {NEXT_TIME}"
             ),
             (Origin::OwnChange(_), false) => format!(
                 "This change has already been spent. From now on, freeze small change like \
