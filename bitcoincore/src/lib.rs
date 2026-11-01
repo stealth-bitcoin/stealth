@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::{Address, Txid};
+use bitcoin::{Address, Amount, Txid};
 use ini::Ini;
 use reqwest::blocking::Client;
 use serde::de::DeserializeOwned;
@@ -225,6 +225,17 @@ impl BitcoinCoreRpc {
         method: &str,
         params: Vec<Value>,
     ) -> Result<T, AnalysisError> {
+        Ok(self.call_rpc(wallet, method, params)?)
+    }
+
+    /// Like [`Self::call`], but keeps an error the node answered with apart
+    /// from one that never got an answer.
+    fn call_rpc<T: DeserializeOwned>(
+        &self,
+        wallet: Option<&str>,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<T, RpcError> {
         let (user, password) = self.credentials()?;
         let response = self
             .client
@@ -237,29 +248,21 @@ impl BitcoinCoreRpc {
                 "params": params,
             }))
             .send()
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
+            .map_err(|error| unreachable_node(method, error))?;
 
         if !response.status().is_success() {
-            return Err(rpc_failure(response));
+            return Err(rpc_failure(response, method));
         }
 
-        // A null result is a valid reply (setlabel, unloadwallet); what it
-        // deserializes into is up to the caller's type.
-        let reply = response
-            .json::<JsonRpcReply>()
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
-        if let Some(error) = reply.error {
-            return Err(AnalysisError::EnvironmentUnavailable(error.message));
-        }
-        serde_json::from_value(reply.result)
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(format!("rpc result: {error}")))
+        let reply = decode_reply::<JsonRpcReply>(response, method)?;
+        reply_result(reply, method)
     }
 
     fn call_batch<T: DeserializeOwned>(
         &self,
         method: &str,
         params_list: &[Vec<Value>],
-    ) -> Result<Vec<Result<T, AnalysisError>>, AnalysisError> {
+    ) -> Result<Vec<JsonRpcBatchEnvelope<T>>, AnalysisError> {
         let (user, password) = self.credentials()?;
         let batch: Vec<Value> = params_list
             .iter()
@@ -274,33 +277,22 @@ impl BitcoinCoreRpc {
             .basic_auth(user, Some(password))
             .json(&batch)
             .send()
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
+            .map_err(|error| unreachable_node(method, error))?;
 
         if !response.status().is_success() {
-            return Err(rpc_failure(response));
+            return Err(rpc_failure(response, method).into());
         }
 
-        let mut envelopes = response
-            .json::<Vec<JsonRpcBatchEnvelope<T>>>()
-            .map_err(|error| AnalysisError::EnvironmentUnavailable(error.to_string()))?;
+        let mut envelopes = decode_reply::<Vec<JsonRpcBatchEnvelope<T>>>(response, method)?;
         if envelopes.len() != params_list.len() {
             return Err(AnalysisError::EnvironmentUnavailable(format!(
-                "rpc batch returned {} responses for {} requests",
+                "{method}: rpc batch returned {} responses for {} requests",
                 envelopes.len(),
                 params_list.len()
             )));
         }
         envelopes.sort_by_key(|envelope| envelope.id);
-        Ok(envelopes
-            .into_iter()
-            .map(|envelope| match (envelope.result, envelope.error) {
-                (Some(result), None) => Ok(result),
-                (_, Some(error)) => Err(AnalysisError::EnvironmentUnavailable(error.message)),
-                _ => Err(AnalysisError::EnvironmentUnavailable(
-                    "rpc returned neither result nor error".into(),
-                )),
-            })
-            .collect())
+        Ok(envelopes)
     }
 
     fn decode_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
@@ -311,11 +303,34 @@ impl BitcoinCoreRpc {
                 .map(|txid| vec![json!(txid.to_string()), json!(true)])
                 .collect();
             let results = self.call_batch::<RawTransaction>("getrawtransaction", &params)?;
-            for (txid, result) in chunk.iter().zip(results) {
-                out.push((*txid, result.and_then(Self::convert_raw_transaction)));
-            }
+            out.extend(Self::convert_fetched(
+                chunk.iter().copied().zip(results).collect(),
+            )?);
         }
         Ok(out)
+    }
+
+    fn convert_fetched(
+        fetched: Vec<(Txid, JsonRpcBatchEnvelope<RawTransaction>)>,
+    ) -> Result<TxFetchResults, AnalysisError> {
+        // Only not-found stays per tx; callers skip ancestors a node without txindex lacks.
+        fetched
+            .into_iter()
+            .map(|(txid, envelope)| match (envelope.result, envelope.error) {
+                (_, Some(error)) => {
+                    match fetch_error(txid, RpcError::Node("getrawtransaction".into(), error)) {
+                        not_found @ AnalysisError::TransactionNotFound(_) => {
+                            Ok((txid, Err(not_found)))
+                        }
+                        other => Err(other),
+                    }
+                }
+                (Some(raw), None) => Ok((txid, Ok(Self::convert_raw_transaction(raw)?))),
+                (None, None) => Err(AnalysisError::EnvironmentUnavailable(format!(
+                    "getrawtransaction {txid} returned no result"
+                ))),
+            })
+            .collect()
     }
 
     fn load_history_for_wallet(&self, wallet_name: &str) -> Result<WalletHistory, AnalysisError> {
@@ -328,8 +343,8 @@ impl BitcoinCoreRpc {
         txids.extend(utxos.iter().map(|utxo| utxo.txid));
 
         // Level-order, batched, bounded by max_ancestor_depth (depth 0 is
-        // the wallet's own transactions; those must resolve, ancestors may
-        // be skipped on error).
+        // the wallet's own transactions; those must resolve, ancestors the
+        // node cannot find are skipped).
         let mut transactions = HashMap::new();
         let mut frontier: Vec<Txid> = txids.into_iter().collect();
         let mut depth = 0u32;
@@ -377,23 +392,41 @@ impl BitcoinCoreRpc {
         }
         entries
             .into_iter()
-            .map(|entry| {
-                let address: Option<Address<NetworkUnchecked>> =
-                    entry.address.as_deref().and_then(|s| s.parse().ok());
-                Ok(WalletTxEntry {
-                    txid: parse_txid(&entry.txid)?,
-                    address,
-                    category: match entry.category.as_deref() {
-                        Some("send") => WalletTxCategory::Send,
-                        Some("receive") => WalletTxCategory::Receive,
-                        _ => WalletTxCategory::Unknown,
-                    },
-                    amount: btc_to_amount(entry.amount.abs()),
-                    confirmations: entry.confirmations.unwrap_or_default(),
-                    blockheight: entry.blockheight.unwrap_or_default(),
-                })
-            })
+            .map(Self::convert_list_transaction_entry)
             .collect()
+    }
+
+    fn convert_list_transaction_entry(
+        entry: ListTransactionEntry,
+    ) -> Result<WalletTxEntry, AnalysisError> {
+        let category = match entry.category.as_deref() {
+            Some("send") => WalletTxCategory::Send,
+            Some("receive") => WalletTxCategory::Receive,
+            _ => WalletTxCategory::Unknown,
+        };
+        // A send's address is the counterparty's; every other entry's is ours.
+        let address = match (entry.address.as_deref(), category) {
+            (None, _) => None,
+            (Some(s), WalletTxCategory::Send) => s.parse().ok(),
+            (Some(s), _) => Some(parse_address("listtransactions", s, || {
+                format!("entry of tx {}", entry.txid)
+            })?),
+        };
+        // Core reports sends as negative; the entry carries the magnitude.
+        let btc = match category {
+            WalletTxCategory::Send => entry.amount.abs(),
+            _ => entry.amount,
+        };
+        Ok(WalletTxEntry {
+            txid: parse_txid("listtransactions", &entry.txid)?,
+            address,
+            category,
+            amount: node_amount("listtransactions", btc, || {
+                format!("entry of tx {}", entry.txid)
+            })?,
+            confirmations: entry.confirmations.unwrap_or_default(),
+            blockheight: entry.blockheight.unwrap_or_default(),
+        })
     }
 
     fn fetch_transaction_pages(
@@ -434,48 +467,88 @@ impl BitcoinCoreRpc {
         )?;
         utxos
             .into_iter()
-            .map(|utxo| {
-                let address: Option<Address<NetworkUnchecked>> =
-                    utxo.address.as_deref().and_then(|s| s.parse().ok());
-                Ok(Utxo {
-                    txid: parse_txid(&utxo.txid)?,
-                    vout: utxo.vout,
-                    script_type: address
-                        .as_ref()
-                        .map(DescriptorType::infer_from_address)
-                        .unwrap_or(DescriptorType::Unknown),
-                    address,
-                    amount: btc_to_amount(utxo.amount),
-                    confirmations: utxo.confirmations.unwrap_or_default(),
-                })
-            })
+            .map(Self::convert_list_unspent_entry)
             .collect()
     }
 
+    fn convert_list_unspent_entry(utxo: ListUnspentEntry) -> Result<Utxo, AnalysisError> {
+        let place = || format!("output {}:{}", utxo.txid, utxo.vout);
+        let address = utxo
+            .address
+            .as_deref()
+            .map(|s| parse_address("listunspent", s, place))
+            .transpose()?;
+        Ok(Utxo {
+            txid: parse_txid("listunspent", &utxo.txid)?,
+            vout: utxo.vout,
+            script_type: address
+                .as_ref()
+                .map(DescriptorType::infer_from_address)
+                .unwrap_or(DescriptorType::Unknown),
+            address,
+            amount: node_amount("listunspent", utxo.amount, place)?,
+            confirmations: utxo.confirmations.unwrap_or_default(),
+        })
+    }
+
+    /// A failed import is unserved history only when Core says the rescan
+    /// hit blocks it does not have (pruned, or an assumeutxo background sync
+    /// still running); corruption or any other import error fails the scan.
+    fn check_imports(results: &[ImportResult]) -> Result<(), AnalysisError> {
+        if results.iter().all(|result| result.success) {
+            return Ok(());
+        }
+        let failures: Vec<&ImportError> = results
+            .iter()
+            .filter(|result| !result.success)
+            .filter_map(|result| result.error.as_ref())
+            .collect();
+        let messages = failures
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let all_unservable = !failures.is_empty()
+            && failures.iter().all(|error| {
+                error.code == Some(RPC_MISC_ERROR)
+                    && error.message.starts_with("Rescan failed")
+                    && RESCAN_BLOCKS_MISSING
+                        .iter()
+                        .any(|cause| error.message.contains(cause))
+            });
+        if all_unservable {
+            return Err(AnalysisError::HistoryUnavailable(format!(
+                "importdescriptors: {messages}"
+            )));
+        }
+        Err(AnalysisError::EnvironmentUnavailable(format!(
+            "importdescriptors: {messages}"
+        )))
+    }
+
     fn decode_transaction(&self, txid: Txid) -> Result<DecodedTransaction, AnalysisError> {
-        let tx = self.call::<RawTransaction>(
-            None,
-            "getrawtransaction",
-            vec![json!(txid.to_string()), json!(true)],
-        )?;
+        let tx = self
+            .call_rpc::<RawTransaction>(
+                None,
+                "getrawtransaction",
+                vec![json!(txid.to_string()), json!(true)],
+            )
+            .map_err(|error| fetch_error(txid, error))?;
         Self::convert_raw_transaction(tx)
     }
 
     fn convert_raw_transaction(tx: RawTransaction) -> Result<DecodedTransaction, AnalysisError> {
         Ok(DecodedTransaction {
-            txid: parse_txid(&tx.txid)?,
+            txid: parse_txid("getrawtransaction", &tx.txid)?,
             vin: tx
                 .vin
                 .into_iter()
                 .map(|input| {
                     Ok(TxInputRef {
                         previous_txid: match &input.txid {
-                            Some(s) => parse_txid(s)?,
+                            Some(s) => parse_txid("getrawtransaction", s)?,
                             // Bitcoin protocol: coinbase inputs reference all-zeros.
-                            None => parse_txid(
-                                "0000000000000000000000000000000000000000000000000000000000000000",
-                            )
-                            .expect("zero txid is always valid"),
+                            None => <Txid as bitcoin::hashes::Hash>::all_zeros(),
                         },
                         previous_vout: input.vout.unwrap_or_default(),
                         sequence: input.sequence.unwrap_or(0xffff_ffff),
@@ -487,6 +560,7 @@ impl BitcoinCoreRpc {
                 .vout
                 .into_iter()
                 .map(|output| {
+                    // Outputs include counterparties'; ownership comes from the wallet calls.
                     let address: Option<Address<NetworkUnchecked>> = output
                         .script_pub_key
                         .address
@@ -497,7 +571,7 @@ impl BitcoinCoreRpc {
                                 .and_then(|mut items| items.pop())
                         })
                         .and_then(|s| s.parse().ok());
-                    TxOutput {
+                    Ok(TxOutput {
                         n: output.n,
                         script_type: address
                             .as_ref()
@@ -511,10 +585,12 @@ impl BitcoinCoreRpc {
                             })
                             .unwrap_or(DescriptorType::Unknown),
                         address,
-                        value: btc_to_amount(output.value),
-                    }
+                        value: node_amount("getrawtransaction", output.value, || {
+                            format!("output {}:{}", tx.txid, output.n)
+                        })?,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, AnalysisError>>()?,
             version: tx.version.unwrap_or(2),
             locktime: tx.locktime.unwrap_or_default(),
             vsize: tx.vsize.unwrap_or_default(),
@@ -523,18 +599,20 @@ impl BitcoinCoreRpc {
     }
 
     fn create_watch_only_wallet(&self, wallet_name: &str) -> Result<(), AnalysisError> {
-        let _ = self.call::<Value>(
-            None,
-            "createwallet",
-            vec![
-                json!(wallet_name),
-                json!(true),
-                json!(true),
-                json!(""),
-                json!(false),
-                json!(true),
-            ],
-        )?;
+        let _ = self
+            .call_rpc::<Value>(
+                None,
+                "createwallet",
+                vec![
+                    json!(wallet_name),
+                    json!(true),
+                    json!(true),
+                    json!(""),
+                    json!(false),
+                    json!(true),
+                ],
+            )
+            .map_err(history_unavailable)?;
         Ok(())
     }
 
@@ -696,27 +774,17 @@ impl BitcoinCoreRpc {
                 sink.set_phase(ScanPhase::Rescanning);
                 RescanPoller::start(self, wallet_name, sink.clone())
             });
-            self.call::<Vec<ImportResult>>(
+            self.call_rpc::<Vec<ImportResult>>(
                 Some(wallet_name),
                 "importdescriptors",
                 vec![json!(imports)],
-            )?
+            )
+            .map_err(import_call_error)?
         };
         if let Some(sink) = sink {
             sink.set_phase(ScanPhase::LoadingHistory);
         }
-        if import_results.iter().any(|result| !result.success) {
-            let errors: Vec<_> = import_results
-                .iter()
-                .filter(|r| !r.success)
-                .filter_map(|r| r.error.as_ref().map(|e| e.message.as_str()))
-                .collect();
-            return Err(AnalysisError::EnvironmentUnavailable(format!(
-                "descriptor import failed: {}",
-                errors.join("; ")
-            )));
-        }
-        Ok(())
+        Self::check_imports(&import_results)
     }
 
     // Read wallet history and seed the ownership address sets from every
@@ -852,8 +920,9 @@ impl BlockchainGateway for BitcoinCoreRpc {
         // Core keeps the hardened marker it was given; one spelling keeps
         // the cache name and the stored descriptors comparable.
         let canonical = descriptor.replace('\'', "h");
-        let response =
-            self.call::<DescriptorInfo>(None, "getdescriptorinfo", vec![json!(canonical)])?;
+        let response = self
+            .call_rpc::<DescriptorInfo>(None, "getdescriptorinfo", vec![json!(canonical)])
+            .map_err(|error| descriptor_info_error(descriptor, error))?;
         Ok(response.descriptor)
     }
 
@@ -871,7 +940,9 @@ impl BlockchainGateway for BitcoinCoreRpc {
             .into_iter()
             .map(|s| {
                 s.parse::<Address<NetworkUnchecked>>().map_err(|e| {
-                    AnalysisError::EnvironmentUnavailable(format!("invalid address '{s}': {e}"))
+                    AnalysisError::EnvironmentUnavailable(format!(
+                        "deriveaddresses: invalid address '{s}': {e}"
+                    ))
                 })
             })
             .collect()
@@ -1007,6 +1078,23 @@ impl BlockchainGateway for BitcoinCoreRpc {
         self.decode_transaction(txid)
     }
 
+    fn txindex_synced(&self) -> Result<bool, AnalysisError> {
+        match self.call_rpc::<Value>(None, "getindexinfo", vec![json!("txindex")]) {
+            Ok(info) => Ok(info["txindex"]["synced"] == json!(true)),
+            // A node that will not tell (no such RPC, or not allowed) counts as no txindex,
+            // so a whitelisted read-only user on a node without one still gets the caveat.
+            Err(RpcError::Node(
+                _,
+                JsonRpcError {
+                    code: Some(RPC_METHOD_NOT_FOUND),
+                    ..
+                },
+            ))
+            | Err(RpcError::Other(AnalysisError::RpcForbidden { .. })) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn get_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
         self.decode_transactions(txids)
     }
@@ -1082,9 +1170,37 @@ fn scan_wallet_name(timestamp_millis: u128) -> String {
     format!("_stealth_scan_{timestamp_millis}_{pid}_{sequence}")
 }
 
-fn parse_txid(s: &str) -> Result<Txid, AnalysisError> {
-    s.parse::<Txid>()
-        .map_err(|e| AnalysisError::EnvironmentUnavailable(format!("invalid txid '{s}': {e}")))
+fn parse_address(
+    method: &str,
+    s: &str,
+    place: impl Fn() -> String,
+) -> Result<Address<NetworkUnchecked>, AnalysisError> {
+    s.parse().map_err(|e| {
+        AnalysisError::EnvironmentUnavailable(format!(
+            "{method}: invalid wallet address '{s}' in {}: {e}",
+            place()
+        ))
+    })
+}
+
+fn node_amount(
+    method: &str,
+    btc: f64,
+    place: impl Fn() -> String,
+) -> Result<Amount, AnalysisError> {
+    // btc_to_amount's error only restates the value; the place is what helps.
+    btc_to_amount(btc).map_err(|_| {
+        AnalysisError::EnvironmentUnavailable(format!(
+            "{method}: invalid amount {btc} BTC in {}",
+            place()
+        ))
+    })
+}
+
+fn parse_txid(method: &str, s: &str) -> Result<Txid, AnalysisError> {
+    s.parse::<Txid>().map_err(|e| {
+        AnalysisError::EnvironmentUnavailable(format!("{method}: invalid txid '{s}': {e}"))
+    })
 }
 
 fn default_rpc_port(network: &str) -> u16 {
@@ -1134,26 +1250,215 @@ fn infer_network_from_port(port: u16) -> String {
 
 const RPC_BATCH_SIZE: usize = 100;
 const DEFAULT_TX_PAGE_SIZE: usize = 1000;
+// What getrawtransaction returns for a tx the node cannot look up.
+const RPC_INVALID_ADDRESS_OR_KEY: i64 = -5;
+
+/// An RPC failure: either the node answered with a JSON-RPC error, or the
+/// call never got an answer (transport, HTTP status without an error body).
+#[derive(Debug)]
+enum RpcError {
+    /// The method and the node's JSON-RPC error.
+    Node(String, JsonRpcError),
+    Other(AnalysisError),
+}
+
+impl From<AnalysisError> for RpcError {
+    fn from(error: AnalysisError) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<RpcError> for AnalysisError {
+    fn from(error: RpcError) -> Self {
+        match error {
+            RpcError::Node(method, error) => {
+                AnalysisError::EnvironmentUnavailable(format!("{method}: {}", error.message))
+            }
+            RpcError::Other(error) => error,
+        }
+    }
+}
+
+// The node's answers when it cannot run the scan wallet: wallet support
+// disabled, or the wallet cannot be created (e.g. database or disk error).
+const RPC_METHOD_NOT_FOUND: i64 = -32601;
+const RPC_WALLET_ERROR: i64 = -4;
+// What importdescriptors reports a rescan failure with.
+const RPC_MISC_ERROR: i64 = -1;
+// The causes Core (v29+) appends to a rescan failure when the blocks are not
+// on disk: pruned, or not yet validated behind an assumeutxo snapshot. Before
+// v29 the pruning wording was appended to every rescan failure.
+const RESCAN_BLOCKS_MISSING: [&str; 2] = [
+    "This error could be caused by pruning",
+    "This error is likely caused by an in-progress assumeutxo background sync",
+];
+
+/// getrawtransaction's -5 is a lookup miss; any other failure is the node's.
+fn fetch_error(txid: Txid, error: RpcError) -> AnalysisError {
+    match error {
+        RpcError::Node(
+            _,
+            JsonRpcError {
+                code: Some(RPC_INVALID_ADDRESS_OR_KEY),
+                message,
+            },
+        ) => AnalysisError::TransactionNotFound(format!("getrawtransaction {txid}: {message}")),
+        RpcError::Node(_, error) => AnalysisError::EnvironmentUnavailable(format!(
+            "getrawtransaction {txid}: {}",
+            error.message
+        )),
+        other => other.into(),
+    }
+}
+
+fn descriptor_info_error(descriptor: &str, error: RpcError) -> AnalysisError {
+    match error {
+        // Core rejects a descriptor it cannot parse with -5.
+        RpcError::Node(
+            _,
+            JsonRpcError {
+                code: Some(RPC_INVALID_ADDRESS_OR_KEY),
+                message,
+            },
+        ) => AnalysisError::DescriptorNormalization {
+            descriptor: descriptor.to_string(),
+            message,
+        },
+        other => other.into(),
+    }
+}
+
+// Only a node without wallet support makes the whole import call unserved
+// history; -4 here is a wallet state (e.g. already rescanning), not a node limit.
+fn import_call_error(error: RpcError) -> AnalysisError {
+    match error {
+        RpcError::Node(
+            _,
+            JsonRpcError {
+                code: Some(RPC_METHOD_NOT_FOUND),
+                message,
+            },
+        ) => AnalysisError::HistoryUnavailable(format!("importdescriptors: {message}")),
+        other => other.into(),
+    }
+}
+
+// createwallet's answers when this node cannot run the scan wallet.
+fn history_unavailable(error: RpcError) -> AnalysisError {
+    match error {
+        RpcError::Node(
+            _,
+            JsonRpcError {
+                code: Some(RPC_METHOD_NOT_FOUND | RPC_WALLET_ERROR),
+                message,
+            },
+        ) => AnalysisError::HistoryUnavailable(format!("createwallet: {message}")),
+        other => other.into(),
+    }
+}
+
+/// The request never got an answer. reqwest's message names the URL, so it
+/// is dropped; its sources say why (e.g. connection refused).
+fn unreachable_node(method: &str, error: reqwest::Error) -> AnalysisError {
+    let error = error.without_url();
+    let mut reason = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        reason.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    AnalysisError::EnvironmentUnavailable(format!("{method}: could not reach the node: {reason}"))
+}
+
+fn decode_reply<T: DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    method: &str,
+) -> Result<T, AnalysisError> {
+    let body = response.text().map_err(|error| {
+        AnalysisError::EnvironmentUnavailable(format!("{method}: unreadable reply: {error}"))
+    })?;
+    serde_json::from_str(&body).map_err(|error| {
+        AnalysisError::EnvironmentUnavailable(with_body(
+            format!("{method}: undecodable reply ({error})"),
+            &body,
+        ))
+    })
+}
+
+/// Append the reply body's excerpt when there is one.
+fn with_body(head: String, body: &str) -> String {
+    match body_excerpt(body) {
+        excerpt if excerpt.is_empty() => head,
+        excerpt => format!("{head}: {excerpt}"),
+    }
+}
+
+/// The trimmed reply body, cut to a readable length.
+fn body_excerpt(body: &str) -> String {
+    const MAX_BODY_CHARS: usize = 200;
+    let body = body.trim();
+    let mut cut: String = body.chars().take(MAX_BODY_CHARS).collect();
+    if body.chars().count() > MAX_BODY_CHARS {
+        cut.push_str("...");
+    }
+    cut
+}
 
 // Core answers an RPC-level error (unknown txid, bad params) with HTTP 500
 // and the JSON-RPC error in the body, so the body is the message, not the
 // status.
-fn rpc_failure(response: reqwest::blocking::Response) -> AnalysisError {
+fn rpc_failure(response: reqwest::blocking::Response, method: &str) -> RpcError {
     let status = response.status();
     let body = response.text().unwrap_or_default();
-    match serde_json::from_str::<JsonRpcReply>(&body) {
+    rpc_error_from_body(status, &body, method)
+}
+
+fn rpc_error_from_body(status: reqwest::StatusCode, body: &str, method: &str) -> RpcError {
+    match serde_json::from_str::<JsonRpcReply>(body) {
         Ok(JsonRpcReply {
             error: Some(error), ..
-        }) => AnalysisError::EnvironmentUnavailable(error.message),
-        _ => AnalysisError::EnvironmentUnavailable(format!("rpc transport error: {status}")),
+        }) => RpcError::Node(method.to_string(), error),
+        // Core answers a call -rpcwhitelist denies, or a client outside
+        // -rpcallowip, with a bare 403.
+        _ if status == reqwest::StatusCode::FORBIDDEN => AnalysisError::RpcForbidden {
+            method: method.to_string(),
+            detail: body_excerpt(body),
+        }
+        .into(),
+        _ => AnalysisError::EnvironmentUnavailable(with_body(format!("{method}: {status}"), body))
+            .into(),
     }
 }
 
+/// One JSON-RPC reply. Core always sends the `result` key, null when the
+/// call returns nothing (setlabel, unloadwallet): a present null is
+/// `Some(Value::Null)`, a missing key is `None`.
 #[derive(Debug, Deserialize)]
 struct JsonRpcReply {
-    #[serde(default)]
-    result: Value,
+    #[serde(default, deserialize_with = "present_value")]
+    result: Option<Value>,
     error: Option<JsonRpcError>,
+}
+
+fn present_value<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+/// A null result is a valid reply; what it deserializes into is up to the
+/// caller's type.
+fn reply_result<T: DeserializeOwned>(reply: JsonRpcReply, method: &str) -> Result<T, RpcError> {
+    match (reply.result, reply.error) {
+        (_, Some(error)) => Err(RpcError::Node(method.to_string(), error)),
+        (Some(result), None) => serde_json::from_value(result).map_err(|error| {
+            AnalysisError::EnvironmentUnavailable(format!("{method}: rpc result: {error}")).into()
+        }),
+        (None, None) => Err(AnalysisError::EnvironmentUnavailable(format!(
+            "{method}: rpc returned neither result nor error"
+        ))
+        .into()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1165,6 +1470,7 @@ struct JsonRpcBatchEnvelope<T> {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcError {
+    code: Option<i64>,
     message: String,
 }
 
@@ -1182,6 +1488,7 @@ struct ImportResult {
 
 #[derive(Debug, Deserialize)]
 struct ImportError {
+    code: Option<i64>,
     #[serde(default)]
     message: String,
 }
@@ -1272,8 +1579,17 @@ struct RawScriptPubKey {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_wallet_name, default_rpc_port, scan_wallet_name};
-    use stealth_model::gateway::ResolvedDescriptor;
+    use super::{
+        cache_wallet_name, default_rpc_port, scan_wallet_name, BitcoinCoreRpc,
+        JsonRpcBatchEnvelope, ListTransactionEntry, ListUnspentEntry, RawTransaction,
+    };
+    use bitcoin::{Amount, Txid};
+    use serde_json::json;
+    use stealth_model::error::AnalysisError;
+    use stealth_model::gateway::{ResolvedDescriptor, WalletTxCategory};
+
+    const TXID: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+    const ADDR: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
     fn resolved(desc: &str) -> ResolvedDescriptor {
         ResolvedDescriptor {
@@ -1301,6 +1617,64 @@ mod tests {
         assert_ne!(one, two, "distinct descriptors must map to distinct names");
     }
 
+    fn tx_entry(category: &str, address: &str, amount: f64) -> ListTransactionEntry {
+        serde_json::from_value(json!({
+            "txid": TXID, "address": address, "category": category, "amount": amount,
+        }))
+        .unwrap()
+    }
+
+    fn unspent_entry(address: &str, amount: f64) -> ListUnspentEntry {
+        serde_json::from_value(json!({
+            "txid": TXID, "vout": 0, "address": address, "amount": amount,
+        }))
+        .unwrap()
+    }
+
+    fn raw_tx(address: &str, value: f64) -> RawTransaction {
+        serde_json::from_value(json!({
+            "txid": TXID,
+            "vin": [],
+            "vout": [{ "value": value, "n": 0, "scriptPubKey": { "address": address } }],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn send_amounts_reported_negative_become_their_absolute_value() {
+        let entry =
+            BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("send", ADDR, -0.5)).unwrap();
+        assert_eq!(entry.category, WalletTxCategory::Send);
+        assert_eq!(entry.amount, Amount::from_sat(50_000_000));
+    }
+
+    #[test]
+    fn negative_amount_outside_a_send_is_an_error() {
+        for category in ["receive", "generate", "immature", "orphan"] {
+            let result =
+                BitcoinCoreRpc::convert_list_transaction_entry(tx_entry(category, ADDR, -1.0));
+            assert_names_call_and_txid(result, "listtransactions");
+        }
+    }
+
+    #[test]
+    fn wallet_amount_beyond_supply_is_an_error() {
+        let result = BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("send", ADDR, -1e300));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_utxo_amount_is_an_error() {
+        let result = BitcoinCoreRpc::convert_list_unspent_entry(unspent_entry(ADDR, -1.0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_output_value_is_an_error() {
+        let result = BitcoinCoreRpc::convert_raw_transaction(raw_tx(ADDR, -1.0));
+        assert!(result.is_err());
+    }
+
     #[test]
     fn network_defaults_match_bitcoin_core_ports() {
         assert_eq!(default_rpc_port("regtest"), 18443);
@@ -1322,5 +1696,729 @@ mod tests {
             first, second,
             "concurrent scans in the same millisecond must not collide"
         );
+    }
+
+    #[test]
+    fn unparseable_own_receive_address_is_an_error() {
+        let result =
+            BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("receive", "bogus", 1.0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unparseable_own_coinbase_address_is_an_error() {
+        for category in ["generate", "immature", "orphan"] {
+            let result =
+                BitcoinCoreRpc::convert_list_transaction_entry(tx_entry(category, "bogus", 1.0));
+            assert!(result.is_err(), "{category}");
+        }
+    }
+
+    #[test]
+    fn unparseable_counterparty_send_address_is_tolerated() {
+        let entry = BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("send", "bogus", -1.0))
+            .unwrap();
+        assert_eq!(entry.address, None);
+        assert_eq!(entry.amount, Amount::from_sat(100_000_000));
+    }
+
+    #[test]
+    fn unparseable_own_utxo_address_is_an_error() {
+        let result = BitcoinCoreRpc::convert_list_unspent_entry(unspent_entry("bogus", 1.0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unparseable_output_address_is_tolerated() {
+        let tx = BitcoinCoreRpc::convert_raw_transaction(raw_tx("bogus", 1.0)).unwrap();
+        assert_eq!(tx.vout[0].address, None);
+        assert_eq!(tx.vout[0].value, Amount::from_sat(100_000_000));
+    }
+
+    fn assert_names_call_and_txid(result: Result<impl std::fmt::Debug, AnalysisError>, call: &str) {
+        let message = result.unwrap_err().to_string();
+        let body = message
+            .strip_prefix("environment unavailable: ")
+            .unwrap_or(&message);
+        assert!(body.starts_with(&format!("{call}: ")), "{message}");
+        assert!(message.contains(TXID), "{message}");
+    }
+
+    #[test]
+    fn invalid_wallet_data_errors_name_the_call_and_the_txid() {
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("send", ADDR, -1e300)),
+            "listtransactions",
+        );
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_list_transaction_entry(tx_entry("receive", "bogus", 1.0)),
+            "listtransactions",
+        );
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_list_unspent_entry(unspent_entry(ADDR, -1.0)),
+            "listunspent",
+        );
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_list_unspent_entry(unspent_entry("bogus", 1.0)),
+            "listunspent",
+        );
+        assert_names_call_and_txid(
+            BitcoinCoreRpc::convert_raw_transaction(raw_tx(ADDR, -1.0)),
+            "getrawtransaction",
+        );
+    }
+
+    fn envelope(reply: serde_json::Value) -> JsonRpcBatchEnvelope<RawTransaction> {
+        serde_json::from_value(reply).unwrap()
+    }
+
+    fn fetch(
+        reply: serde_json::Value,
+    ) -> Result<stealth_model::gateway::TxFetchResults, AnalysisError> {
+        let txid: Txid = TXID.parse().unwrap();
+        BitcoinCoreRpc::convert_fetched(vec![(txid, envelope(reply))])
+    }
+
+    #[test]
+    fn a_transaction_the_node_cannot_find_stays_per_transaction() {
+        let results = fetch(json!({
+            "id": 0, "result": null,
+            "error": { "code": -5, "message": "No such mempool or blockchain transaction" },
+        }))
+        .unwrap();
+        assert!(matches!(
+            results[0].1,
+            Err(AnalysisError::TransactionNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_fetched_transaction_converts() {
+        let raw = json!({
+            "txid": TXID, "vin": [],
+            "vout": [{ "value": 1.0, "n": 0, "scriptPubKey": { "address": ADDR } }],
+        });
+        let results = fetch(json!({ "id": 0, "result": raw, "error": null })).unwrap();
+        assert!(results[0].1.is_ok());
+    }
+
+    #[test]
+    fn other_rpc_errors_fail_the_fetch() {
+        let result = fetch(json!({
+            "id": 0, "result": null,
+            "error": { "code": -28, "message": "Loading block index..." },
+        }));
+        assert!(matches!(
+            result,
+            Err(AnalysisError::EnvironmentUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn an_rpc_error_without_a_code_fails_the_fetch() {
+        let result = fetch(json!({
+            "id": 0, "result": null, "error": { "message": "proxy says no" },
+        }));
+        assert!(matches!(
+            result,
+            Err(AnalysisError::EnvironmentUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn a_null_result_fails_the_fetch() {
+        let result = fetch(json!({ "id": 0, "result": null, "error": null }));
+        assert!(matches!(
+            result,
+            Err(AnalysisError::EnvironmentUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn fetched_transaction_with_invalid_data_fails_the_fetch() {
+        let result = fetch(json!({
+            "id": 0, "error": null,
+            "result": {
+                "txid": TXID, "vin": [],
+                "vout": [{ "value": -1.0, "n": 0, "scriptPubKey": { "address": ADDR } }],
+            },
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn an_error_body_without_a_code_still_surfaces_its_message() {
+        let error = AnalysisError::from(super::rpc_error_from_body(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"result": null, "error": {"message": "proxy says no"}}"#,
+            "test",
+        ));
+        assert!(error.to_string().contains("proxy says no"), "{error}");
+    }
+
+    #[test]
+    fn a_busy_node_while_creating_the_scan_wallet_fails_the_scan() {
+        let error = super::history_unavailable(super::rpc_error_from_body(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "Work queue depth exceeded\n",
+            "createwallet",
+        ));
+        assert_eq!(
+            error,
+            AnalysisError::EnvironmentUnavailable(
+                "createwallet: 503 Service Unavailable: Work queue depth exceeded".into()
+            )
+        );
+    }
+
+    fn classify(body: &str) -> AnalysisError {
+        super::history_unavailable(super::rpc_error_from_body(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body,
+            "createwallet",
+        ))
+    }
+
+    #[test]
+    fn a_node_that_cannot_run_the_scan_wallet_gives_history_unavailable() {
+        for code in [-32601, -4] {
+            let error = classify(&format!(
+                r#"{{"result": null, "error": {{"code": {code}, "message": "no wallet"}}}}"#
+            ));
+            assert_eq!(
+                error,
+                AnalysisError::HistoryUnavailable("createwallet: no wallet".into()),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_node_errors_while_creating_the_scan_wallet_fail_the_scan() {
+        for body in [
+            r#"{"result": null, "error": {"code": -28, "message": "Loading wallet..."}}"#,
+            r#"{"result": null, "error": {"message": "no code"}}"#,
+        ] {
+            match classify(body) {
+                AnalysisError::EnvironmentUnavailable(message) => {
+                    assert!(message.starts_with("createwallet: "), "{message}")
+                }
+                other => panic!("{body}: {other:?}"),
+            }
+        }
+    }
+
+    // Core's importdescriptors rescan failure (wallet/rpc/backup.cpp, v29+):
+    // a common head plus one suffix naming the cause.
+    const RESCAN_HEAD: &str = "Rescan failed for descriptor with timestamp 0. There was an \
+        error reading a block from time 1700000000, which is after or within 7200 seconds of \
+        key creation, and could contain transactions pertaining to the desc. As a result, \
+        transactions and coins using this desc may not appear in the wallet.";
+    const PRUNED: &str = " This error could be caused by pruning or data corruption (see \
+        bitcoind log for details) and could be dealt with by downloading and rescanning the \
+        relevant blocks (see -reindex option and rescanblockchain RPC).";
+    const ASSUMEUTXO: &str = " This error is likely caused by an in-progress assumeutxo \
+        background sync. Check logs or getchainstates RPC for assumeutxo background sync \
+        progress and try again later.";
+    const CORRUPTION: &str = " This error could potentially caused by data corruption. If the \
+        issue persists you may want to reindex (see -reindex option).";
+
+    fn import(code: i64, message: &str) -> super::ImportResult {
+        serde_json::from_value(json!({
+            "success": false,
+            "error": { "code": code, "message": message },
+        }))
+        .unwrap()
+    }
+
+    fn rescan_failure(suffix: &str) -> super::ImportResult {
+        import(-1, &format!("{RESCAN_HEAD}{suffix}"))
+    }
+
+    #[test]
+    fn a_rescan_over_pruned_or_unsynced_blocks_is_history_unavailable() {
+        for suffix in [PRUNED, ASSUMEUTXO] {
+            match BitcoinCoreRpc::check_imports(&[rescan_failure(suffix)]) {
+                Err(AnalysisError::HistoryUnavailable(message)) => assert!(
+                    message.starts_with("importdescriptors: Rescan failed"),
+                    "{message}"
+                ),
+                other => panic!("{suffix}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_rescan_failure_from_corruption_fails_the_scan() {
+        match BitcoinCoreRpc::check_imports(&[rescan_failure(CORRUPTION)]) {
+            Err(AnalysisError::EnvironmentUnavailable(message)) => {
+                assert!(message.starts_with("importdescriptors: "), "{message}");
+                assert!(
+                    message.contains("potentially caused by data corruption"),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_import_errors_fail_the_scan_with_their_message() {
+        for code in [-4, -5, -8] {
+            let result = BitcoinCoreRpc::check_imports(&[
+                rescan_failure(PRUNED),
+                import(code, "bad descriptor"),
+            ]);
+            match result {
+                Err(AnalysisError::EnvironmentUnavailable(message)) => {
+                    assert!(message.starts_with("importdescriptors: "), "{message}");
+                    assert!(message.contains("bad descriptor"), "{message}");
+                }
+                other => panic!("{code}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn successful_imports_pass() {
+        let ok: super::ImportResult = serde_json::from_value(json!({ "success": true })).unwrap();
+        assert!(BitcoinCoreRpc::check_imports(&[ok]).is_ok());
+    }
+
+    #[test]
+    fn only_a_missing_wallet_rpc_makes_importdescriptors_unserved_history() {
+        let classify = |body: &str| {
+            super::import_call_error(super::rpc_error_from_body(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                body,
+                "importdescriptors",
+            ))
+        };
+        let missing = classify(
+            r#"{"result": null, "error": {"code": -32601, "message": "Method not found"}}"#,
+        );
+        assert_eq!(
+            missing,
+            AnalysisError::HistoryUnavailable("importdescriptors: Method not found".into())
+        );
+        let busy = classify(
+            r#"{"result": null, "error": {"code": -4, "message": "Wallet is currently rescanning"}}"#,
+        );
+        match busy {
+            AnalysisError::EnvironmentUnavailable(message) => {
+                assert_eq!(message, "importdescriptors: Wallet is currently rescanning")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A node that answers `failing` with `error` (a bare 403 when `error` is
+    /// null, a raw 200 body when it is a string) and every other call with an
+    /// empty result.
+    fn fake_node(failing: &'static str, error: serde_json::Value) -> BitcoinCoreRpc {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let error = error.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut stream = stream;
+                    loop {
+                        let mut length = 0;
+                        loop {
+                            let mut line = String::new();
+                            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let lower = line.to_ascii_lowercase();
+                            if let Some(value) = lower.strip_prefix("content-length:") {
+                                length = value.trim().parse().unwrap();
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        let mut body = vec![0; length];
+                        reader.read_exact(&mut body).unwrap();
+                        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        // A batch is an array; its first request names the method.
+                        let method = request
+                            .get("method")
+                            .or_else(|| request.get(0).and_then(|r| r.get("method")))
+                            .cloned()
+                            .unwrap_or_default();
+                        let (status, reply) = if method != failing {
+                            ("200 OK", json!({ "result": {}, "error": null }).to_string())
+                        } else if let Some(raw) = error.as_str() {
+                            // A string stands for a raw, non-JSON 200 reply.
+                            ("200 OK", raw.to_string())
+                        } else if error.is_null() {
+                            // Null stands for Core's empty-bodied 403.
+                            ("403 Forbidden", String::new())
+                        } else {
+                            (
+                                "500 Internal Server Error",
+                                json!({ "result": null, "error": error }).to_string(),
+                            )
+                        };
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
+                            reply.len()
+                        );
+                    }
+                });
+            }
+        });
+        BitcoinCoreRpc::from_url(
+            &format!("http://127.0.0.1:{port}"),
+            Some("user".into()),
+            Some("pass".into()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_wallet_error_on_importdescriptors_fails_the_scan_with_cores_message() {
+        use stealth_model::gateway::{BlockchainGateway, ResolvedDescriptor};
+        let rpc = fake_node(
+            "importdescriptors",
+            json!({ "code": -4, "message": "Wallet is currently rescanning" }),
+        );
+        let error = rpc
+            .scan_descriptors(
+                &[ResolvedDescriptor {
+                    desc: format!("addr({ADDR})"),
+                    internal: false,
+                    active: false,
+                    range_end: 0,
+                }],
+                false,
+            )
+            .expect_err("the import call failed");
+        match error {
+            AnalysisError::EnvironmentUnavailable(message) => {
+                assert_eq!(message, "importdescriptors: Wallet is currently rescanning")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_node_error_from_getdescriptorinfo_is_not_blamed_on_the_descriptor() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node(
+            "getdescriptorinfo",
+            json!({ "code": -28, "message": "Loading block index..." }),
+        );
+        let error = rpc
+            .normalize_descriptor(&format!("addr({ADDR})"))
+            .expect_err("the node is warming up");
+        assert_eq!(
+            error,
+            AnalysisError::EnvironmentUnavailable(
+                "getdescriptorinfo: Loading block index...".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_descriptor_core_cannot_parse_is_a_descriptor_error() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node(
+            "getdescriptorinfo",
+            json!({ "code": -5, "message": "Address is not valid" }),
+        );
+        let error = rpc
+            .normalize_descriptor("addr(bogus)")
+            .expect_err("Core rejected it");
+        assert!(
+            matches!(error, AnalysisError::DescriptorNormalization { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn an_index_state_the_node_will_not_give_counts_as_no_txindex() {
+        use stealth_model::gateway::BlockchainGateway;
+        for error in [
+            json!({ "code": -32601, "message": "Method not found" }),
+            serde_json::Value::Null,
+        ] {
+            let rpc = fake_node("getindexinfo", error.clone());
+            assert_eq!(rpc.txindex_synced(), Ok(false), "{error}");
+        }
+    }
+
+    #[test]
+    fn any_other_index_probe_failure_fails() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node(
+            "getindexinfo",
+            json!({ "code": -28, "message": "Loading block index..." }),
+        );
+        assert!(rpc.txindex_synced().is_err());
+    }
+
+    #[test]
+    fn a_403_on_any_method_names_the_method() {
+        for method in ["listunspent", "getrawtransaction", "createwallet"] {
+            let error = AnalysisError::from(super::rpc_error_from_body(
+                reqwest::StatusCode::FORBIDDEN,
+                "",
+                method,
+            ));
+            assert_eq!(
+                error.to_string(),
+                format!("{method}: forbidden by the node (rpcwhitelist or rpcallowip)")
+            );
+        }
+    }
+
+    #[test]
+    fn a_forbidden_batch_names_its_method() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node("getrawtransaction", serde_json::Value::Null);
+        let txid: Txid = TXID.parse().unwrap();
+        let error = rpc.get_transactions(&[txid]).expect_err("forbidden");
+        assert_eq!(
+            error.to_string(),
+            "getrawtransaction: forbidden by the node (rpcwhitelist or rpcallowip)"
+        );
+    }
+
+    #[test]
+    fn a_transaction_not_found_names_getrawtransaction() {
+        let results = fetch(json!({
+            "id": 0, "result": null,
+            "error": { "code": -5, "message": "No such mempool or blockchain transaction" },
+        }))
+        .unwrap();
+        let message = results[0].1.as_ref().unwrap_err().to_string();
+        assert!(
+            message.contains(&format!("getrawtransaction {TXID}")),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_node_error_names_its_method() {
+        let error = AnalysisError::from(super::rpc_error_from_body(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"result": null, "error": {"code": -28, "message": "Loading wallet..."}}"#,
+            "listunspent",
+        ));
+        assert_eq!(
+            error.to_string(),
+            "environment unavailable: listunspent: Loading wallet..."
+        );
+    }
+
+    #[test]
+    fn an_undecodable_reply_names_the_method_and_shows_the_body() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node("getdescriptorinfo", json!("<html>proxy error</html>"));
+        let message = rpc
+            .normalize_descriptor(&format!("addr({ADDR})"))
+            .expect_err("not JSON")
+            .to_string();
+        assert!(message.contains("getdescriptorinfo: "), "{message}");
+        assert!(message.contains("<html>proxy error</html>"), "{message}");
+    }
+
+    #[test]
+    fn a_long_reply_body_is_cut() {
+        let body = "x".repeat(10_000);
+        let message = AnalysisError::from(super::rpc_error_from_body(
+            reqwest::StatusCode::BAD_GATEWAY,
+            &body,
+            "listunspent",
+        ))
+        .to_string();
+        assert!(message.len() < 400, "{}", message.len());
+    }
+
+    #[test]
+    fn a_reply_with_neither_result_nor_error_names_the_method() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node(
+            "getdescriptorinfo",
+            json!(r#"{"error": null, "id": "stealth-rust"}"#),
+        );
+        let error = rpc
+            .normalize_descriptor(&format!("addr({ADDR})"))
+            .expect_err("empty reply");
+        assert_eq!(
+            error.to_string(),
+            "environment unavailable: getdescriptorinfo: rpc returned neither result nor error"
+        );
+    }
+
+    #[test]
+    fn a_null_result_is_a_reply_the_callers_type_decides() {
+        let rpc = fake_node(
+            "setlabel",
+            json!(r#"{"result": null, "error": null, "id": "stealth-rust"}"#),
+        );
+        rpc.call::<()>(None, "setlabel", Vec::new())
+            .expect("a null result decodes into ()");
+        let value = rpc
+            .call::<Option<serde_json::Value>>(None, "setlabel", Vec::new())
+            .expect("a null result decodes into Option");
+        assert_eq!(value, None);
+        let error = rpc
+            .call::<Vec<String>>(None, "setlabel", Vec::new())
+            .expect_err("a null result is not a list");
+        assert!(
+            error
+                .to_string()
+                .starts_with("environment unavailable: setlabel: rpc result: "),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_short_batch_reply_names_the_method() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = fake_node("getrawtransaction", json!("[]"));
+        let txid: Txid = TXID.parse().unwrap();
+        let error = rpc.get_transactions(&[txid]).expect_err("short batch");
+        assert_eq!(
+            error.to_string(),
+            "environment unavailable: getrawtransaction: rpc batch returned 0 responses for 1 requests"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_node_names_the_method_and_never_the_password() {
+        use stealth_model::gateway::BlockchainGateway;
+        let rpc = BitcoinCoreRpc::from_url(
+            "http://alice:s3cret@127.0.0.1:1",
+            Some("alice".into()),
+            Some("s3cret".into()),
+        )
+        .unwrap();
+        let single = rpc
+            .normalize_descriptor(&format!("addr({ADDR})"))
+            .expect_err("nothing listens on port 1")
+            .to_string();
+        let txid: Txid = TXID.parse().unwrap();
+        let batch = rpc
+            .get_transactions(&[txid])
+            .expect_err("nothing listens on port 1")
+            .to_string();
+        for (message, method) in [(single, "getdescriptorinfo"), (batch, "getrawtransaction")] {
+            assert!(
+                message.contains(&format!("{method}: could not reach the node: ")),
+                "{message}"
+            );
+            assert!(!message.contains("s3cret"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_403_with_a_body_keeps_it() {
+        let forbidden = |body: &str| {
+            AnalysisError::from(super::rpc_error_from_body(
+                reqwest::StatusCode::FORBIDDEN,
+                body,
+                "listunspent",
+            ))
+            .to_string()
+        };
+        assert_eq!(
+            forbidden("  denied by proxy\n"),
+            "listunspent: forbidden by the node (rpcwhitelist or rpcallowip): denied by proxy"
+        );
+        assert_eq!(
+            forbidden(""),
+            "listunspent: forbidden by the node (rpcwhitelist or rpcallowip)"
+        );
+    }
+
+    #[test]
+    fn an_invalid_txid_names_the_call() {
+        let bad = "zz";
+        let lt: ListTransactionEntry = serde_json::from_value(json!({
+            "txid": bad, "address": ADDR, "category": "receive", "amount": 1.0,
+        }))
+        .unwrap();
+        let lu: ListUnspentEntry = serde_json::from_value(json!({
+            "txid": bad, "vout": 0, "address": ADDR, "amount": 1.0,
+        }))
+        .unwrap();
+        let tx: RawTransaction =
+            serde_json::from_value(json!({ "txid": bad, "vin": [], "vout": [] })).unwrap();
+        let vin: RawTransaction = serde_json::from_value(json!({
+            "txid": TXID, "vin": [{ "txid": bad, "vout": 0 }], "vout": [],
+        }))
+        .unwrap();
+        let cases = [
+            (
+                BitcoinCoreRpc::convert_list_transaction_entry(lt).map(|_| ()),
+                "listtransactions",
+            ),
+            (
+                BitcoinCoreRpc::convert_list_unspent_entry(lu).map(|_| ()),
+                "listunspent",
+            ),
+            (
+                BitcoinCoreRpc::convert_raw_transaction(tx).map(|_| ()),
+                "getrawtransaction",
+            ),
+            (
+                BitcoinCoreRpc::convert_raw_transaction(vin).map(|_| ()),
+                "getrawtransaction",
+            ),
+        ];
+        for (result, method) in cases {
+            let message = result.unwrap_err().to_string();
+            assert!(
+                message.contains(&format!("{method}: invalid txid 'zz'")),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_derived_address_names_deriveaddresses() {
+        use stealth_model::gateway::{BlockchainGateway, ResolvedDescriptor};
+        let rpc = fake_node(
+            "deriveaddresses",
+            json!(r#"{"result": ["bogus"], "error": null}"#),
+        );
+        let message = rpc
+            .derive_addresses(&ResolvedDescriptor {
+                desc: format!("addr({ADDR})"),
+                internal: false,
+                active: false,
+                range_end: 0,
+            })
+            .expect_err("bogus address")
+            .to_string();
+        assert!(
+            message.contains("deriveaddresses: invalid address 'bogus'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn only_a_misc_error_that_is_a_rescan_failure_counts() {
+        // The pruning wording under another code, and a -1 that is not a rescan failure.
+        for result in [
+            import(-4, &format!("{RESCAN_HEAD}{PRUNED}")),
+            import(-1, &format!("Some other failure.{PRUNED}")),
+        ] {
+            assert!(
+                matches!(
+                    BitcoinCoreRpc::check_imports(&[result]),
+                    Err(AnalysisError::EnvironmentUnavailable(_))
+                ),
+                "must fail the scan"
+            );
+        }
     }
 }

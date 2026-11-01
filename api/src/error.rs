@@ -39,7 +39,10 @@ impl ApiError {
             | Self::Analysis(AnalysisError::DescriptorNormalization { .. }) => {
                 StatusCode::BAD_REQUEST
             }
-            Self::Analysis(AnalysisError::EnvironmentUnavailable(_)) => StatusCode::BAD_GATEWAY,
+            Self::Analysis(AnalysisError::EnvironmentUnavailable(_))
+            | Self::Analysis(AnalysisError::TransactionNotFound(_))
+            | Self::Analysis(AnalysisError::HistoryUnavailable(_))
+            | Self::Analysis(AnalysisError::RpcForbidden { .. }) => StatusCode::BAD_GATEWAY,
             Self::Analysis(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ScannerNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -78,4 +81,24 @@ struct ErrorResponse {
 struct ErrorDetails {
     code: &'static str,
     message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_side_failures_are_bad_gateway() {
+        for error in [
+            AnalysisError::EnvironmentUnavailable("down".into()),
+            AnalysisError::TransactionNotFound("gone".into()),
+            AnalysisError::HistoryUnavailable("pruned".into()),
+            AnalysisError::RpcForbidden {
+                method: "listunspent".into(),
+                detail: String::new(),
+            },
+        ] {
+            assert_eq!(ApiError::from(error).status_code(), StatusCode::BAD_GATEWAY);
+        }
+    }
 }

@@ -142,15 +142,8 @@ pub fn normalize_descriptors<N: DescriptorNormalizer + ?Sized>(
         };
 
         for (candidate, internal) in candidates {
-            let normalized = normalizer
-                .normalize(&candidate)
-                .map_err(|error| match error {
-                    AnalysisError::DescriptorNormalization { .. } => error,
-                    other => AnalysisError::DescriptorNormalization {
-                        descriptor: candidate.clone(),
-                        message: other.to_string(),
-                    },
-                })?;
+            // The normalizer tells an invalid descriptor from a node failure.
+            let normalized = normalizer.normalize(&candidate)?;
 
             let descriptor = ResolvedDescriptor {
                 desc: normalized,
