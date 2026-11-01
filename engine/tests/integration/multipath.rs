@@ -234,3 +234,25 @@ fn a_multipath_descriptor_without_a_wildcard_is_a_partial_scan_like_its_paths() 
         full.findings
     );
 }
+
+#[test]
+fn a_multipath_descriptor_without_a_wildcard_names_change_like_its_paths() {
+    let node = node();
+    let alice = alice_spends_from_change(&node);
+    let receive = receive_wpkh(&alice);
+    let at = |step: &str| receive.replace("/0/*", &format!("/{step}/0"));
+    let gateway = gateway_for(&node);
+
+    let one = scan(&gateway, ScanTarget::Descriptor(at("<0;1>")), false);
+    let both = scan(
+        &gateway,
+        ScanTarget::Descriptors(vec![at("0"), at("1")]),
+        false,
+    );
+    // Typed on its own, a fixed `/1/0` is not a change chain.
+    assert!(
+        has_finding(&both, VulnerabilityType::ChangeDetection),
+        "{both:?}"
+    );
+    assert_eq!(as_json(&one), as_json(&both));
+}

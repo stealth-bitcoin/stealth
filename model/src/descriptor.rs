@@ -168,12 +168,15 @@ pub fn normalize_descriptors<N: DescriptorNormalizer + ?Sized>(
         let candidates: Vec<(String, bool)> = if is_multipath(&without_checksum) {
             let paths = normalizer.normalize(&without_checksum)?;
             let receive_and_change = paths.len() == 2;
-            // Like Core's importdescriptors: of two paths the second is change;
-            // of more, every path is a receive path.
+            // Of two paths the second is change, as in Core's importdescriptors, when
+            // ranged like a `/1/*` typed on its own; every other path is a receive path.
             paths
                 .into_iter()
                 .enumerate()
-                .map(|(i, path)| (path, receive_and_change && i == 1))
+                .map(|(i, path)| {
+                    let internal = receive_and_change && i == 1 && is_ranged(&path);
+                    (path, internal)
+                })
                 .collect()
         } else {
             let mut normalized = Vec::new();
@@ -307,9 +310,17 @@ mod tests {
             roles(&resolve(&["wpkh(xpub/<1;0>/*)"])),
             vec![("wpkh(xpub/1/*)#chk", false), ("wpkh(xpub/0/*)#chk", true)]
         );
+    }
+
+    #[test]
+    fn a_multipath_descriptor_without_a_wildcard_resolves_like_its_paths() {
+        assert_eq!(
+            resolve(&["wpkh(xpub/<0;1>/0)"]),
+            resolve(&["wpkh(xpub/0/0)", "wpkh(xpub/1/0)"])
+        );
         assert_eq!(
             roles(&resolve(&["wpkh(xpub/<0;1>/0)"])),
-            vec![("wpkh(xpub/0/0)#chk", false), ("wpkh(xpub/1/0)#chk", true)]
+            vec![("wpkh(xpub/0/0)#chk", false), ("wpkh(xpub/1/0)#chk", false)]
         );
     }
 
