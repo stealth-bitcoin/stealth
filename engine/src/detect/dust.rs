@@ -23,8 +23,8 @@ const FEE_ONLY_SPEND: &str = "To get rid of it, spend it alone as fee: one coin 
      inscription goes to the miner and runes are burned; either way they are lost.";
 
 /// Advice for small change of the user's own spend, given after the freeze advice.
-const NEXT_TIME: &str = "Next time, let a remainder this small go to the fee or stay in the \
-     same chain instead of becoming a change output.";
+const NEXT_TIME: &str =
+    "Next time, let a remainder this small go to the fee instead of becoming a change output.";
 
 /// Whose spend made a dust coin, from the inputs of its parent tx.
 enum Origin {
@@ -361,9 +361,8 @@ impl TxGraph {
         let correction = match &origin {
             Origin::OwnChange(_) => format!(
                 "Freeze it in your wallet: as change of your own spend, it is already linked \
-                 to the coins that spend came from, and spending it with coins of another origin links those to them as \
-                 well. If you spend it, spend it only with coins of that same chain. \
-                 {FEE_ONLY_SPEND} {NEXT_TIME}"
+                 to the coins that spend came from, and spending it with coins of another \
+                 origin links those to them as well. {FEE_ONLY_SPEND} {NEXT_TIME}"
             ),
             Origin::Received | Origin::PossiblyOwnChange(_) => format!(
                 "Freeze it in your wallet: spending it with your other coins links your \
@@ -433,8 +432,8 @@ impl TxGraph {
             ),
             (Origin::OwnChange(_), false) => "This change has already been spent. From now \
                  on, freeze small change like this in your wallet's coin control so it is \
-                 never spent with coins of another origin, and let a remainder this small go \
-                 to the fee or stay in the same chain."
+                 never spent with your other coins, and let a remainder this small go to the \
+                 fee instead of becoming a change output."
                 .into(),
             (_, true) => "This dust has already been spent with no coins from your other \
                  addresses, so it linked none of them to this one. Keep any other dust \

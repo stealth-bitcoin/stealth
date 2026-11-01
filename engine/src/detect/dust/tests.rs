@@ -902,11 +902,12 @@ fn assert_unspent_own_change(f: &Finding, parent: Txid, from: &Address<NetworkUn
     for needle in [
         "already linked to the coins that spend came from",
         "spending it with coins of another origin links those to them as well",
-        "let a remainder this small go to the fee or stay in the same chain",
         "spend it alone as fee",
+        "Next time, let a remainder this small go to the fee instead of becoming a change output.",
     ] {
         assert!(correction.contains(needle), "{needle}: {correction}");
     }
+    assert_no_merge_within_the_chain(correction);
     let details = f.details.as_ref().expect("details");
     assert_eq!(details["parent_input_addresses"], json!([from]));
 }
@@ -1034,11 +1035,108 @@ fn own_change_spent_with_another_coin_is_a_low_historical_change_finding() {
     );
     for needle in [
         "freeze small change like this in your wallet's coin control",
-        "never spent with coins of another origin",
-        "let a remainder this small go to the fee or stay in the same chain",
+        "never spent with your other coins",
+        "let a remainder this small go to the fee instead of becoming a change output",
     ] {
         assert!(correction.contains(needle), "{needle}: {correction}");
     }
+    assert_no_merge_within_the_chain(correction);
+}
+
+/// Own change advice never suggests spending the coin with others of its chain: that spend
+/// is itself reported as dust spending and toxic change.
+fn assert_no_merge_within_the_chain(correction: &str) {
+    for banned in [
+        "same chain",
+        "coins of that",
+        "only with",
+        "another origin, and",
+    ] {
+        assert!(!correction.contains(banned), "{banned}: {correction}");
+    }
+}
+
+#[test]
+fn own_change_spent_alone_at_its_address_linked_nothing() {
+    let mut history = own_change(1, 600, true, None);
+    history.utxos.clear();
+    let child = txid(81);
+    let vin = vec![TxInputRef {
+        previous_txid: txid(2),
+        previous_vout: 1,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    }];
+    history
+        .transactions
+        .insert(child, tx(child, vin, vec![out(0, &wpkh(10), 400)]));
+    history
+        .wallet_txs
+        .push(entry(child, None, WalletTxCategory::Send));
+    history
+        .wallet_txs
+        .push(entry(child, Some(&wpkh(10)), WalletTxCategory::Receive));
+    let findings = dust_in(history, false);
+    let f = findings
+        .iter()
+        .find(|f| {
+            f.details
+                .as_ref()
+                .is_some_and(|d| d["txid"] == json!(txid(2)))
+        })
+        .expect("the change's finding");
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "own_change", "{f:?}");
+    assert_eq!(
+        f.correction.as_deref(),
+        Some(
+            "This change has already been spent with no coins from your other addresses, so \
+             it linked none of them to this one. Next time, let a remainder this small go to \
+             the fee instead of becoming a change output."
+        )
+    );
+}
+
+#[test]
+fn own_change_of_unknown_spend_status_is_named_as_change() {
+    let mut history = own_change(1, 600, true, None);
+    history.utxos.clear();
+    let findings = dust_in(history, false);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(f.details.as_ref().expect("details")["status"], "unknown");
+    assert_eq!(
+        f.description,
+        format!(
+            "Change output {}:1 at {} (600 sats, spend status unknown); it is small change of \
+             your own spend in TX {}, which spends your coins at {}",
+            txid(2),
+            wpkh(10).assume_checked_ref(),
+            txid(2),
+            wpkh(1).assume_checked_ref()
+        )
+    );
+}
+
+#[test]
+fn possibly_own_change_of_unknown_spend_status_gets_the_conditional_note() {
+    let mut history = own_change(1, 600, false, None);
+    history.utxos.clear();
+    let findings = dust_in(history, true);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "possibly_own_change", "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Dust output {}:1 at {} (600 sats, spend status unknown); if the inputs of TX {} \
+             are yours, this is small change of your own spend; it is already linked to that \
+             chain",
+            txid(2),
+            wpkh(10).assume_checked_ref(),
+            txid(2)
+        )
+    );
 }
 
 #[test]
