@@ -1003,6 +1003,50 @@ mod history_limit {
         );
     }
 
+    /// What the question wrote to the terminal for `typed`.
+    fn screen_after(typed: &'static str) -> String {
+        struct Screen(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl io::Write for Screen {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let shown = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let screen = Arc::clone(&shown);
+        let limit = HistoryLimit {
+            ask: Some(terminal_ask(
+                move || typed.as_bytes(),
+                move || Screen(Arc::clone(&screen)),
+                Arc::new(Interrupts::default()),
+                || true,
+                || {},
+            )),
+            ..HistoryLimit::at_most(3)
+        };
+        let _ = limit.check(5);
+        let shown = shown.lock().unwrap().clone();
+        String::from_utf8(shown).expect("utf-8")
+    }
+
+    #[test]
+    fn end_of_input_at_the_question_ends_its_line() {
+        assert!(
+            screen_after("").ends_with("[y/N] \n"),
+            "{:?}",
+            screen_after("")
+        );
+        assert!(screen_after("y").ends_with("[y/N] \n"), "a line cut by EOF");
+    }
+
+    #[test]
+    fn a_typed_answer_leaves_the_line_to_the_terminal() {
+        assert!(screen_after("n\n").ends_with("[y/N] "));
+    }
+
     #[test]
     fn a_scan_whose_interrupt_is_ignored_is_not_asked() {
         assert!(!should_ask(true, true, false));

@@ -212,7 +212,7 @@ fn is_yes(answer: &str) -> bool {
 }
 
 enum Reply {
-    Answered(bool),
+    Answered { go_on: bool, line_ended: bool },
     Interrupted,
 }
 
@@ -300,17 +300,19 @@ fn terminal_ask<R: BufRead, W: Write>(
             let _ = input().read_line(&mut line);
             let go_on = is_yes(&line);
             if reader.answer() {
-                let _ = reply.send(Reply::Answered(go_on));
+                let line_ended = line.ends_with('\n');
+                let _ = reply.send(Reply::Answered { go_on, line_ended });
             }
         });
-        match answer.recv() {
-            Ok(Reply::Answered(go_on)) => go_on,
-            // Nothing typed ended the line, so the error would follow the question.
-            _ => {
-                let _ = writeln!(output());
-                false
-            }
+        let (go_on, line_ended) = match answer.recv() {
+            Ok(Reply::Answered { go_on, line_ended }) => (go_on, line_ended),
+            _ => (false, false),
+        };
+        // A Ctrl-C or Ctrl-D ends no line, so the error would follow the question.
+        if !line_ended {
+            let _ = writeln!(output());
         }
+        go_on
     })
 }
 
