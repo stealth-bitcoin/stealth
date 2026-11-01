@@ -183,7 +183,9 @@ in one wallet, the same way, and its message names "the history of the
 pasted outputs' addresses" instead of "this scan's history". An RPC user the
 node refuses `getwalletinfo` (`rpcwhitelist`) gets no count, so its scans go
 on unchecked and the gateway warns once on stderr; allow `getwalletinfo` to
-have the limit checked. To go on, send the same scan again with
+have the limit checked. With `cache_wallet`, a repeat scan loads the existing
+cache wallet into `bitcoind` before the count, so its history is already in
+the node's memory when the limit is checked. To go on, send the same scan again with
 `no_limits: true`, or with `max_txs` set to at least the count, higher if the
 history may grow before the scan reaches it. Without `cache_wallet` the whole
 rescan runs again, so on a heavy history the scan pays the rescan time twice;

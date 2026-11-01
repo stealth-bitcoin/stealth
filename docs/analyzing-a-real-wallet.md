@@ -124,7 +124,9 @@ is paid twice. The CLI question avoids that: it asks in the middle of the
 scan and goes on from where it stopped. UTXO mode counts
 the history of the pasted outputs' addresses the same way. The count comes
 from `getwalletinfo`; an RPC user restricted with `rpcwhitelist` needs it
-allowed, or the limit is not checked.
+allowed, or the limit is not checked. With a cache wallet, a repeat scan loads
+the existing cache wallet into `bitcoind` before the count, so its history is
+already in the node's memory when the limit is checked.
 
 ## 4. Fast, specific checks: UTXO mode
 
