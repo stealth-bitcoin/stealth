@@ -37,4 +37,24 @@ describe('FindingCard', () => {
     expect(second.textContent).toContain(`${B.slice(0, 10)}…:3`)
     expect(second.textContent).not.toContain('bcrt1qfirst')
   })
+
+  it('lists every input address of the parent of a dust coin', () => {
+    const parents = Array.from({ length: 7 }, (_, i) => `bcrt1qparent${i}`)
+    render(
+      <FindingCard
+        finding={{
+          type: 'DUST',
+          severity: 'HIGH',
+          description: 'Dust UTXO ... and 2 more are yours, this is small change of your own spend',
+          details: { status: 'unspent', origin: 'possibly_own_change', parent_input_addresses: parents },
+        }}
+      />
+    )
+    fireEvent.click(screen.getByRole('button'))
+    const group = screen.getByText('parent input addresses').parentElement
+    for (const address of parents) {
+      expect(group.textContent).toContain(address)
+    }
+    expect(screen.getByText('possibly_own_change')).toBeTruthy()
+  })
 })
