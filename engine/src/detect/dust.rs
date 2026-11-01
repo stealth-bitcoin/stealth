@@ -33,7 +33,8 @@ enum Origin {
     /// The parent spends the wallet's coins at these addresses: it is the user's change.
     OwnChange(Vec<String>),
     /// In a partial scan, the parent spends coins at these addresses, which the scan cannot
-    /// attribute: it is the user's change if they are the user's.
+    /// attribute: it is the user's change if they are the user's, and is otherwise reported
+    /// as received dust, since a sender's inputs are never the scanned address.
     PossiblyOwnChange(Vec<String>),
 }
 
@@ -76,10 +77,9 @@ impl Origin {
                  coins at {}",
                 list_addresses(from)
             ),
-            Origin::PossiblyOwnChange(from) => format!(
-                "; TX {parent} spends {}, so it {is} small change of your own spend {}",
-                list_addresses(from),
-                if_yours(from)
+            Origin::PossiblyOwnChange(_) => format!(
+                "; if the inputs of TX {parent} are yours, this {is} small change of your own \
+                 spend; it {is} already linked to that chain"
             ),
         }
     }
@@ -92,14 +92,6 @@ fn capitalized(text: &str) -> String {
         .next()
         .map(|first| first.to_uppercase().chain(chars).collect())
         .unwrap_or_default()
-}
-
-fn if_yours(addresses: &[String]) -> &'static str {
-    if addresses.len() == 1 {
-        "if that address is yours"
-    } else {
-        "if those addresses are yours"
-    }
 }
 
 impl TxGraph {
@@ -328,9 +320,8 @@ impl TxGraph {
         let origin = self.dust_origin(txid, attack.is_some());
         let severity = match origin {
             _ if attack.is_some() => Severity::Critical,
-            Origin::Received => base_severity,
-            // Change the scan cannot attribute may still be someone else's dust.
-            Origin::PossiblyOwnChange(_) => Severity::Medium,
+            // Change of inputs the scan cannot attribute may still be someone else's dust.
+            Origin::Received | Origin::PossiblyOwnChange(_) => base_severity,
             Origin::OwnChange(_) => Severity::Low,
         };
         let mut details = json!({
@@ -374,15 +365,7 @@ impl TxGraph {
                  well. If you spend it, spend it only with coins of that same chain. \
                  {FEE_ONLY_SPEND} {NEXT_TIME}"
             ),
-            Origin::PossiblyOwnChange(from) => format!(
-                "Freeze it in your wallet: spending it with your other coins links your \
-                 other addresses to this one. {}, this coin is change of your own spend, \
-                 already linked to the coins that spend came from, and spending it with \
-                 coins of another origin links those to them as well; next time, let a \
-                 remainder this small go to the fee or stay in the same chain. {FEE_ONLY_SPEND}",
-                capitalized(if_yours(from))
-            ),
-            Origin::Received => format!(
+            Origin::Received | Origin::PossiblyOwnChange(_) => format!(
                 "Freeze it in your wallet: spending it with your other coins links your \
                  other addresses to this one. {FEE_ONLY_SPEND}"
             ),
@@ -460,14 +443,6 @@ impl TxGraph {
             (_, false) => "This dust has already been spent. From now on, freeze dust like \
                  this in your wallet's coin control so it is never spent with your other coins."
                 .into(),
-        };
-        let correction = match &origin {
-            Origin::PossiblyOwnChange(from) => format!(
-                "{correction} {}, it was change of your own spend: next time, let a \
-                 remainder this small go to the fee or stay in the same chain.",
-                capitalized(if_yours(from))
-            ),
-            _ => correction,
         };
         Finding {
             vulnerability_type: VulnerabilityType::Dust,

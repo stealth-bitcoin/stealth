@@ -40,8 +40,9 @@
 //! parent transaction matches the attack signature, the finding is escalated
 //! to CRITICAL and `dust_attack` evidence is attached to its details. A small
 //! coin whose parent spends the wallet's own coins is the user's change, not
-//! received dust: its finding is LOW, or MEDIUM with conditional wording when a
-//! partial scan cannot attribute the parent's inputs.
+//! received dust: its finding is LOW. When a partial scan cannot attribute the
+//! parent's inputs, the finding keeps the received-dust severity and only notes
+//! that the coin is the user's change if those inputs are theirs.
 
 pub use stealth_model::config;
 pub use stealth_model::descriptor;

@@ -1055,32 +1055,64 @@ fn received_dust_spent_with_another_coin_keeps_its_historical_finding() {
     assert!(!f.description.contains("change"), "{}", f.description);
 }
 
+/// The received-dust advice, which a coin only possibly the user's change keeps.
+fn received_advice(sats: u64, spent: bool) -> String {
+    let mut history = received(sats, 0);
+    if spent {
+        let child = txid(81);
+        let vin = vec![TxInputRef {
+            previous_txid: txid(1),
+            previous_vout: 0,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        }];
+        history
+            .transactions
+            .insert(child, tx(child, vin, vec![out(0, &wpkh(160), sats)]));
+        history
+            .wallet_txs
+            .push(entry(child, None, WalletTxCategory::Send));
+        history.utxos.clear();
+        history.transactions.insert(
+            txid(80),
+            tx(txid(80), vec![], vec![out(0, &wpkh(2), 50_000)]),
+        );
+    }
+    let findings = dust_in(history, false);
+    only(&findings).correction.clone().expect("a correction")
+}
+
 #[test]
-fn a_partial_scan_words_change_of_unattributed_inputs_conditionally() {
-    let findings = dust_in(own_change(1, 500, false, None), true);
-    let f = only(&findings);
-    assert_eq!(f.severity, Severity::Medium, "{f:?}");
-    assert_eq!(origin(f), "possibly_own_change", "{f:?}");
+fn a_partial_scan_keeps_received_severity_for_change_of_unattributed_inputs() {
     let from = wpkh(1).assume_checked_ref().to_string();
-    assert!(
-        f.description.contains(&format!(
-            "; TX {} spends {from}, so it is small change of your own spend if that address \
-             is yours",
-            txid(2)
-        )),
-        "{}",
-        f.description
-    );
-    let correction = f.correction.as_deref().expect("a correction");
-    assert!(correction.starts_with("Freeze it"), "{correction}");
-    assert!(
-        correction.contains("If that address is yours, this coin is change of your own spend"),
-        "{correction}"
-    );
-    assert_eq!(
-        f.details.as_ref().expect("details")["parent_input_addresses"],
-        json!([from])
-    );
+    for (sats, severity) in [
+        (600, Severity::Medium),
+        (546, Severity::High),
+        (500, Severity::High),
+    ] {
+        let findings = dust_in(own_change(1, sats, false, None), true);
+        let f = only(&findings);
+        assert_eq!(f.severity, severity, "{f:?}");
+        assert_eq!(origin(f), "possibly_own_change", "{f:?}");
+        assert!(f.description.starts_with("Dust UTXO"), "{}", f.description);
+        assert!(
+            f.description.ends_with(&format!(
+                "; if the inputs of TX {} are yours, this is small change of your own spend; \
+                 it is already linked to that chain",
+                txid(2)
+            )),
+            "{}",
+            f.description
+        );
+        assert_eq!(
+            f.correction.as_deref(),
+            Some(received_advice(sats, false).as_str())
+        );
+        assert_eq!(
+            f.details.as_ref().expect("details")["parent_input_addresses"],
+            json!([from])
+        );
+    }
     // The scan that knows the inputs is certain.
     let findings = dust_in(own_change(1, 500, true, None), true);
     assert_unspent_own_change(only(&findings), txid(2), &wpkh(1));
@@ -1095,25 +1127,28 @@ fn a_full_scan_does_not_call_a_strangers_spend_own_change() {
 }
 
 #[test]
-fn a_partial_scan_words_spent_change_of_unattributed_inputs_conditionally() {
+fn a_partial_scan_notes_spent_change_of_unattributed_inputs_conditionally() {
     let findings = dust_in(own_change(1, 600, false, Some(50_000)), true);
     let f = only(&findings);
     assert_eq!(f.severity, Severity::Low, "{f:?}");
     assert_eq!(origin(f), "possibly_own_change", "{f:?}");
     assert!(
-        f.description
-            .contains("so it was small change of your own spend if that address is yours"),
+        f.description.starts_with("Historical dust output"),
         "{}",
         f.description
     );
-    let correction = f.correction.as_deref().expect("a correction");
     assert!(
-        correction.starts_with("This dust has already been spent."),
-        "{correction}"
+        f.description.ends_with(&format!(
+            "; if the inputs of TX {} are yours, this was small change of your own spend; \
+             it was already linked to that chain",
+            txid(2)
+        )),
+        "{}",
+        f.description
     );
-    assert!(
-        correction.contains("If that address is yours, it was change of your own spend"),
-        "{correction}"
+    assert_eq!(
+        f.correction.as_deref(),
+        Some(received_advice(600, true).as_str())
     );
 }
 

@@ -758,6 +758,7 @@ fn a_payout_leaving_change_under_1000_sats_is_own_change_not_received_dust() {
         .analyze(ScanTarget::Descriptor(format!("addr({change})")))
         .unwrap();
     let dust = dust_finding(&report);
+    // Received dust keeps its severity: the scan cannot tell Alice's spend from a sender's.
     assert_eq!(dust.severity, stealth_engine::Severity::Medium, "{dust:?}");
     assert_eq!(
         details_of(dust, "origin"),
@@ -765,12 +766,19 @@ fn a_payout_leaving_change_under_1000_sats_is_own_change_not_received_dust() {
         "{dust:?}"
     );
     assert!(
-        dust.description.contains(&format!(
-            "spends {a}, so it is small change of your own spend if that address is yours"
-        )),
+        dust.description.contains(
+            "are yours, this is small change of your own spend; it is already linked to that chain"
+        ),
         "{}",
         dust.description
     );
+    assert_dust_advice(
+        &report,
+        VulnerabilityType::Dust,
+        "spending it with your other coins links your other addresses to this one",
+    );
+    let correction = dust.correction.as_deref().unwrap_or_default();
+    assert!(!correction.contains("change"), "{correction}");
 }
 
 #[test]
