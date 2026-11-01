@@ -79,6 +79,34 @@ fn a_cache_wallet_above_the_limit_is_unloaded_and_reused_by_the_next_scan() {
     );
     assert_eq!(stealth_wallets_loaded(&node), Vec::<String>::new());
 
+    // The stop came after the build finished, so the wallet left on disk is a complete cache.
+    let resolved =
+        stealth_engine::descriptor::normalize_descriptors(&[format!("addr({aa})")], 999, &gateway)
+            .expect("normalize");
+    let cache = stealth_bitcoincore::cache_wallet_name(&resolved);
+    let on_disk: serde_json::Value = node
+        .client
+        .call("listwalletdir", &[])
+        .expect("listwalletdir");
+    assert!(
+        on_disk["wallets"]
+            .as_array()
+            .is_some_and(|wallets| wallets.iter().any(|w| w["name"] == cache)),
+        "{on_disk}"
+    );
+    node.client
+        .call::<serde_json::Value>("loadwallet", &[cache.clone().into()])
+        .expect("loadwallet");
+    assert!(
+        gateway
+            .cache_is_complete(&cache, &resolved)
+            .expect("cache check"),
+        "the next scan must reuse the cache, not build it again"
+    );
+    node_wallet(&node, &cache)
+        .call::<serde_json::Value>("unloadwallet", &[])
+        .expect("unloadwallet");
+
     let report = AnalysisEngine::new(&gateway, cached(5))
         .analyze(ScanTarget::Descriptor(format!("addr({aa})")))
         .expect("the cache wallet loads again");

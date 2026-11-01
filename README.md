@@ -246,8 +246,8 @@ see [docs/analyzing-a-real-wallet.md](docs/analyzing-a-real-wallet.md): node
 requirements (including `blockfilterindex=1` for fast rescans), how to export
 your wallet's public key, and what the analysis does and does not cover.
 It also explains the 5,000-transaction limit on the history a scan loads
-unasked, and why a node used for scanning should run with
-`MALLOC_ARENA_MAX=1` and a smaller `dbcache`.
+unasked, and Bitcoin Core's advice on `MALLOC_ARENA_MAX` and `dbcache` for a
+node used for scanning.
 
 ## Project structure
 
