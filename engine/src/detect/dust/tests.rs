@@ -903,7 +903,7 @@ fn assert_unspent_own_change(f: &Finding, parent: Txid, from: &Address<NetworkUn
         "already linked to the coins that spend came from",
         "spending it with coins of another origin links those to them as well",
         "spend it alone as fee",
-        "Next time, let a remainder this small go to the fee instead of becoming a change output.",
+        NEXT_TIME,
     ] {
         assert!(correction.contains(needle), "{needle}: {correction}");
     }
@@ -1036,18 +1036,22 @@ fn own_change_spent_with_another_coin_is_a_low_historical_change_finding() {
     for needle in [
         "freeze small change like this in your wallet's coin control",
         "never spent with your other coins",
-        "let a remainder this small go to the fee instead of becoming a change output",
+        NEXT_TIME,
     ] {
         assert!(correction.contains(needle), "{needle}: {correction}");
     }
     assert_no_merge_within_the_chain(correction);
 }
 
+/// The next-time line of the own change advice.
+const NEXT_TIME: &str = "Next time, let a remainder this small go to the fee, or leave it in the payment instead of splitting it off as change, so it stays in the same chain.";
+
 /// Own change advice never suggests spending the coin with others of its chain: that spend
 /// is itself reported as dust spending and toxic change.
 fn assert_no_merge_within_the_chain(correction: &str) {
     for banned in [
-        "same chain",
+        "spend it only",
+        "with coins of the same chain",
         "coins of that",
         "only with",
         "another origin, and",
@@ -1092,7 +1096,8 @@ fn own_change_spent_alone_at_its_address_linked_nothing() {
         Some(
             "This change has already been spent with no coins from your other addresses, so \
              it linked none of them to this one. Next time, let a remainder this small go to \
-             the fee instead of becoming a change output."
+             the fee, or leave it in the payment instead of splitting it off as change, so it \
+             stays in the same chain."
         )
     );
 }
