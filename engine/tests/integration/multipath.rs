@@ -97,6 +97,44 @@ fn a_multipath_descriptor_resolves_to_the_explicit_receive_and_change_pair() {
 }
 
 #[test]
+fn a_multisig_multipath_descriptor_resolves_to_exactly_core_s_two_paths() {
+    let node = node();
+    let key = |name: &str| {
+        let receive = receive_wpkh(&node.create_wallet(name).unwrap());
+        receive
+            .trim_start_matches("wpkh(")
+            .trim_end_matches("/0/*)")
+            .to_owned()
+    };
+    let (a, b) = (key("alice"), key("bob"));
+    let gateway = gateway_for(&node);
+    let range_end = stealth_engine::config::AnalysisConfig::default().derivation_range_end;
+
+    let resolved = stealth_engine::descriptor::normalize_descriptors(
+        &[format!("wsh(multi(2,{a}/<0;1>/*,{b}/<2;3>/*))")],
+        range_end,
+        &gateway,
+    )
+    .expect("normalize");
+    let paths: Vec<(String, bool)> = resolved
+        .iter()
+        .map(|d| {
+            (
+                d.desc.split('#').next().unwrap_or_default().to_owned(),
+                d.internal,
+            )
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            (format!("wsh(multi(2,{a}/0/*,{b}/2/*))"), false),
+            (format!("wsh(multi(2,{a}/1/*,{b}/3/*))"), true),
+        ]
+    );
+}
+
+#[test]
 fn a_multipath_scan_and_an_explicit_scan_share_one_cache_wallet() {
     let node = node();
     let alice = alice_spends_from_change(&node);
