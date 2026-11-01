@@ -36,13 +36,22 @@ const MAX_DUST_HOPS: usize = 16;
 enum Origin {
     /// Someone sent it: no normal coin of the wallet paid for it.
     Received,
-    /// The spend (first field) spends a normal coin of the wallet, at one of these addresses:
-    /// it is the user's change.
-    OwnChange(Txid, Vec<String>),
-    /// In a partial scan, the spend (first field) spends coins at these addresses, which the
-    /// scan cannot attribute: it is the user's change if they are the user's, and is otherwise
-    /// reported as received dust, since a sender's inputs are never the scanned address.
-    PossiblyOwnChange(Txid, Vec<String>),
+    /// The spend spends a normal coin of the wallet: it is the user's change.
+    OwnChange(Spend),
+    /// In a partial scan, the spend spends coins the scan cannot attribute: it is the user's
+    /// change if they are the user's, and is otherwise reported as received dust, since a
+    /// sender's inputs are never the scanned address.
+    PossiblyOwnChange(Spend),
+}
+
+/// The spend that made a coin the user's change, or possibly theirs.
+struct Spend {
+    txid: Txid,
+    /// Addresses of the spend's inputs that make it the user's, or possibly theirs.
+    from: Vec<String>,
+    /// When the coin was moved from an output of the spend, the own input addresses of the
+    /// coin's own parent.
+    moved_by: Option<Vec<String>>,
 }
 
 impl Origin {
@@ -65,8 +74,14 @@ impl Origin {
     /// Adds the origin, and the parent's input addresses for change, to `details`.
     fn describe(&self, details: &mut serde_json::Value) {
         details["origin"] = json!(self.label());
-        if let Origin::OwnChange(_, from) | Origin::PossiblyOwnChange(_, from) = self {
-            details["parent_input_addresses"] = json!(from);
+        if let Origin::OwnChange(spend) | Origin::PossiblyOwnChange(spend) = self {
+            match &spend.moved_by {
+                Some(parent_inputs) => {
+                    details["parent_input_addresses"] = json!(parent_inputs);
+                    details["source_txid"] = json!(spend.txid);
+                }
+                None => details["parent_input_addresses"] = json!(spend.from),
+            }
         }
     }
 
@@ -79,16 +94,45 @@ impl Origin {
         };
         match self {
             Origin::Received => String::new(),
-            Origin::OwnChange(parent, from) => format!(
-                "; it {is} small change of your own spend in TX {parent}, which {spends} your \
+            Origin::OwnChange(Spend {
+                txid,
+                from,
+                moved_by: None,
+            }) => format!(
+                "; it {is} small change of your own spend in TX {txid}, which {spends} your \
                  coins at {}",
                 list_addresses(from)
             ),
-            Origin::PossiblyOwnChange(parent, from) => format!(
-                "; if the inputs of TX {parent} at {} are yours, this {is} small change of your \
+            Origin::OwnChange(Spend { txid, from, .. }) => format!(
+                "; it was moved from change of your own spend in TX {txid}, which spent your \
+                 coins at {}",
+                list_addresses(from)
+            ),
+            Origin::PossiblyOwnChange(Spend {
+                txid,
+                from,
+                moved_by: None,
+            }) => format!(
+                "; if the inputs of TX {txid} at {} are yours, this {is} small change of your \
                  own spend; it {is} already linked to that chain",
                 list_addresses(from)
             ),
+            Origin::PossiblyOwnChange(Spend { txid, from, .. }) => format!(
+                "; it was moved from an output of TX {txid}; if the inputs of that TX at {} are \
+                 yours, this {is} small change of your own spend; it {is} already linked to \
+                 that chain",
+                list_addresses(from)
+            ),
+        }
+    }
+}
+
+impl Spend {
+    /// The spend as seen from a coin moved from its output by a tx with these own inputs.
+    fn moved_by(self, parent_inputs: Vec<String>) -> Spend {
+        Spend {
+            moved_by: Some(parent_inputs),
+            ..self
         }
     }
 }
@@ -284,7 +328,12 @@ impl TxGraph {
             }
         }
         if own_normal {
-            return (Origin::OwnChange(*parent, own), None);
+            let spend = Spend {
+                txid: *parent,
+                from: own,
+                moved_by: None,
+            };
+            return (Origin::OwnChange(spend), None);
         }
         if !own.is_empty() {
             // Dust moved with no normal coin keeps the origin of the dust it was moved from,
@@ -305,10 +354,22 @@ impl TxGraph {
                     (_, own) => Some(own),
                 };
             }
-            return (lineage.unwrap_or(Origin::Received), None);
+            let lineage = match lineage {
+                Some(Origin::OwnChange(spend)) => Origin::OwnChange(spend.moved_by(own)),
+                Some(Origin::PossiblyOwnChange(spend)) => {
+                    Origin::PossiblyOwnChange(spend.moved_by(own))
+                }
+                _ => Origin::Received,
+            };
+            return (lineage, None);
         }
         if !unattributed.is_empty() {
-            (Origin::PossiblyOwnChange(*parent, unattributed), None)
+            let spend = Spend {
+                txid: *parent,
+                from: unattributed,
+                moved_by: None,
+            };
+            (Origin::PossiblyOwnChange(spend), None)
         } else {
             (Origin::Received, None)
         }

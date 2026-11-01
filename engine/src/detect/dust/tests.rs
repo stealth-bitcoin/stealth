@@ -908,6 +908,7 @@ fn assert_unspent_own_change(f: &Finding, parent: Txid, from: &Address<NetworkUn
     );
     let details = f.details.as_ref().expect("details");
     assert_eq!(details["parent_input_addresses"], json!([from]));
+    assert!(details.get("source_txid").is_none(), "{details}");
 }
 
 #[test]
@@ -1639,6 +1640,110 @@ fn own_change_moved_alone_stays_own_change() {
     let f = finding_from(&findings, txid(3));
     assert_eq!(f.severity, Severity::Low, "{f:?}");
     assert_eq!(origin(f), "own_change", "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Change UTXO {}:0 at {} (400 sats, STRICT_DUST, unspent); it was moved from change \
+             of your own spend in TX {}, which spent your coins at {}",
+            txid(3),
+            wpkh(12).assume_checked_ref(),
+            txid(2),
+            wpkh(1).assume_checked_ref()
+        )
+    );
+    assert_moved_from(f, txid(2));
+}
+
+/// The details of a coin moved from an output of `source` name the inputs of the move.
+fn assert_moved_from(f: &Finding, source: Txid) {
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(
+        details["parent_input_addresses"],
+        json!([wpkh(10).assume_checked_ref().to_string()])
+    );
+    assert_eq!(details["source_txid"], json!(source));
+}
+
+#[test]
+fn possibly_own_change_moved_alone_names_where_it_was_moved_from() {
+    let history = moved(
+        own_change(1, 600, false, None),
+        (txid(2), 1),
+        &[],
+        vec![out(0, &wpkh(12), 400)],
+        txid(3),
+    );
+    let findings = dust_in(history, true);
+    let f = finding_from(&findings, txid(3));
+    assert_eq!(f.severity, Severity::High, "{f:?}");
+    assert_eq!(origin(f), "possibly_own_change", "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Dust UTXO {}:0 at {} (400 sats, STRICT_DUST, unspent); it was moved from an output \
+             of TX {}; if the inputs of that TX at {} are yours, this is small change of your \
+             own spend; it is already linked to that chain",
+            txid(3),
+            wpkh(12).assume_checked_ref(),
+            txid(2),
+            wpkh(1).assume_checked_ref()
+        )
+    );
+    assert_moved_from(f, txid(2));
+}
+
+#[test]
+fn possibly_own_change_moved_with_own_change_keeps_the_received_severity() {
+    // Own change at `wpkh(31)`, paid for by a known normal coin at `wpkh(30)`.
+    let mut history = own_change(1, 600, false, None);
+    let (fund, spend) = (txid(51), txid(50));
+    history
+        .transactions
+        .insert(fund, tx(fund, vec![], vec![out(0, &wpkh(30), 100_000)]));
+    let vin = vec![TxInputRef {
+        previous_txid: fund,
+        previous_vout: 0,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    }];
+    history.transactions.insert(
+        spend,
+        tx(
+            spend,
+            vin,
+            vec![out(0, &wpkh(152), 98_500), out(1, &wpkh(31), 500)],
+        ),
+    );
+    history.wallet_txs.extend([
+        entry(fund, Some(&wpkh(30)), WalletTxCategory::Receive),
+        entry(spend, None, WalletTxCategory::Send),
+        entry(spend, Some(&wpkh(31)), WalletTxCategory::Receive),
+    ]);
+    let mut history = moved(
+        history,
+        (txid(2), 1),
+        &[],
+        vec![out(0, &wpkh(12), 900)],
+        txid(3),
+    );
+    if let Some(merge) = history.transactions.get_mut(&txid(3)) {
+        merge.vin.push(TxInputRef {
+            previous_txid: spend,
+            previous_vout: 1,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        });
+    }
+    for reversed in [false, true] {
+        let mut history = history.clone();
+        if let Some(merge) = history.transactions.get_mut(&txid(3)).filter(|_| reversed) {
+            merge.vin.reverse();
+        }
+        let findings = dust_in(history, true);
+        let f = finding_from(&findings, txid(3));
+        assert_eq!(f.severity, Severity::Medium, "{f:?}");
+        assert_eq!(origin(f), "possibly_own_change", "{f:?}");
+    }
 }
 
 #[test]
