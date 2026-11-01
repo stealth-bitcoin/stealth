@@ -897,17 +897,15 @@ fn assert_unspent_own_change(f: &Finding, parent: Txid, from: &Address<NetworkUn
         "{}",
         f.description
     );
-    let correction = f.correction.as_deref().expect("a correction");
-    assert!(correction.starts_with("Freeze it"), "{correction}");
-    for needle in [
-        "already linked to the coins that spend came from",
-        "spending it with coins of another origin links those to them as well",
-        "spend it alone as fee",
-        NEXT_TIME,
-    ] {
-        assert!(correction.contains(needle), "{needle}: {correction}");
-    }
-    assert_no_merge_within_the_chain(correction);
+    assert_eq!(
+        f.correction,
+        Some(format!(
+            "Freeze it in your wallet: as change of your own spend, it is already linked to \
+             the coins that spend came from, and spending it with coins of another origin \
+             links those to them as well. {} {NEXT_TIME}",
+            super::FEE_ONLY_SPEND
+        ))
+    );
     let details = f.details.as_ref().expect("details");
     assert_eq!(details["parent_input_addresses"], json!([from]));
 }
@@ -1028,37 +1026,19 @@ fn own_change_spent_with_another_coin_is_a_low_historical_change_finding() {
         "{}",
         f.description
     );
-    let correction = f.correction.as_deref().expect("a correction");
-    assert!(
-        correction.starts_with("This change has already been spent."),
-        "{correction}"
+    assert_eq!(
+        f.correction,
+        Some(format!(
+            "This change has already been spent. From now on, freeze small change like this \
+             in your wallet's coin control so it is never spent with your other coins. \
+             {NEXT_TIME}"
+        ))
     );
-    for needle in [
-        "freeze small change like this in your wallet's coin control",
-        "never spent with your other coins",
-        NEXT_TIME,
-    ] {
-        assert!(correction.contains(needle), "{needle}: {correction}");
-    }
-    assert_no_merge_within_the_chain(correction);
 }
 
 /// The next-time line of the own change advice.
-const NEXT_TIME: &str = "Next time, let a remainder this small go to the fee, or leave it in the payment instead of splitting it off as change, so it stays in the same chain.";
-
-/// Own change advice never suggests spending the coin with others of its chain: that spend
-/// is itself reported as dust spending and toxic change.
-fn assert_no_merge_within_the_chain(correction: &str) {
-    for banned in [
-        "spend it only",
-        "with coins of the same chain",
-        "coins of that",
-        "only with",
-        "another origin, and",
-    ] {
-        assert!(!correction.contains(banned), "{banned}: {correction}");
-    }
-}
+const NEXT_TIME: &str = "Next time, let a remainder this small go to the fee, or leave it in \
+     the payment instead of splitting it off as change.";
 
 #[test]
 fn own_change_spent_alone_at_its_address_linked_nothing() {
@@ -1092,13 +1072,11 @@ fn own_change_spent_alone_at_its_address_linked_nothing() {
     assert_eq!(f.severity, Severity::Low, "{f:?}");
     assert_eq!(origin(f), "own_change", "{f:?}");
     assert_eq!(
-        f.correction.as_deref(),
-        Some(
+        f.correction,
+        Some(format!(
             "This change has already been spent with no coins from your other addresses, so \
-             it linked none of them to this one. Next time, let a remainder this small go to \
-             the fee, or leave it in the payment instead of splitting it off as change, so it \
-             stays in the same chain."
-        )
+             it linked none of them to this one. {NEXT_TIME}"
+        ))
     );
 }
 
@@ -1135,11 +1113,12 @@ fn possibly_own_change_of_unknown_spend_status_gets_the_conditional_note() {
         f.description,
         format!(
             "Dust output {}:1 at {} (600 sats, spend status unknown); if the inputs of TX {} \
-             are yours, this is small change of your own spend; it is already linked to that \
-             chain",
+             at {} are yours, this is small change of your own spend; it is already linked to \
+             that chain",
             txid(2),
             wpkh(10).assume_checked_ref(),
-            txid(2)
+            txid(2),
+            wpkh(1).assume_checked_ref()
         )
     );
 }
@@ -1200,8 +1179,8 @@ fn a_partial_scan_keeps_received_severity_for_change_of_unattributed_inputs() {
         assert!(f.description.starts_with("Dust UTXO"), "{}", f.description);
         assert!(
             f.description.ends_with(&format!(
-                "; if the inputs of TX {} are yours, this is small change of your own spend; \
-                 it is already linked to that chain",
+                "; if the inputs of TX {} at {from} are yours, this is small change of your own \
+                 spend; it is already linked to that chain",
                 txid(2)
             )),
             "{}",
@@ -1242,9 +1221,10 @@ fn a_partial_scan_notes_spent_change_of_unattributed_inputs_conditionally() {
     );
     assert!(
         f.description.ends_with(&format!(
-            "; if the inputs of TX {} are yours, this was small change of your own spend; \
-             it was already linked to that chain",
-            txid(2)
+            "; if the inputs of TX {} at {} are yours, this was small change of your own \
+             spend; it was already linked to that chain",
+            txid(2),
+            wpkh(1).assume_checked_ref()
         )),
         "{}",
         f.description
@@ -1330,4 +1310,52 @@ fn a_known_input_makes_change_certain_in_a_partial_scan_next_to_an_unattributed_
     let f = only(&findings);
     assert_eq!(f.severity, Severity::Low, "{f:?}");
     assert_eq!(origin(f), "own_change", "{f:?}");
+}
+
+#[test]
+fn the_conditional_note_caps_the_named_inputs() {
+    let mut history = own_change(1, 600, false, None);
+    let mut strangers = Vec::new();
+    for i in 0..6u8 {
+        let (theirs, address) = (txid(60 + u32::from(i)), wpkh(170 + i));
+        history.transactions.insert(
+            theirs,
+            tx(
+                theirs,
+                vec![],
+                vec![out(0, &address, 10_000 + u64::from(i))],
+            ),
+        );
+        if let Some(parent) = history.transactions.get_mut(&txid(2)) {
+            parent.vin.push(TxInputRef {
+                previous_txid: theirs,
+                previous_vout: 0,
+                sequence: 0xffff_fffd,
+                coinbase: false,
+            });
+        }
+        strangers.push(address.assume_checked_ref().to_string());
+    }
+    let findings = dust_in(history, true);
+    let f = only(&findings);
+    assert_eq!(origin(f), "possibly_own_change", "{f:?}");
+    let named = std::iter::once(wpkh(1).assume_checked_ref().to_string())
+        .chain(strangers[..4].iter().cloned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        f.description.ends_with(&format!(
+            "; if the inputs of TX {} at {named} and 2 more are yours, this is small change of \
+             your own spend; it is already linked to that chain",
+            txid(2)
+        )),
+        "{}",
+        f.description
+    );
+    assert_eq!(
+        f.details.as_ref().expect("details")["parent_input_addresses"]
+            .as_array()
+            .map(Vec::len),
+        Some(7)
+    );
 }

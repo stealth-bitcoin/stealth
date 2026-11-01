@@ -750,11 +750,9 @@ fn a_payout_leaving_change_under_1000_sats_is_own_change_not_received_dust() {
     assert_dust_advice(
         &report,
         VulnerabilityType::Dust,
-        "let a remainder this small go to the fee, or leave it in the payment instead of \
-         splitting it off as change, so it stays in the same chain.",
+        "Next time, let a remainder this small go to the fee, or leave it in the payment \
+         instead of splitting it off as change.",
     );
-    let correction = dust.correction.as_deref().unwrap_or_default();
-    assert!(!correction.contains("spend it only"), "{correction}");
 
     // A scan of the change address alone cannot tell whose coin it spent.
     let report = AnalysisEngine::new(&gateway, EngineSettings::default())
@@ -770,7 +768,7 @@ fn a_payout_leaving_change_under_1000_sats_is_own_change_not_received_dust() {
     );
     assert!(
         dust.description.contains(
-            "are yours, this is small change of your own spend; it is already linked to that chain"
+            &format!("at {a} are yours, this is small change of your own spend; it is already linked to that chain")
         ),
         "{}",
         dust.description

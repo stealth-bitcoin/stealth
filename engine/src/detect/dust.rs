@@ -24,7 +24,7 @@ const FEE_ONLY_SPEND: &str = "To get rid of it, spend it alone as fee: one coin 
 
 /// Advice for small change of the user's own spend, given after the freeze advice.
 const NEXT_TIME: &str = "Next time, let a remainder this small go to the fee, or leave it in \
-     the payment instead of splitting it off as change, so it stays in the same chain.";
+     the payment instead of splitting it off as change.";
 
 /// Whose spend made a dust coin, from the inputs of its parent tx.
 enum Origin {
@@ -77,9 +77,10 @@ impl Origin {
                  coins at {}",
                 list_addresses(from)
             ),
-            Origin::PossiblyOwnChange(_) => format!(
-                "; if the inputs of TX {parent} are yours, this {is} small change of your own \
-                 spend; it {is} already linked to that chain"
+            Origin::PossiblyOwnChange(from) => format!(
+                "; if the inputs of TX {parent} at {} are yours, this {is} small change of your \
+                 own spend; it {is} already linked to that chain",
+                list_addresses(from)
             ),
         }
     }
