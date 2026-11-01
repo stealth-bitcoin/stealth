@@ -237,8 +237,9 @@ impl Interrupts {
         let mut moment = self.moment();
         match std::mem::take(&mut *moment) {
             Moment::Asking(reply) => {
+                // Stored before the reply, so whoever reads the reply sees it.
+                self.answered_no.store(true, Ordering::Release);
                 let _ = reply.send(Reply::Interrupted);
-                self.answered_no.store(true, Ordering::Relaxed);
                 false
             }
             Moment::Scanning => true,
@@ -247,7 +248,7 @@ impl Interrupts {
 
     /// Whether a Ctrl-C answered the question.
     fn answered_the_question(&self) -> bool {
-        self.answered_no.load(Ordering::Relaxed)
+        self.answered_no.load(Ordering::Acquire)
     }
 
     fn begin_asking(&self, reply: mpsc::Sender<Reply>) {

@@ -106,8 +106,9 @@ loading them can take long and put a heavy load on the node:
   Ctrl-C not ignored) it asks whether to go on. Ctrl-C there counts as no:
   the scan unloads its wallet, prints the count and the hint and ends by
   SIGINT, so an enclosing shell loop stops. If the terminal closes while the
-  question waits (SIGHUP), the process ends with the scan wallet still loaded;
-  unload it by hand with `bitcoin-cli unloadwallet _stealth_scan_<...>` (see
+  question waits (SIGHUP), the process ends with its wallet still loaded:
+  `_stealth_scan_<...>`, or `_stealth_cache_<hash>` with `--cache-wallet`.
+  Unload it by hand with `bitcoin-cli unloadwallet <name>` (see
   `bitcoin-cli listwallets`). Elsewhere it stops with an error; scan again
   with `--no-limits`, or with `--max-txs` set to at least the count, higher
   if the history may grow.
