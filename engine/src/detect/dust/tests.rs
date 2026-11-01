@@ -1479,3 +1479,242 @@ fn an_intended_small_output_of_an_own_spend_is_not_told_to_go_to_the_fee() {
         ))
     );
 }
+
+/// `history` after the user moves the coin `from` (worth `from_sats`) to `to_sats` at a new own
+/// address in tx `id`, with `extra` as further own inputs, each from its own funding tx; the
+/// UTXO list then holds only the new coin. Returns the new coin's outpoint txid.
+fn moved(
+    mut history: WalletHistory,
+    from: (Txid, u32),
+    extra: &[u64],
+    vout: Vec<TxOutput>,
+    id: Txid,
+) -> WalletHistory {
+    let input = |previous_txid, previous_vout| TxInputRef {
+        previous_txid,
+        previous_vout,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    };
+    let mut vin = vec![input(from.0, from.1)];
+    for (i, sats) in extra.iter().enumerate() {
+        let (fund, address) = (txid(40 + i as u32), wpkh(40 + i as u8));
+        history
+            .transactions
+            .insert(fund, tx(fund, vec![], vec![out(0, &address, *sats)]));
+        history
+            .wallet_txs
+            .push(entry(fund, Some(&address), WalletTxCategory::Receive));
+        vin.push(input(fund, 0));
+    }
+    history.utxos.clear();
+    for o in &vout {
+        let Some(address) = o.address.clone() else {
+            continue;
+        };
+        // `wpkh(12)` to `wpkh(19)` stand for the user's new addresses.
+        if (12..20).any(|seed| wpkh(seed) == address) {
+            history
+                .wallet_txs
+                .push(entry(id, Some(&address), WalletTxCategory::Receive));
+            history.utxos.push(Utxo {
+                txid: id,
+                vout: o.n,
+                address: Some(address),
+                amount: o.value,
+                confirmations: 3,
+                script_type: DescriptorType::P2wpkh,
+            });
+        }
+    }
+    history
+        .wallet_txs
+        .push(entry(id, None, WalletTxCategory::Send));
+    history.transactions.insert(id, tx(id, vin, vout));
+    history
+}
+
+/// The finding of the coin created by tx `id`.
+fn finding_from(findings: &[Finding], id: Txid) -> &Finding {
+    findings
+        .iter()
+        .find(|f| f.details.as_ref().is_some_and(|d| d["txid"] == json!(id)))
+        .unwrap_or_else(|| panic!("no finding of {id}: {findings:?}"))
+}
+
+#[test]
+fn received_dust_moved_alone_to_a_new_own_address_stays_received_dust() {
+    let history = moved(
+        received(600, 0),
+        (txid(1), 0),
+        &[],
+        vec![out(0, &wpkh(12), 400)],
+        txid(3),
+    );
+    let findings = dust_in(history, false);
+    let f = finding_from(&findings, txid(3));
+    assert_eq!(f.severity, Severity::High, "{f:?}");
+    assert_eq!(origin(f), "received", "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Dust UTXO {}:0 at {} (400 sats, STRICT_DUST, unspent)",
+            txid(3),
+            wpkh(12).assume_checked_ref()
+        )
+    );
+}
+
+#[test]
+fn attack_dust_moved_alone_keeps_the_attack_finding() {
+    let once = moved(
+        received(500, 9),
+        (txid(1), 0),
+        &[],
+        vec![out(0, &wpkh(12), 450)],
+        txid(3),
+    );
+    let twice = moved(
+        once,
+        (txid(3), 0),
+        &[],
+        vec![out(0, &wpkh(13), 400)],
+        txid(4),
+    );
+    for (history, id) in [
+        (
+            moved(
+                received(500, 9),
+                (txid(1), 0),
+                &[],
+                vec![out(0, &wpkh(12), 450)],
+                txid(3),
+            ),
+            txid(3),
+        ),
+        (twice, txid(4)),
+    ] {
+        let findings = dust_in(history, false);
+        let f = finding_from(&findings, id);
+        assert_eq!(f.severity, Severity::Critical, "{f:?}");
+        assert_eq!(origin(f), "received", "{f:?}");
+        let details = f.details.as_ref().expect("details");
+        assert_eq!(details["dust_attack"]["parent_txid"], txid(1).to_string());
+        assert!(
+            f.description.ends_with(&format!(
+                " — it was moved from dust of TX {}, which matches a dust-attack pattern",
+                txid(1)
+            )),
+            "{}",
+            f.description
+        );
+    }
+}
+
+#[test]
+fn received_dust_spent_with_a_normal_own_coin_leaves_own_change() {
+    let history = moved(
+        received(600, 0),
+        (txid(1), 0),
+        &[50_000],
+        vec![out(0, &wpkh(150), 49_000), out(1, &wpkh(12), 400)],
+        txid(3),
+    );
+    let findings = dust_in(history, false);
+    let f = finding_from(&findings, txid(3));
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "own_change", "{f:?}");
+}
+
+#[test]
+fn own_change_moved_alone_stays_own_change() {
+    let history = moved(
+        own_change(1, 600, true, None),
+        (txid(2), 1),
+        &[],
+        vec![out(0, &wpkh(12), 400)],
+        txid(3),
+    );
+    let findings = dust_in(history, false);
+    let f = finding_from(&findings, txid(3));
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(f), "own_change", "{f:?}");
+}
+
+#[test]
+fn a_coinjoin_shaped_spend_of_the_users_coin_does_not_leave_own_change() {
+    let mut history = own_change(1, 600, true, None);
+    let mut extra = Vec::new();
+    for i in 0..3u32 {
+        let theirs = txid(90 + i);
+        history.transactions.insert(
+            theirs,
+            tx(theirs, vec![], vec![out(0, &wpkh(200 + i as u8), 60_000)]),
+        );
+        extra.push(TxInputRef {
+            previous_txid: theirs,
+            previous_vout: 0,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        });
+    }
+    if let Some(round) = history.transactions.get_mut(&txid(2)) {
+        round.vin.extend(extra);
+        round.vout = vec![
+            out(0, &wpkh(150), 50_000),
+            out(1, &wpkh(10), 600),
+            out(2, &wpkh(151), 50_000),
+        ];
+    }
+    let findings = dust_in(history, false);
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Medium, "{f:?}");
+    assert_eq!(origin(f), "received", "{f:?}");
+}
+
+#[test]
+fn own_change_merged_alone_with_received_dust_is_received_dust() {
+    // The 500-sat coin comes from a funding tx with no own input: received.
+    let history = moved(
+        own_change(1, 600, true, None),
+        (txid(2), 1),
+        &[500],
+        vec![out(0, &wpkh(12), 900)],
+        txid(3),
+    );
+    for reversed in [false, true] {
+        let mut history = history.clone();
+        if let Some(spend) = history.transactions.get_mut(&txid(3)).filter(|_| reversed) {
+            spend.vin.reverse();
+        }
+        let findings = dust_in(history, false);
+        let f = finding_from(&findings, txid(3));
+        assert_eq!(f.severity, Severity::Medium, "{f:?}");
+        assert_eq!(origin(f), "received", "{f:?}");
+    }
+}
+
+#[test]
+fn dust_moved_more_often_than_the_walk_follows_is_received_dust() {
+    let walk = |moves: u32| {
+        let mut history = own_change(1, 600, true, None);
+        let mut from = (txid(2), 1);
+        for hop in 0..moves {
+            let id = txid(3 + hop);
+            let to = wpkh(12 + (hop % 2) as u8);
+            history = moved(
+                history,
+                from,
+                &[],
+                vec![out(0, &to, 590 - u64::from(hop))],
+                id,
+            );
+            from = (id, 0);
+        }
+        let findings = dust_in(history, false);
+        let f = finding_from(&findings, from.0);
+        (f.severity, origin(f).to_owned())
+    };
+    assert_eq!(walk(16), (Severity::Low, "own_change".to_owned()));
+    assert_eq!(walk(17), (Severity::Medium, "received".to_owned()));
+}

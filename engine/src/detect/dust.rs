@@ -28,31 +28,36 @@ const NEXT_TIME: &str = "If it is a remainder, next time let a remainder this sm
      fee, or leave it in the payment instead of splitting it off as change; if it carries an \
      inscription or runes, or is a CoinJoin output, keep it as its own coin.";
 
-/// Whose spend made a dust coin, from the inputs of its parent tx.
+/// Most own hops of dust alone walked back to find where moved dust came from.
+const MAX_DUST_HOPS: usize = 16;
+
+/// Whose spend made a dust coin, from the inputs of its parent tx, or of the tx the dust it
+/// was moved from came out of.
 enum Origin {
-    /// No input of the parent is the wallet's: someone sent it.
+    /// Someone sent it: no normal coin of the wallet paid for it.
     Received,
-    /// The parent spends the wallet's coins at these addresses: it is the user's change.
-    OwnChange(Vec<String>),
-    /// In a partial scan, the parent spends coins at these addresses, which the scan cannot
-    /// attribute: it is the user's change if they are the user's, and is otherwise reported
-    /// as received dust, since a sender's inputs are never the scanned address.
-    PossiblyOwnChange(Vec<String>),
+    /// The spend (first field) spends a normal coin of the wallet, at one of these addresses:
+    /// it is the user's change.
+    OwnChange(Txid, Vec<String>),
+    /// In a partial scan, the spend (first field) spends coins at these addresses, which the
+    /// scan cannot attribute: it is the user's change if they are the user's, and is otherwise
+    /// reported as received dust, since a sender's inputs are never the scanned address.
+    PossiblyOwnChange(Txid, Vec<String>),
 }
 
 impl Origin {
     fn label(&self) -> &'static str {
         match self {
             Origin::Received => "received",
-            Origin::OwnChange(_) => "own_change",
-            Origin::PossiblyOwnChange(_) => "possibly_own_change",
+            Origin::OwnChange(..) => "own_change",
+            Origin::PossiblyOwnChange(..) => "possibly_own_change",
         }
     }
 
     /// What the description calls the coin.
     fn noun(&self) -> &'static str {
         match self {
-            Origin::OwnChange(_) => "change",
+            Origin::OwnChange(..) => "change",
             _ => "dust",
         }
     }
@@ -60,13 +65,13 @@ impl Origin {
     /// Adds the origin, and the parent's input addresses for change, to `details`.
     fn describe(&self, details: &mut serde_json::Value) {
         details["origin"] = json!(self.label());
-        if let Origin::OwnChange(from) | Origin::PossiblyOwnChange(from) = self {
+        if let Origin::OwnChange(_, from) | Origin::PossiblyOwnChange(_, from) = self {
             details["parent_input_addresses"] = json!(from);
         }
     }
 
     /// The description's note on whose spend made the coin, in the present or past tense.
-    fn note(&self, parent: &Txid, spent: bool) -> String {
+    fn note(&self, spent: bool) -> String {
         let (spends, is) = if spent {
             ("spent", "was")
         } else {
@@ -74,17 +79,28 @@ impl Origin {
         };
         match self {
             Origin::Received => String::new(),
-            Origin::OwnChange(from) => format!(
+            Origin::OwnChange(parent, from) => format!(
                 "; it {is} small change of your own spend in TX {parent}, which {spends} your \
                  coins at {}",
                 list_addresses(from)
             ),
-            Origin::PossiblyOwnChange(from) => format!(
+            Origin::PossiblyOwnChange(parent, from) => format!(
                 "; if the inputs of TX {parent} at {} are yours, this {is} small change of your \
                  own spend; it {is} already linked to that chain",
                 list_addresses(from)
             ),
         }
+    }
+}
+
+/// The description's note on a dust-attack match: of the coin's parent `txid`, or of the tx
+/// the dust it was moved from came out of.
+fn attack_note(txid: &Txid, evidence: &serde_json::Value) -> String {
+    match evidence["parent_txid"].as_str() {
+        Some(source) if source != txid.to_string() => {
+            format!(" — it was moved from dust of TX {source}, which matches a dust-attack pattern")
+        }
+        _ => format!(" — parent TX {txid} matches a dust-attack pattern"),
     }
 }
 
@@ -128,8 +144,7 @@ impl TxGraph {
                         utxo.amount,
                         thresholds,
                     );
-                    let attack = self.dust_attack_evidence(&utxo.txid, thresholds).is_some();
-                    let origin = self.dust_origin(&utxo.txid, attack);
+                    let (origin, _) = self.dust_lineage(&utxo.txid, thresholds);
                     finding.description = format!(
                     "{} output {}:{} at {} ({} sats) was pasted as unspent but is already spent{}",
                     capitalized(origin.noun()),
@@ -137,7 +152,7 @@ impl TxGraph {
                     utxo.vout,
                     utxo.address.assume_checked_ref(),
                     utxo.amount.to_sat(),
-                    origin.note(&utxo.txid, true),
+                    origin.note(true),
                 );
                     finding
                 } else {
@@ -225,16 +240,38 @@ impl TxGraph {
         })
     }
 
-    /// Whose spend made a dust coin of `parent`: the wallet's own when the parent spends any
-    /// of its coins, possibly the wallet's when, in a partial scan, it spends coins the scan
-    /// cannot attribute, and received otherwise. An attack-shaped parent is always received.
-    fn dust_origin(&self, parent: &Txid, attack: bool) -> Origin {
-        if attack {
-            return Origin::Received;
+    /// Where a dust coin of `parent` came from, with the dust-attack evidence that marks it.
+    fn dust_lineage(
+        &self,
+        parent: &Txid,
+        thresholds: &DetectorThresholds,
+    ) -> (Origin, Option<serde_json::Value>) {
+        self.dust_lineage_within(parent, thresholds, MAX_DUST_HOPS)
+    }
+
+    /// As [`Self::dust_lineage`], walking back at most `hops` own spends of dust alone.
+    fn dust_lineage_within(
+        &self,
+        parent: &Txid,
+        thresholds: &DetectorThresholds,
+        hops: usize,
+    ) -> (Origin, Option<serde_json::Value>) {
+        if let Some(evidence) = self.dust_attack_evidence(parent, thresholds) {
+            return (Origin::Received, Some(evidence));
         }
-        let (mut own, mut unattributed) = (Vec::new(), Vec::new());
+        // A CoinJoin round breaks the link to the coins it spent.
+        if self.coinjoin_shaped(parent) {
+            return (Origin::Received, None);
+        }
+        let (mut own, mut unattributed, mut sources) = (Vec::new(), Vec::new(), Vec::new());
+        let mut own_normal = false;
         for input in self.get_input_addresses(parent) {
             let list = if self.is_ours(&input.address) {
+                if input.value > thresholds.dust {
+                    own_normal = true;
+                } else if !sources.contains(&input.funding_txid) {
+                    sources.push(input.funding_txid);
+                }
                 &mut own
             } else if self.unattributed(parent, &input.address) {
                 &mut unattributed
@@ -246,12 +283,34 @@ impl TxGraph {
                 list.push(text);
             }
         }
+        if own_normal {
+            return (Origin::OwnChange(*parent, own), None);
+        }
         if !own.is_empty() {
-            Origin::OwnChange(own)
-        } else if !unattributed.is_empty() {
-            Origin::PossiblyOwnChange(unattributed)
+            // Dust moved with no normal coin keeps the origin of the dust it was moved from,
+            // the most exposed one when there are several.
+            if hops == 0 {
+                return (Origin::Received, None);
+            }
+            let mut lineage: Option<Origin> = None;
+            for source in &sources {
+                let (origin, evidence) = self.dust_lineage_within(source, thresholds, hops - 1);
+                if evidence.is_some() {
+                    return (Origin::Received, evidence);
+                }
+                lineage = match (lineage, origin) {
+                    (Some(Origin::Received), _) | (_, Origin::Received) => Some(Origin::Received),
+                    (Some(possible @ Origin::PossiblyOwnChange(..)), _)
+                    | (_, possible @ Origin::PossiblyOwnChange(..)) => Some(possible),
+                    (_, own) => Some(own),
+                };
+            }
+            return (lineage.unwrap_or(Origin::Received), None);
+        }
+        if !unattributed.is_empty() {
+            (Origin::PossiblyOwnChange(*parent, unattributed), None)
         } else {
-            Origin::Received
+            (Origin::Received, None)
         }
     }
 
@@ -319,13 +378,12 @@ impl TxGraph {
         } else {
             Severity::Medium
         };
-        let attack = self.dust_attack_evidence(txid, thresholds);
-        let origin = self.dust_origin(txid, attack.is_some());
+        let (origin, attack) = self.dust_lineage(txid, thresholds);
         let severity = match origin {
             _ if attack.is_some() => Severity::Critical,
             // Change of inputs the scan cannot attribute may still be someone else's dust.
-            Origin::Received | Origin::PossiblyOwnChange(_) => base_severity,
-            Origin::OwnChange(_) => Severity::Low,
+            Origin::Received | Origin::PossiblyOwnChange(..) => base_severity,
+            Origin::OwnChange(..) => Severity::Low,
         };
         let mut details = json!({
             "status": "unspent",
@@ -339,15 +397,15 @@ impl TxGraph {
         if let Some(ev) = attack.as_ref() {
             details["dust_attack"] = ev.clone();
         }
-        let description = if attack.is_some() {
+        let description = if let Some(ev) = attack.as_ref() {
             format!(
-                "Dust UTXO {}:{} at {} ({} sats, {}, unspent) — parent TX {} matches a dust-attack pattern",
+                "Dust UTXO {}:{} at {} ({} sats, {}, unspent){}",
                 txid,
                 vout,
                 address.assume_checked_ref(),
                 amt.to_sat(),
                 label,
-                txid,
+                attack_note(txid, ev),
             )
         } else {
             format!(
@@ -358,16 +416,16 @@ impl TxGraph {
                 address.assume_checked_ref(),
                 amt.to_sat(),
                 label,
-                origin.note(txid, false),
+                origin.note(false),
             )
         };
         let correction = match &origin {
-            Origin::OwnChange(_) => format!(
+            Origin::OwnChange(..) => format!(
                 "Freeze it in your wallet: as change of your own spend, it is already linked \
                  to the coins that spend came from, and spending it with coins of another \
                  origin links those to them as well. {FEE_ONLY_SPEND} {NEXT_TIME}"
             ),
-            Origin::Received | Origin::PossiblyOwnChange(_) => format!(
+            Origin::Received | Origin::PossiblyOwnChange(..) => format!(
                 "Freeze it in your wallet: spending it with your other coins links your \
                  other addresses to this one. {FEE_ONLY_SPEND}"
             ),
@@ -389,8 +447,7 @@ impl TxGraph {
         amt: Amount,
         thresholds: &DetectorThresholds,
     ) -> Finding {
-        let attack = self.dust_attack_evidence(txid, thresholds);
-        let origin = self.dust_origin(txid, attack.is_some());
+        let (origin, attack) = self.dust_lineage(txid, thresholds);
         let alone = self.spent_from_its_address_only(&(*txid, vout), address);
         let severity = if attack.is_some() && !alone {
             Severity::Critical
@@ -408,14 +465,14 @@ impl TxGraph {
         if let Some(ev) = attack.as_ref() {
             details["dust_attack"] = ev.clone();
         }
-        let description = if attack.is_some() {
+        let description = if let Some(ev) = attack.as_ref() {
             format!(
-                "Historical dust output {}:{} at {} ({} sats, already spent) — parent TX {} matches a dust-attack pattern",
+                "Historical dust output {}:{} at {} ({} sats, already spent){}",
                 txid,
                 vout,
                 address.assume_checked_ref(),
                 amt.to_sat(),
-                txid,
+                attack_note(txid, ev),
             )
         } else {
             format!(
@@ -425,15 +482,15 @@ impl TxGraph {
                 vout,
                 address.assume_checked_ref(),
                 amt.to_sat(),
-                origin.note(txid, true),
+                origin.note(true),
             )
         };
         let correction = match (&origin, alone) {
-            (Origin::OwnChange(_), true) => format!(
+            (Origin::OwnChange(..), true) => format!(
                 "This change has already been spent with no coins from your other \
                  addresses, so this spend added no new link to it. {NEXT_TIME}"
             ),
-            (Origin::OwnChange(_), false) => format!(
+            (Origin::OwnChange(..), false) => format!(
                 "This change has already been spent. From now on, freeze small change like \
                  this in your wallet's coin control so it is never spent with your other \
                  coins. {NEXT_TIME}"
@@ -463,8 +520,7 @@ impl TxGraph {
         amt: Amount,
         thresholds: &DetectorThresholds,
     ) -> Finding {
-        let attack = self.dust_attack_evidence(txid, thresholds);
-        let origin = self.dust_origin(txid, attack.is_some());
+        let (origin, attack) = self.dust_lineage(txid, thresholds);
         let severity = if attack.is_some() {
             Severity::Critical
         } else {
@@ -481,14 +537,14 @@ impl TxGraph {
         if let Some(ev) = attack.as_ref() {
             details["dust_attack"] = ev.clone();
         }
-        let description = if attack.is_some() {
+        let description = if let Some(ev) = attack.as_ref() {
             format!(
-                "Dust output {}:{} at {} ({} sats, spend status unknown) — parent TX {} matches a dust-attack pattern",
+                "Dust output {}:{} at {} ({} sats, spend status unknown){}",
                 txid,
                 vout,
                 address.assume_checked_ref(),
                 amt.to_sat(),
-                txid,
+                attack_note(txid, ev),
             )
         } else {
             format!(
@@ -498,7 +554,7 @@ impl TxGraph {
                 vout,
                 address.assume_checked_ref(),
                 amt.to_sat(),
-                origin.note(txid, false),
+                origin.note(false),
             )
         };
         Finding {
