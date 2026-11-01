@@ -1297,9 +1297,10 @@ fn a_coinjoin_shaped_parent_in_a_partial_scan_is_received_dust() {
     assert_eq!(origin(f), "received", "{f:?}");
 }
 
-#[test]
-fn pasted_own_change_already_spent_is_named_as_change() {
-    let mut history = own_change(1, 600, true, Some(50_000));
+/// The finding of the last change of [`own_change`], spent with another coin but pasted as
+/// unspent, from a scan that knows the earlier inputs when `inputs_known`.
+fn pasted_spent(inputs_known: bool, partial: bool) -> Finding {
+    let mut history = own_change(1, 600, inputs_known, Some(50_000));
     history.utxos.push(Utxo {
         txid: txid(2),
         vout: 1,
@@ -1308,18 +1309,44 @@ fn pasted_own_change_already_spent_is_named_as_change() {
         confirmations: 3,
         script_type: DescriptorType::P2wpkh,
     });
-    let findings = dust_in(history, false);
-    let f = only(&findings);
+    let findings = dust_in(history, partial);
+    only(&findings).clone()
+}
+
+#[test]
+fn pasted_own_change_already_spent_is_named_as_change() {
+    let f = pasted_spent(true, false);
     assert_eq!(f.severity, Severity::Low, "{f:?}");
-    assert_eq!(origin(f), "own_change", "{f:?}");
-    assert!(
-        f.description.starts_with(&format!(
-            "Change output {}:1 at {} (600 sats) was pasted as unspent but is already spent",
+    assert_eq!(origin(&f), "own_change", "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Change output {}:1 at {} (600 sats) was pasted as unspent but is already spent; \
+             it was small change of your own spend in TX {}, which spent your coins at {}",
             txid(2),
-            wpkh(10).assume_checked_ref()
-        )),
-        "{}",
-        f.description
+            wpkh(10).assume_checked_ref(),
+            txid(2),
+            wpkh(1).assume_checked_ref()
+        )
+    );
+}
+
+#[test]
+fn pasted_possibly_own_change_already_spent_gets_the_past_tense_note() {
+    let f = pasted_spent(false, true);
+    assert_eq!(f.severity, Severity::Low, "{f:?}");
+    assert_eq!(origin(&f), "possibly_own_change", "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Dust output {}:1 at {} (600 sats) was pasted as unspent but is already spent; if \
+             the inputs of TX {} at {} are yours, this was small change of your own spend; it \
+             was already linked to that chain",
+            txid(2),
+            wpkh(10).assume_checked_ref(),
+            txid(2),
+            wpkh(1).assume_checked_ref()
+        )
     );
 }
 
