@@ -1681,8 +1681,8 @@ fn possibly_own_change_moved_alone_names_where_it_was_moved_from() {
         f.description,
         format!(
             "Dust UTXO {}:0 at {} (400 sats, STRICT_DUST, unspent); it was moved from an output \
-             of TX {}; if the inputs of that TX at {} are yours, this is small change of your \
-             own spend; it is already linked to that chain",
+             of TX {}; if the inputs of that TX at {} are yours, it was moved from small change \
+             of your own spend; it is already linked to that chain",
             txid(3),
             wpkh(12).assume_checked_ref(),
             txid(2),
@@ -2090,7 +2090,10 @@ fn assert_possibly_own_change_of_the_merge(f: &Finding) {
     let details = f.details.as_ref().expect("details");
     assert_eq!(
         details["linking_input_addresses"],
-        json!([wpkh(45).assume_checked_ref().to_string()])
+        json!([
+            wpkh(1).assume_checked_ref().to_string(),
+            wpkh(45).assume_checked_ref().to_string()
+        ])
     );
     assert!(details.get("dust_attack").is_none(), "{details}");
     assert!(details.get("source_txid").is_none(), "{details}");
@@ -2106,4 +2109,96 @@ fn own_dust_spent_with_an_unattributed_normal_coin_is_possibly_own_change_of_tha
 fn attack_dust_spent_with_an_unattributed_normal_coin_is_not_a_move_of_the_attack_dust() {
     let f = moved_with_an_unattributed_normal_coin(received(500, 9), (txid(1), 0));
     assert_possibly_own_change_of_the_merge(&f);
+}
+
+#[test]
+fn possibly_moved_dust_moved_again_names_where_it_was_moved_from() {
+    let mut history = own_change(1, 600, false, None);
+    if let Some(fund) = history.transactions.get_mut(&txid(1)) {
+        fund.vout[0].value = Amount::from_sat(1_000);
+    }
+    let history = moved(
+        history,
+        (txid(2), 1),
+        &[],
+        vec![out(0, &wpkh(12), 400)],
+        txid(3),
+    );
+    let findings = dust_in(history, true);
+    let f = finding_from(&findings, txid(3));
+    assert_eq!(f.severity, Severity::High, "{f:?}");
+    assert_eq!(origin(f), "possibly_moved_dust", "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Dust UTXO {}:0 at {} (400 sats, STRICT_DUST, unspent); it was moved from an output \
+             of TX {}; if the inputs of that TX at {} are yours, it may be dust moved from them, \
+             of unknown origin",
+            txid(3),
+            wpkh(12).assume_checked_ref(),
+            txid(2),
+            wpkh(1).assume_checked_ref()
+        )
+    );
+    assert_moved_from(f, txid(2));
+}
+
+#[test]
+fn pasted_attack_dust_already_spent_keeps_the_attack_note() {
+    let findings = spent_dust_with(
+        9,
+        &[(&wpkh(2), 50_000)],
+        vec![out(0, &wpkh(150), 49_000)],
+        true,
+        true,
+    );
+    let f = only(&findings);
+    assert_eq!(f.severity, Severity::Critical, "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Dust output {}:0 at {} (600 sats) was pasted as unspent but is already spent — \
+             parent TX {} matches a dust-attack pattern",
+            txid(1),
+            wpkh(1).assume_checked_ref(),
+            txid(1)
+        )
+    );
+}
+
+#[test]
+fn pasted_attack_dust_moved_and_already_spent_keeps_the_attack_note() {
+    let mut history = moved(
+        received(500, 9),
+        (txid(1), 0),
+        &[],
+        vec![out(0, &wpkh(12), 450)],
+        txid(3),
+    );
+    let child = txid(81);
+    let vin = vec![TxInputRef {
+        previous_txid: txid(3),
+        previous_vout: 0,
+        sequence: 0xffff_fffd,
+        coinbase: false,
+    }];
+    history
+        .transactions
+        .insert(child, tx(child, vin, vec![out(0, &wpkh(160), 300)]));
+    history
+        .wallet_txs
+        .push(entry(child, None, WalletTxCategory::Send));
+    let findings = dust_in(history, false);
+    let f = finding_from(&findings, txid(3));
+    assert_eq!(f.severity, Severity::Critical, "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Dust output {}:0 at {} (450 sats) was pasted as unspent but is already spent — it \
+             was moved from dust of TX {}, which matches a dust-attack pattern",
+            txid(3),
+            wpkh(12).assume_checked_ref(),
+            txid(1)
+        )
+    );
 }

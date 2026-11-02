@@ -63,6 +63,9 @@ struct Spend {
     txid: Txid,
     /// Addresses of the spend's inputs that make it the user's, or possibly theirs.
     from: Vec<String>,
+    /// Addresses of the spend's inputs that link the coin to the user: `from`, and the
+    /// user's own dust next to a normal coin the scan cannot attribute.
+    linking: Vec<String>,
     /// When the coin was moved from an output of the spend, the own input addresses of the
     /// coin's own parent.
     moved_by: Option<Vec<String>>,
@@ -99,7 +102,7 @@ impl Origin {
                     details["linking_input_addresses"] = json!(parent_inputs);
                     details["source_txid"] = json!(spend.txid);
                 }
-                None => details["linking_input_addresses"] = json!(spend.from),
+                None => details["linking_input_addresses"] = json!(spend.linking),
             }
         }
     }
@@ -117,6 +120,7 @@ impl Origin {
                 txid,
                 from,
                 moved_by: None,
+                ..
             }) => format!(
                 "; it {is} small change of your own spend in TX {txid}, which {spends} your \
                  coins at {}",
@@ -131,6 +135,7 @@ impl Origin {
                 txid,
                 from,
                 moved_by: None,
+                ..
             }) => format!(
                 "; if the inputs of TX {txid} at {} are yours, this {is} small change of your \
                  own spend; it {is} already linked to that chain",
@@ -140,6 +145,7 @@ impl Origin {
                 txid,
                 from,
                 moved_by: None,
+                ..
             }) => format!(
                 "; if the inputs of TX {txid} at {} are yours, it may be dust moved from them, \
                  of unknown origin",
@@ -152,8 +158,8 @@ impl Origin {
             ),
             Origin::PossiblyOwnChange(Spend { txid, from, .. }) => format!(
                 "; it was moved from an output of TX {txid}; if the inputs of that TX at {} are \
-                 yours, this {is} small change of your own spend; it {is} already linked to \
-                 that chain",
+                 yours, it was moved from small change of your own spend; it {is} already \
+                 linked to that chain",
                 list_addresses(from)
             ),
         }
@@ -241,7 +247,11 @@ impl TxGraph {
                         thresholds,
                         &mut lineages,
                     );
-                    let (origin, _) = self.dust_lineage(&utxo.txid, thresholds, &mut lineages);
+                    let (origin, attack) = self.dust_lineage(&utxo.txid, thresholds, &mut lineages);
+                    let note = match &attack {
+                        Some(evidence) => attack_note(&utxo.txid, evidence),
+                        None => origin.note(true),
+                    };
                     finding.description = format!(
                     "{} output {}:{} at {} ({} sats) was pasted as unspent but is already spent{}",
                     capitalized(origin.noun()),
@@ -249,7 +259,7 @@ impl TxGraph {
                     utxo.vout,
                     utxo.address.assume_checked_ref(),
                     utxo.amount.to_sat(),
-                    origin.note(true),
+                    note,
                 );
                     finding
                 } else {
@@ -400,8 +410,9 @@ impl TxGraph {
                 }
             }
         }
-        let spend = |from| Spend {
+        let spend = |from: Vec<String>| Spend {
             txid: *parent,
+            linking: from.clone(),
             from,
             moved_by: None,
         };
@@ -411,7 +422,9 @@ impl TxGraph {
         // A normal coin the scan cannot attribute may be the user's: then this is their spend,
         // not a move of dust alone.
         if !unattributed_normal.is_empty() {
-            return (Origin::PossiblyOwnChange(spend(unattributed_normal)), None);
+            let mut found = spend(unattributed_normal);
+            found.linking = own.into_iter().chain(found.from.clone()).collect();
+            return (Origin::PossiblyOwnChange(found), None);
         }
         if !own.is_empty() {
             // Dust moved with no normal coin keeps the origin of the dust it was moved from,
