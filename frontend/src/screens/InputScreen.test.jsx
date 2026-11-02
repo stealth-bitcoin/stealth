@@ -2,6 +2,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import InputScreen from './InputScreen'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 afterEach(cleanup)
 
@@ -86,6 +88,21 @@ describe('InputScreen', () => {
   it('shows an error banner when the error prop is set', () => {
     render(<InputScreen onAnalyze={vi.fn()} error="Scan failed: boom" />)
     expect(screen.getByRole('alert').textContent).toBe('Scan failed: boom')
+  })
+
+  it('styles the error banner to break a long unbroken token', () => {
+    const css = readFileSync(resolve(__dirname, 'InputScreen.module.css'), 'utf8')
+    const rule = css.match(/\.errorBanner\s*\{([^}]*)\}/)
+    expect(rule).not.toBeNull()
+    expect(rule[1]).toMatch(/overflow-wrap:\s*anywhere/)
+  })
+
+  it('renders the full error text in the banner element carrying the wrap class', () => {
+    const msg = `Scan failed: Invalid descriptor wpkh(tpub${'D'.repeat(100)}/<0;1>/*)`
+    render(<InputScreen onAnalyze={vi.fn()} error={msg} />)
+    const banner = screen.getByRole('alert')
+    expect(banner.textContent).toBe(msg)
+    expect(banner.className).toMatch(/errorBanner/)
   })
 
   it('shows no error banner by default', () => {
