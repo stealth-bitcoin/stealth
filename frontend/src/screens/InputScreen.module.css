@@ -107,6 +107,7 @@
 .errorBanner {
   margin-top: 0;
   margin-bottom: 20px;
+  word-break: break-word;
   overflow-wrap: anywhere;
 }
 

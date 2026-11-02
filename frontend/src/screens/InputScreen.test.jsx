@@ -90,11 +90,27 @@ describe('InputScreen', () => {
     expect(screen.getByRole('alert').textContent).toBe('Scan failed: boom')
   })
 
-  it('styles the error banner to break a long unbroken token', () => {
+  // The value the last .errorBanner rule gives a property, comments ignored.
+  function bannerValue(property) {
     const css = readFileSync(resolve(__dirname, 'InputScreen.module.css'), 'utf8')
-    const rule = css.match(/\.errorBanner\s*\{([^}]*)\}/)
-    expect(rule).not.toBeNull()
-    expect(rule[1]).toMatch(/overflow-wrap:\s*anywhere/)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+    let value = null
+    for (const [, selectors, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      if (!selectors.split(',').some((sel) => /\.errorBanner$/.test(sel.trim()))) continue
+      for (const decl of body.split(';')) {
+        const [name, ...rest] = decl.split(':')
+        if (name.trim() === property) value = rest.join(':').trim()
+      }
+    }
+    return value
+  }
+
+  it('styles the error banner to break a long unbroken token', () => {
+    expect(bannerValue('overflow-wrap')).toBe('anywhere')
+  })
+
+  it('keeps a word-break fallback on the banner for browsers without overflow-wrap: anywhere', () => {
+    expect(bannerValue('word-break')).toBe('break-word')
   })
 
   it('renders the full error text in the banner element carrying the wrap class', () => {
