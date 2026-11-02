@@ -47,3 +47,20 @@ jobs:
           bitcoind --version
 
       - run: cargo test --workspace
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The lockfile is maintained with Yarn 4; the runner's Yarn 1 cannot install it.
+      - run: corepack enable && corepack prepare yarn@4.9.1 --activate
+      - run: yarn install --immutable
+      - run: yarn test
+      - run: yarn build
