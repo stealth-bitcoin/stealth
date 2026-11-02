@@ -738,7 +738,7 @@ fn a_payout_leaving_change_under_1000_sats_is_own_change_not_received_dust() {
     assert_eq!(dust.severity, stealth_engine::Severity::Low, "{dust:?}");
     assert_eq!(details_of(dust, "origin"), "own_change", "{dust:?}");
     assert_eq!(
-        details_of(dust, "parent_input_addresses"),
+        details_of(dust, "linking_input_addresses"),
         &serde_json::json!([a.to_string()])
     );
     assert!(
@@ -815,7 +815,7 @@ fn a_600_sat_payment_from_another_wallet_is_received_dust() {
         "{}",
         dust.description
     );
-    assert!(details_of(dust, "parent_input_addresses").is_null());
+    assert!(details_of(dust, "linking_input_addresses").is_null());
     assert_dust_advice(
         &report,
         VulnerabilityType::Dust,

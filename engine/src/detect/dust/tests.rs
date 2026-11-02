@@ -907,7 +907,7 @@ fn assert_unspent_own_change(f: &Finding, parent: Txid, from: &Address<NetworkUn
         ))
     );
     let details = f.details.as_ref().expect("details");
-    assert_eq!(details["parent_input_addresses"], json!([from]));
+    assert_eq!(details["linking_input_addresses"], json!([from]));
     assert!(details.get("source_txid").is_none(), "{details}");
 }
 
@@ -1225,7 +1225,7 @@ fn a_partial_scan_keeps_received_severity_for_change_of_unattributed_inputs() {
             Some(received_advice(sats, false).as_str())
         );
         assert_eq!(
-            f.details.as_ref().expect("details")["parent_input_addresses"],
+            f.details.as_ref().expect("details")["linking_input_addresses"],
             json!([from])
         );
     }
@@ -1414,7 +1414,7 @@ fn the_conditional_note_caps_the_named_inputs() {
         f.description
     );
     assert_eq!(
-        f.details.as_ref().expect("details")["parent_input_addresses"]
+        f.details.as_ref().expect("details")["linking_input_addresses"]
             .as_array()
             .map(Vec::len),
         Some(7)
@@ -1658,7 +1658,7 @@ fn own_change_moved_alone_stays_own_change() {
 fn assert_moved_from(f: &Finding, source: Txid) {
     let details = f.details.as_ref().expect("details");
     assert_eq!(
-        details["parent_input_addresses"],
+        details["linking_input_addresses"],
         json!([wpkh(10).assume_checked_ref().to_string()])
     );
     assert_eq!(details["source_txid"], json!(source));
@@ -1889,17 +1889,22 @@ fn change_of_unattributed_dust_only_may_be_moved_dust_of_unknown_origin() {
         Some(received_advice(600, false).as_str())
     );
     assert_eq!(
-        f.details.as_ref().expect("details")["parent_input_addresses"],
+        f.details.as_ref().expect("details")["linking_input_addresses"],
         json!([wpkh(1).assume_checked_ref().to_string()])
     );
 }
 
 #[test]
 fn an_unattributed_normal_coin_makes_the_change_possibly_own() {
-    for (sats, normal) in [(1_001, false), (1_000, true)] {
+    for (sats, normal, linking) in [(1_001, false, wpkh(1)), (1_000, true, wpkh(2))] {
         let f = change_of_unattributed(sats, normal);
         assert_eq!(f.severity, Severity::Medium, "{f:?}");
         assert_eq!(origin(&f), "possibly_own_change", "{f:?}");
+        // Only the normal coin can make the spend the user's.
+        assert_eq!(
+            f.details.as_ref().expect("details")["linking_input_addresses"],
+            json!([linking.assume_checked_ref().to_string()])
+        );
     }
 }
 
@@ -2037,4 +2042,68 @@ fn possibly_moved_dust_outranks_possibly_own_change_when_moved_together() {
         assert_eq!(f.severity, Severity::Medium, "{f:?}");
         assert_eq!(origin(f), "possibly_moved_dust", "{f:?}");
     }
+}
+
+/// In a partial scan, the coin `from` of `history` moved to 400 sats at `wpkh(12)` together
+/// with an unattributed 50,000-sat coin at `wpkh(45)`, paying the rest to a stranger.
+fn moved_with_an_unattributed_normal_coin(history: WalletHistory, from: (Txid, u32)) -> Finding {
+    let (theirs, merge) = (txid(71), txid(3));
+    let mut history = moved(
+        history,
+        from,
+        &[],
+        vec![out(0, &wpkh(150), 49_000), out(1, &wpkh(12), 400)],
+        merge,
+    );
+    history
+        .transactions
+        .insert(theirs, tx(theirs, vec![], vec![out(0, &wpkh(45), 50_000)]));
+    if let Some(spend) = history.transactions.get_mut(&merge) {
+        spend.vin.push(TxInputRef {
+            previous_txid: theirs,
+            previous_vout: 0,
+            sequence: 0xffff_fffd,
+            coinbase: false,
+        });
+    }
+    let findings = dust_in(history, true);
+    finding_from(&findings, merge).clone()
+}
+
+/// The finding of a coin whose parent spends own dust and an unattributed normal coin: the
+/// parent is possibly the user's own spend, named by that coin's address.
+fn assert_possibly_own_change_of_the_merge(f: &Finding) {
+    assert_eq!(f.severity, Severity::High, "{f:?}");
+    assert_eq!(origin(f), "possibly_own_change", "{f:?}");
+    assert_eq!(
+        f.description,
+        format!(
+            "Dust UTXO {}:1 at {} (400 sats, STRICT_DUST, unspent); if the inputs of TX {} at \
+             {} are yours, this is small change of your own spend; it is already linked to \
+             that chain",
+            txid(3),
+            wpkh(12).assume_checked_ref(),
+            txid(3),
+            wpkh(45).assume_checked_ref()
+        )
+    );
+    let details = f.details.as_ref().expect("details");
+    assert_eq!(
+        details["linking_input_addresses"],
+        json!([wpkh(45).assume_checked_ref().to_string()])
+    );
+    assert!(details.get("dust_attack").is_none(), "{details}");
+    assert!(details.get("source_txid").is_none(), "{details}");
+}
+
+#[test]
+fn own_dust_spent_with_an_unattributed_normal_coin_is_possibly_own_change_of_that_spend() {
+    let f = moved_with_an_unattributed_normal_coin(received(600, 0), (txid(1), 0));
+    assert_possibly_own_change_of_the_merge(&f);
+}
+
+#[test]
+fn attack_dust_spent_with_an_unattributed_normal_coin_is_not_a_move_of_the_attack_dust() {
+    let f = moved_with_an_unattributed_normal_coin(received(500, 9), (txid(1), 0));
+    assert_possibly_own_change_of_the_merge(&f);
 }

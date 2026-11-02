@@ -86,7 +86,8 @@ impl Origin {
         }
     }
 
-    /// Adds the origin, and the parent's input addresses for change, to `details`.
+    /// Adds the origin to `details`, with the input addresses of the coin's parent that make
+    /// it the user's, or possibly theirs, and the spend it was moved from.
     fn describe(&self, details: &mut serde_json::Value) {
         details["origin"] = json!(self.label());
         if let Origin::OwnChange(spend)
@@ -95,10 +96,10 @@ impl Origin {
         {
             match &spend.moved_by {
                 Some(parent_inputs) => {
-                    details["parent_input_addresses"] = json!(parent_inputs);
+                    details["linking_input_addresses"] = json!(parent_inputs);
                     details["source_txid"] = json!(spend.txid);
                 }
-                None => details["parent_input_addresses"] = json!(spend.from),
+                None => details["linking_input_addresses"] = json!(spend.from),
             }
         }
     }
@@ -189,6 +190,12 @@ fn attack_note(txid: &Txid, evidence: &serde_json::Value) -> String {
             format!(" — it was moved from dust of TX {source}, which matches a dust-attack pattern")
         }
         _ => format!(" — parent TX {txid} matches a dust-attack pattern"),
+    }
+}
+
+fn add_once(list: &mut Vec<String>, text: &str) {
+    if !list.iter().any(|known| known == text) {
+        list.push(text.to_owned());
     }
 }
 
@@ -374,25 +381,23 @@ impl TxGraph {
             return (Origin::Received, None);
         }
         let (mut own, mut unattributed, mut sources) = (Vec::new(), Vec::new(), Vec::new());
-        let (mut own_normal, mut unattributed_normal) = (false, false);
+        let mut unattributed_normal = Vec::new();
+        let mut own_normal = false;
         for input in self.get_input_addresses(parent) {
             let normal = input.value > thresholds.dust;
-            let list = if self.is_ours(&input.address) {
+            let text = input.address.assume_checked_ref().to_string();
+            if self.is_ours(&input.address) {
                 if normal {
                     own_normal = true;
                 } else if !sources.contains(&input.funding_txid) {
                     sources.push(input.funding_txid);
                 }
-                &mut own
+                add_once(&mut own, &text);
             } else if self.unattributed(parent, &input.address) {
-                unattributed_normal |= normal;
-                &mut unattributed
-            } else {
-                continue;
-            };
-            let text = input.address.assume_checked_ref().to_string();
-            if !list.contains(&text) {
-                list.push(text);
+                add_once(&mut unattributed, &text);
+                if normal {
+                    add_once(&mut unattributed_normal, &text);
+                }
             }
         }
         let spend = |from| Spend {
@@ -402,6 +407,11 @@ impl TxGraph {
         };
         if own_normal {
             return (Origin::OwnChange(spend(own)), None);
+        }
+        // A normal coin the scan cannot attribute may be the user's: then this is their spend,
+        // not a move of dust alone.
+        if !unattributed_normal.is_empty() {
+            return (Origin::PossiblyOwnChange(spend(unattributed_normal)), None);
         }
         if !own.is_empty() {
             // Dust moved with no normal coin keeps the origin of the dust it was moved from,
@@ -433,10 +443,10 @@ impl TxGraph {
             };
             return (lineage, None);
         }
-        match (unattributed.is_empty(), unattributed_normal) {
-            (true, _) => (Origin::Received, None),
-            (false, true) => (Origin::PossiblyOwnChange(spend(unattributed)), None),
-            (false, false) => (Origin::PossiblyMovedDust(spend(unattributed)), None),
+        if unattributed.is_empty() {
+            (Origin::Received, None)
+        } else {
+            (Origin::PossiblyMovedDust(spend(unattributed)), None)
         }
     }
 

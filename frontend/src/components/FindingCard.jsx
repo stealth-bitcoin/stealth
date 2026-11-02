@@ -85,7 +85,7 @@ function DetailsPanel({ details }) {
   const addrFields = [
     'our_addresses', 'change_outputs', 'received_outputs',
     'dust_inputs', 'normal_inputs', 'tainted_inputs', 'clean_inputs', 'inputs',
-    'parent_input_addresses',
+    'linking_input_addresses',
   ]
   for (const f of addrFields) {
     if (Array.isArray(details[f]) && details[f].length) {
