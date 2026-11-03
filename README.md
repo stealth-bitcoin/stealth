@@ -74,10 +74,10 @@ Stealth identifies real-world privacy issues such as:
 
 ## Detection taxonomy
 
-Stealth's source-of-truth detector is:
+Stealth's source-of-truth detectors are in:
 
 ```
-engine/src/detect.rs
+engine/src/detect/
 ```
 
 The report model and type names are defined in:
@@ -248,7 +248,7 @@ stealth/
 ├── Cargo.toml              # Rust workspace definition
 ├── engine/                 # stealth-engine (detectors + graph + report model)
 │   ├── src/
-│   │   ├── detect.rs       # privacy detectors
+│   │   ├── detect/         # privacy detectors, one module per family
 │   │   ├── engine.rs       # AnalysisEngine entry point
 │   │   ├── graph.rs        # Transaction graph builder
 │   │   └── lib.rs          # Crate root and re-exports
