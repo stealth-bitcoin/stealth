@@ -1,6 +1,7 @@
 mod error;
 mod jobs;
 mod routes;
+pub mod rpc;
 
 use std::sync::Arc;
 

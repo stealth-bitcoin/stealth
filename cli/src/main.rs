@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::{env, fs};
 
-use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc};
+use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc, RpcAuth};
 use stealth_engine::engine::{AnalysisEngine, EngineSettings, ScanTarget, UtxoInput};
 use stealth_engine::types::{Finding, Summary};
 
@@ -81,6 +81,23 @@ fn by_severity(list: &[Finding]) -> Vec<&Finding> {
     sorted
 }
 
+// Explicit user/pass wins; a cookie goes to the gateway as a path.
+fn select_rpc_auth(
+    user: Option<String>,
+    pass: Option<String>,
+    cookie: Option<PathBuf>,
+) -> Result<RpcAuth, String> {
+    match (user, pass, cookie) {
+        (Some(user), Some(pass), _) => Ok(RpcAuth::UserPass(user, pass)),
+        (_, _, Some(cookie_path)) => {
+            // Fail up front on an unreadable cookie; the gateway reads its own copy.
+            read_cookie_file(&cookie_path).map_err(|e| e.to_string())?;
+            Ok(RpcAuth::CookieFile(cookie_path))
+        }
+        _ => Ok(RpcAuth::None),
+    }
+}
+
 #[derive(Debug, Default)]
 struct ScanOpts {
     descriptor: Option<String>,
@@ -101,24 +118,16 @@ impl ScanOpts {
             .or_else(|| env::var("STEALTH_RPC_URL").ok())
             .ok_or("--rpc-url or STEALTH_RPC_URL is required")?;
 
-        let (user, pass) = match (
+        let auth = select_rpc_auth(
             self.rpc_user
                 .clone()
                 .or_else(|| env::var("STEALTH_RPC_USER").ok()),
             env::var("STEALTH_RPC_PASS").ok(),
             self.rpc_cookie
                 .clone()
-                .or_else(|| env::var("STEALTH_RPC_COOKIE").ok().map(PathBuf::from)),
-        ) {
-            (Some(user), Some(pass), _) => (Some(user), Some(pass)),
-            (_, _, Some(cookie_path)) => {
-                let (u, p) = read_cookie_file(&cookie_path).map_err(|e| e.to_string())?;
-                (Some(u), Some(p))
-            }
-            _ => (None, None),
-        };
-
-        BitcoinCoreRpc::from_url(&url, user, pass).map_err(|e| e.to_string())
+                .or_else(|| env::var_os("STEALTH_RPC_COOKIE").map(PathBuf::from)),
+        )?;
+        BitcoinCoreRpc::from_url_auth(&url, auth).map_err(|e| e.to_string())
     }
 
     fn scan_target(&self) -> Result<ScanTarget, String> {

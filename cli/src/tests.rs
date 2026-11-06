@@ -41,6 +41,43 @@ mod settings {
     }
 }
 
+mod rpc_auth {
+    use crate::*;
+
+    fn temp_cookie(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("stealth-cli-{}-{name}.cookie", std::process::id()));
+        std::fs::write(&path, "__cookie__:secret").unwrap();
+        path
+    }
+
+    #[test]
+    fn explicit_user_and_pass_win_over_a_cookie() {
+        let cookie = temp_cookie("explicit");
+        let auth = select_rpc_auth(Some("u".into()), Some("p".into()), Some(cookie.clone()));
+        std::fs::remove_file(&cookie).unwrap();
+        assert_eq!(auth, Ok(RpcAuth::UserPass("u".into(), "p".into())));
+    }
+
+    #[test]
+    fn a_cookie_is_handed_over_as_a_path() {
+        let cookie = temp_cookie("given");
+        let auth = select_rpc_auth(Some("u".into()), None, Some(cookie.clone()));
+        std::fs::remove_file(&cookie).unwrap();
+        assert_eq!(auth, Ok(RpcAuth::CookieFile(cookie)));
+    }
+
+    #[test]
+    fn an_unreadable_cookie_fails_up_front() {
+        assert!(select_rpc_auth(None, None, Some(PathBuf::from("/nowhere/.cookie"))).is_err());
+    }
+
+    #[test]
+    fn nothing_configured_means_no_auth() {
+        assert_eq!(select_rpc_auth(None, None, None), Ok(RpcAuth::None));
+    }
+}
+
 mod exit_codes {
     use crate::*;
 

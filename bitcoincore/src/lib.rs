@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +10,8 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::{Address, Amount, Txid};
 use ini::Ini;
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
+use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -31,6 +32,17 @@ pub struct BitcoinCoreConfig {
     pub rpcport: u16,
     pub rpcuser: Option<String>,
     pub rpcpassword: Option<String>,
+    /// Cookie file to authenticate with, in place of the datadir's default.
+    pub cookie_file: Option<PathBuf>,
+}
+
+/// How the gateway authenticates to Bitcoin Core.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RpcAuth {
+    UserPass(String, String),
+    /// Read by the gateway, cached, and re-read when the node answers 401.
+    CookieFile(PathBuf),
+    None,
 }
 
 impl BitcoinCoreConfig {
@@ -44,6 +56,7 @@ impl BitcoinCoreConfig {
 
         let network = section
             .get("network")
+            .or_else(|| section.get("chain"))
             .map(|value| value.trim().to_lowercase())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "regtest".into());
@@ -82,22 +95,18 @@ impl BitcoinCoreConfig {
                 .filter(|value| !value.is_empty()),
             network,
             datadir,
+            cookie_file: None,
         })
     }
 
     fn cookie_credentials(&self) -> Result<(String, String), AnalysisError> {
+        if let Some(path) = &self.cookie_file {
+            return read_cookie_file(path);
+        }
         let datadir = self.datadir.as_ref().ok_or_else(|| {
             AnalysisError::EnvironmentUnavailable("missing datadir for cookie auth".into())
         })?;
-        let mut candidates = Vec::new();
-        if self.network == "mainnet" {
-            candidates.push(datadir.join(".cookie"));
-        } else {
-            candidates.push(datadir.join(&self.network).join(".cookie"));
-            candidates.push(datadir.join(".cookie"));
-        }
-
-        for candidate in candidates {
+        for candidate in default_cookie_candidates(datadir, &self.network) {
             if !candidate.exists() {
                 continue;
             }
@@ -109,6 +118,38 @@ impl BitcoinCoreConfig {
         Err(AnalysisError::EnvironmentUnavailable(
             "could not locate a readable Bitcoin Core cookie file".into(),
         ))
+    }
+}
+
+/// Datadir subdirectory Bitcoin Core uses for a network; `None` means the root.
+pub fn network_datadir_subdir(network: &str) -> Option<&'static str> {
+    match network {
+        "testnet" | "testnet3" | "test" => Some("testnet3"),
+        "testnet4" => Some("testnet4"),
+        "signet" => Some("signet"),
+        "regtest" => Some("regtest"),
+        _ => None,
+    }
+}
+
+/// Network a default Bitcoin Core RPC port belongs to.
+pub fn network_for_rpc_port(port: u16) -> Option<&'static str> {
+    match port {
+        8332 => Some("mainnet"),
+        18332 => Some("testnet"),
+        48332 => Some("testnet4"),
+        38332 => Some("signet"),
+        18443 => Some("regtest"),
+        _ => None,
+    }
+}
+
+/// Where Bitcoin Core writes the `.cookie` for a network, most specific first.
+pub fn default_cookie_candidates(datadir: &Path, network: &str) -> Vec<PathBuf> {
+    let root = datadir.join(".cookie");
+    match network_datadir_subdir(network) {
+        Some(subdir) => vec![datadir.join(subdir).join(".cookie"), root],
+        None => vec![root],
     }
 }
 
@@ -152,6 +193,8 @@ pub struct BitcoinCoreRpc {
     // One lock per cache-wallet name, serialising in-process scans that
     // share a persistent cache so they never race on create/import/read.
     cache_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    // Cookie credentials read once, re-read only when the node answers 401.
+    cookie: RwLock<Option<(String, String)>>,
 }
 
 impl BitcoinCoreRpc {
@@ -168,6 +211,7 @@ impl BitcoinCoreRpc {
             tx_page_size: DEFAULT_TX_PAGE_SIZE,
             progress_sinks: Mutex::new(HashMap::new()),
             cache_locks: Mutex::new(HashMap::new()),
+            cookie: RwLock::new(None),
         })
     }
 
@@ -198,8 +242,29 @@ impl BitcoinCoreRpc {
             rpcport: port,
             rpcuser: user,
             rpcpassword: password,
+            cookie_file: None,
         };
         Self::new(config)
+    }
+
+    /// Construct a gateway from a URL and an [`RpcAuth`].
+    pub fn from_url_auth(url: &str, auth: RpcAuth) -> Result<Self, AnalysisError> {
+        match auth {
+            RpcAuth::UserPass(user, password) => Self::from_url(url, Some(user), Some(password)),
+            RpcAuth::None => Self::from_url(url, None, None),
+            RpcAuth::CookieFile(path) => {
+                let (host, port) = parse_host_port_from_url(url);
+                Self::new(BitcoinCoreConfig {
+                    network: infer_network_from_port(port),
+                    datadir: None,
+                    rpchost: host,
+                    rpcport: port,
+                    rpcuser: None,
+                    rpcpassword: None,
+                    cookie_file: Some(path),
+                })
+            }
+        }
     }
 
     fn rpc_url(&self, wallet: Option<&str>) -> String {
@@ -209,14 +274,72 @@ impl BitcoinCoreRpc {
             .unwrap_or(base)
     }
 
-    fn credentials(&self) -> Result<(String, String), AnalysisError> {
-        if let (Some(user), Some(password)) =
-            (self.config.rpcuser.clone(), self.config.rpcpassword.clone())
-        {
-            Ok((user, password))
-        } else {
-            self.config.cookie_credentials()
+    fn explicit_credentials(&self) -> Option<(String, String)> {
+        match (&self.config.rpcuser, &self.config.rpcpassword) {
+            (Some(user), Some(password)) => Some((user.clone(), password.clone())),
+            _ => None,
         }
+    }
+
+    fn credentials(&self) -> Result<(String, String), AnalysisError> {
+        if let Some(explicit) = self.explicit_credentials() {
+            return Ok(explicit);
+        }
+        let cached = self
+            .cookie
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        match cached {
+            Some(cookie) => Ok(cookie),
+            None => self.reload_cookie(None),
+        }
+    }
+
+    // Re-reads the cookie unless another caller already replaced `stale`.
+    fn reload_cookie(
+        &self,
+        stale: Option<&(String, String)>,
+    ) -> Result<(String, String), AnalysisError> {
+        let mut cached = self
+            .cookie
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(current) = cached.as_ref().filter(|current| Some(*current) != stale) {
+            return Ok(current.clone());
+        }
+        let fresh = self.config.cookie_credentials()?;
+        *cached = Some(fresh.clone());
+        Ok(fresh)
+    }
+
+    // Core regenerates the cookie on restart, so a 401 on cookie auth earns one re-read and retry.
+    fn post(&self, url: &str, method: &str, body: &Value) -> Result<Response, AnalysisError> {
+        let used = self.credentials()?;
+        let response = self.send(url, method, &used, body)?;
+        if response.status() != StatusCode::UNAUTHORIZED || self.explicit_credentials().is_some() {
+            return Ok(response);
+        }
+        // An unreadable or unchanged cookie keeps the node's 401 as the answer.
+        match self.reload_cookie(Some(&used)) {
+            Ok(fresh) if fresh != used => self.send(url, method, &fresh, body),
+            _ => Ok(response),
+        }
+    }
+
+    fn send(
+        &self,
+        url: &str,
+        method: &str,
+        (user, password): &(String, String),
+        body: &Value,
+    ) -> Result<Response, AnalysisError> {
+        self.client
+            .post(url)
+            .basic_auth(user, Some(password))
+            .json(body)
+            .send()
+            .map_err(|error| unreachable_node(method, error))
     }
 
     fn call<T: DeserializeOwned>(
@@ -236,19 +359,13 @@ impl BitcoinCoreRpc {
         method: &str,
         params: Vec<Value>,
     ) -> Result<T, RpcError> {
-        let (user, password) = self.credentials()?;
-        let response = self
-            .client
-            .post(self.rpc_url(wallet))
-            .basic_auth(user, Some(password))
-            .json(&json!({
-                "jsonrpc": "1.0",
-                "id": "stealth-rust",
-                "method": method,
-                "params": params,
-            }))
-            .send()
-            .map_err(|error| unreachable_node(method, error))?;
+        let body = json!({
+            "jsonrpc": "1.0",
+            "id": "stealth-rust",
+            "method": method,
+            "params": params,
+        });
+        let response = self.post(&self.rpc_url(wallet), method, &body)?;
 
         if !response.status().is_success() {
             return Err(rpc_failure(response, method));
@@ -263,7 +380,6 @@ impl BitcoinCoreRpc {
         method: &str,
         params_list: &[Vec<Value>],
     ) -> Result<Vec<JsonRpcBatchEnvelope<T>>, AnalysisError> {
-        let (user, password) = self.credentials()?;
         let batch: Vec<Value> = params_list
             .iter()
             .enumerate()
@@ -271,13 +387,7 @@ impl BitcoinCoreRpc {
                 json!({ "jsonrpc": "1.0", "id": id, "method": method, "params": params })
             })
             .collect();
-        let response = self
-            .client
-            .post(self.rpc_url(None))
-            .basic_auth(user, Some(password))
-            .json(&batch)
-            .send()
-            .map_err(|error| unreachable_node(method, error))?;
+        let response = self.post(&self.rpc_url(None), method, &Value::from(batch))?;
 
         if !response.status().is_success() {
             return Err(rpc_failure(response, method).into());
@@ -1203,11 +1313,13 @@ fn parse_txid(method: &str, s: &str) -> Result<Txid, AnalysisError> {
     })
 }
 
+// Accepts the same names as `network_datadir_subdir`, plus mainnet's.
 fn default_rpc_port(network: &str) -> u16 {
-    match network {
-        "mainnet" => 8332,
-        "testnet" => 18332,
-        "signet" => 38332,
+    match (network, network_datadir_subdir(network)) {
+        ("main" | "mainnet", _) => 8332,
+        (_, Some("testnet3")) => 18332,
+        (_, Some("testnet4")) => 48332,
+        (_, Some("signet")) => 38332,
         _ => 18443,
     }
 }
@@ -1238,14 +1350,7 @@ fn parse_host_port_from_url(url: &str) -> (String, u16) {
 }
 
 fn infer_network_from_port(port: u16) -> String {
-    match port {
-        8332 => "mainnet",
-        18332 => "testnet",
-        38332 => "signet",
-        18443 => "regtest",
-        _ => "regtest",
-    }
-    .to_owned()
+    network_for_rpc_port(port).unwrap_or("regtest").to_owned()
 }
 
 const RPC_BATCH_SIZE: usize = 100;
@@ -1580,13 +1685,406 @@ struct RawScriptPubKey {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_wallet_name, default_rpc_port, scan_wallet_name, BitcoinCoreRpc,
-        JsonRpcBatchEnvelope, ListTransactionEntry, ListUnspentEntry, RawTransaction,
+        cache_wallet_name, default_cookie_candidates, default_rpc_port, network_datadir_subdir,
+        network_for_rpc_port, scan_wallet_name, BitcoinCoreConfig, BitcoinCoreRpc,
+        JsonRpcBatchEnvelope, ListTransactionEntry, ListUnspentEntry, RawTransaction, RpcAuth,
     };
     use bitcoin::{Amount, Txid};
-    use serde_json::json;
+    use serde_json::{json, Value};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
     use stealth_model::error::AnalysisError;
     use stealth_model::gateway::{ResolvedDescriptor, WalletTxCategory};
+
+    const AUTH_A: &str = "Basic X19jb29raWVfXzph"; // __cookie__:a
+    const AUTH_B: &str = "Basic X19jb29raWVfXzpi"; // __cookie__:b
+    const AUTH_USERPASS: &str = "Basic dTpw"; // u:p
+
+    // Fake node: 401 unless the auth header matches `accepted` (None accepts all).
+    struct FakeNode {
+        port: u16,
+        accepted: Arc<Mutex<Option<String>>>,
+        seen: Arc<Mutex<Vec<String>>>,
+        rpc_error: Arc<AtomicBool>,
+    }
+
+    impl FakeNode {
+        fn start(accepted: Option<&str>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let accepted = Arc::new(Mutex::new(accepted.map(str::to_owned)));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let rpc_error = Arc::new(AtomicBool::new(false));
+            let (gate, log, fail) = (
+                Arc::clone(&accepted),
+                Arc::clone(&seen),
+                Arc::clone(&rpc_error),
+            );
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { return };
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let (mut auth, mut length) = (String::new(), 0usize);
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                        let (name, value) = line.split_once(':').unwrap_or((&line, ""));
+                        match name.to_ascii_lowercase().as_str() {
+                            "authorization" => auth = value.trim().to_owned(),
+                            "content-length" => length = value.trim().parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                    let mut body = vec![0u8; length];
+                    reader.read_exact(&mut body).unwrap();
+                    let request: Value = serde_json::from_slice(&body).unwrap();
+                    log.lock().unwrap().push(auth.clone());
+                    let ok = gate
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_none_or(|want| *want == auth);
+                    let (status, payload) = if !ok {
+                        ("401 Unauthorized", String::new())
+                    } else if fail.load(Ordering::Relaxed) {
+                        let error = json!({"code": -5, "message": "No such transaction"});
+                        let body = json!({"id": 1, "result": null, "error": error});
+                        ("500 Internal Server Error", body.to_string())
+                    } else if let Some(batch) = request.as_array() {
+                        let replies: Vec<Value> = batch
+                            .iter()
+                            .map(|r| json!({"id": r["id"], "result": 1, "error": null}))
+                            .collect();
+                        ("200 OK", Value::from(replies).to_string())
+                    } else {
+                        (
+                            "200 OK",
+                            json!({"id": 1, "result": 1, "error": null}).to_string(),
+                        )
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                }
+            });
+            Self {
+                port,
+                accepted,
+                seen,
+                rpc_error,
+            }
+        }
+
+        fn accept_only(&self, auth: &str) {
+            *self.accepted.lock().unwrap() = Some(auth.to_owned());
+        }
+
+        fn answer_rpc_errors(&self) {
+            self.rpc_error.store(true, Ordering::Relaxed);
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    // Gateway on cookie auth against a regtest datadir holding `__cookie__:a`.
+    fn cookie_gateway(node: &FakeNode) -> (BitcoinCoreRpc, PathBuf, PathBuf) {
+        let datadir = temp_dir("cookie-auth");
+        let cookie = datadir.join("regtest").join(".cookie");
+        std::fs::create_dir_all(cookie.parent().unwrap()).unwrap();
+        std::fs::write(&cookie, "__cookie__:a").unwrap();
+        let mut config = cookie_config(datadir.clone(), "regtest");
+        config.rpcport = node.port;
+        (BitcoinCoreRpc::new(config).unwrap(), cookie, datadir)
+    }
+
+    fn ping(rpc: &BitcoinCoreRpc) -> Result<Value, AnalysisError> {
+        rpc.call::<Value>(None, "getblockcount", Vec::new())
+    }
+
+    #[test]
+    fn cookie_is_read_once_not_per_call() {
+        let node = FakeNode::start(None);
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        ping(&rpc).unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        ping(&rpc).unwrap();
+        rpc.call_batch::<Value>("getblockcount", &[Vec::new()])
+            .unwrap();
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_A, AUTH_A]);
+    }
+
+    #[test]
+    fn unauthorized_rereads_cookie_and_retries_once() {
+        let node = FakeNode::start(Some(AUTH_A));
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        ping(&rpc).unwrap();
+        // Node restarted: new cookie on disk, old one rejected.
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        node.accept_only(AUTH_B);
+        let first = ping(&rpc);
+        let after = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(
+            first.is_ok(),
+            "retry with the new cookie must succeed: {first:?}"
+        );
+        assert!(after.is_ok());
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_A, AUTH_B, AUTH_B]);
+    }
+
+    #[test]
+    fn unauthorized_batch_rereads_cookie_and_retries_once() {
+        let node = FakeNode::start(Some(AUTH_B));
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        rpc.credentials().unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        let result = rpc.call_batch::<Value>("getblockcount", &[Vec::new()]);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(result.is_ok(), "batch retry must succeed: {result:?}");
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_B]);
+    }
+
+    #[test]
+    fn unauthorized_with_a_new_cookie_still_rejected_is_not_retried_again() {
+        let node = FakeNode::start(Some("nobody"));
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        rpc.credentials().unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        let result = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(
+            matches!(&result, Err(AnalysisError::EnvironmentUnavailable(m)) if m.starts_with("getblockcount: 401")),
+            "a 401 that persists must name the method: {result:?}"
+        );
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_B]);
+    }
+
+    #[test]
+    fn cookie_file_auth_is_cached_and_reread_on_401() {
+        let node = FakeNode::start(Some(AUTH_A));
+        let dir = temp_dir("cookie-file");
+        let cookie = dir.join("custom.cookie");
+        std::fs::write(&cookie, "__cookie__:a").unwrap();
+        let url = format!("http://127.0.0.1:{}", node.port);
+        let rpc = BitcoinCoreRpc::from_url_auth(&url, RpcAuth::CookieFile(cookie.clone())).unwrap();
+        ping(&rpc).unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        node.accept_only(AUTH_B);
+        let after = ping(&rpc);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            after.is_ok(),
+            "retry with the rewritten cookie file must succeed: {after:?}"
+        );
+        assert_eq!(node.seen(), vec![AUTH_A, AUTH_A, AUTH_B]);
+    }
+
+    #[test]
+    fn an_rpc_error_is_not_retried_even_with_a_new_cookie_on_disk() {
+        let node = FakeNode::start(None);
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        rpc.credentials().unwrap();
+        std::fs::write(&cookie, "__cookie__:b").unwrap();
+        node.answer_rpc_errors();
+        let result = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(
+            matches!(&result, Err(AnalysisError::EnvironmentUnavailable(m)) if m == "getblockcount: No such transaction"),
+            "the node's RPC error must surface: {result:?}"
+        );
+        assert_eq!(node.seen(), vec![AUTH_A]);
+    }
+
+    #[test]
+    fn unauthorized_with_the_cookie_gone_keeps_the_401() {
+        let node = FakeNode::start(Some("nobody"));
+        let (rpc, cookie, datadir) = cookie_gateway(&node);
+        rpc.credentials().unwrap();
+        std::fs::remove_file(&cookie).unwrap();
+        let result = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(
+            matches!(&result, Err(AnalysisError::EnvironmentUnavailable(m)) if m.starts_with("getblockcount: 401")),
+            "a failed re-read must not hide the node's 401: {result:?}"
+        );
+        assert_eq!(node.seen(), vec![AUTH_A]);
+    }
+
+    #[test]
+    fn unauthorized_with_an_unchanged_cookie_is_not_resent() {
+        let node = FakeNode::start(Some("nobody"));
+        let (rpc, _cookie, datadir) = cookie_gateway(&node);
+        let result = ping(&rpc);
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(result.is_err());
+        assert_eq!(node.seen(), vec![AUTH_A]);
+    }
+
+    #[test]
+    fn unauthorized_with_explicit_credentials_is_not_retried() {
+        // A readable cookie the node would accept must not rescue explicit credentials.
+        let node = FakeNode::start(Some(AUTH_A));
+        let datadir = temp_dir("explicit-auth");
+        std::fs::create_dir_all(datadir.join("regtest")).unwrap();
+        std::fs::write(datadir.join("regtest").join(".cookie"), "__cookie__:a").unwrap();
+        let mut config = cookie_config(datadir.clone(), "regtest");
+        config.rpcport = node.port;
+        config.rpcuser = Some("u".into());
+        config.rpcpassword = Some("p".into());
+        let result = ping(&BitcoinCoreRpc::new(config).unwrap());
+        std::fs::remove_dir_all(datadir).unwrap();
+        assert!(result.is_err());
+        assert_eq!(node.seen(), vec![AUTH_USERPASS]);
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "stealth-bitcoincore-{label}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn cookie_config(datadir: PathBuf, network: &str) -> BitcoinCoreConfig {
+        BitcoinCoreConfig {
+            network: network.into(),
+            datadir: Some(datadir),
+            rpchost: "127.0.0.1".into(),
+            rpcport: default_rpc_port(network),
+            rpcuser: None,
+            rpcpassword: None,
+            cookie_file: None,
+        }
+    }
+
+    #[test]
+    fn default_cookie_path_follows_core_datadir_layout() {
+        for (network, subdir) in [
+            ("testnet", "testnet3"),
+            ("testnet4", "testnet4"),
+            ("signet", "signet"),
+            ("regtest", "regtest"),
+            ("mainnet", ""),
+        ] {
+            let datadir = temp_dir(network);
+            let dir = datadir.join(subdir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(".cookie"), format!("__cookie__:{network}")).unwrap();
+            let creds = cookie_config(datadir.clone(), network).cookie_credentials();
+            std::fs::remove_dir_all(&datadir).unwrap();
+            assert_eq!(
+                creds.ok(),
+                Some(("__cookie__".to_string(), network.to_string())),
+                "{network} cookie must be read from <datadir>/{subdir}/.cookie"
+            );
+        }
+    }
+
+    #[test]
+    fn network_defaults_match_bitcoin_core_ports() {
+        assert_eq!(default_rpc_port("regtest"), 18443);
+        assert_eq!(default_rpc_port("testnet"), 18332);
+        assert_eq!(default_rpc_port("testnet4"), 48332);
+        assert_eq!(default_rpc_port("signet"), 38332);
+        assert_eq!(default_rpc_port("mainnet"), 8332);
+    }
+
+    #[test]
+    fn every_network_name_gets_its_core_port() {
+        for (network, port) in [
+            ("main", 8332),
+            ("mainnet", 8332),
+            ("test", 18332),
+            ("testnet", 18332),
+            ("testnet3", 18332),
+            ("testnet4", 48332),
+            ("signet", 38332),
+            ("regtest", 18443),
+        ] {
+            assert_eq!(default_rpc_port(network), port, "{network}");
+        }
+    }
+
+    #[test]
+    fn ini_network_or_chain_without_rpcport_gets_the_network_port() {
+        for (key, network, port) in [
+            ("network", "testnet3", 18332),
+            ("chain", "testnet3", 18332),
+            ("chain", "main", 8332),
+            ("chain", "testnet4", 48332),
+        ] {
+            let dir = temp_dir("ini");
+            let path = dir.join("stealth.ini");
+            std::fs::write(&path, format!("[bitcoin]\n{key}={network}\n")).unwrap();
+            let config = BitcoinCoreConfig::from_ini_file(&path).unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+            assert_eq!(config.rpcport, port, "{key}={network}");
+        }
+    }
+
+    #[test]
+    fn network_maps_to_core_datadir_subdir() {
+        assert_eq!(network_datadir_subdir("mainnet"), None);
+        assert_eq!(network_datadir_subdir("testnet"), Some("testnet3"));
+        assert_eq!(network_datadir_subdir("testnet3"), Some("testnet3"));
+        assert_eq!(network_datadir_subdir("test"), Some("testnet3"));
+        assert_eq!(network_datadir_subdir("testnet4"), Some("testnet4"));
+        assert_eq!(network_datadir_subdir("signet"), Some("signet"));
+        assert_eq!(network_datadir_subdir("regtest"), Some("regtest"));
+        assert_eq!(network_datadir_subdir("bogus"), None);
+    }
+
+    #[test]
+    fn rpc_ports_round_trip_through_network() {
+        for network in ["mainnet", "testnet", "testnet4", "signet", "regtest"] {
+            assert_eq!(
+                network_for_rpc_port(default_rpc_port(network)),
+                Some(network)
+            );
+        }
+        assert_eq!(network_for_rpc_port(1234), None);
+    }
+
+    #[test]
+    fn cookie_candidates_try_network_dir_then_root() {
+        let dir = Path::new("/data");
+        assert_eq!(
+            default_cookie_candidates(dir, "testnet"),
+            vec![dir.join("testnet3/.cookie"), dir.join(".cookie")]
+        );
+        assert_eq!(
+            default_cookie_candidates(dir, "mainnet"),
+            vec![dir.join(".cookie")]
+        );
+    }
+
+    #[test]
+    fn scan_wallet_names_differ_for_same_timestamp() {
+        let first = scan_wallet_name(1_700_000_000_000);
+        let second = scan_wallet_name(1_700_000_000_000);
+        let pid = std::process::id();
+        assert!(
+            first.starts_with(&format!("_stealth_scan_1700000000000_{pid}_")),
+            "name must embed the process id to avoid cross-process collisions, got: {first}"
+        );
+        assert_ne!(
+            first, second,
+            "concurrent scans in the same millisecond must not collide"
+        );
+    }
 
     const TXID: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
     const ADDR: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
@@ -1673,29 +2171,6 @@ mod tests {
     fn negative_output_value_is_an_error() {
         let result = BitcoinCoreRpc::convert_raw_transaction(raw_tx(ADDR, -1.0));
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn network_defaults_match_bitcoin_core_ports() {
-        assert_eq!(default_rpc_port("regtest"), 18443);
-        assert_eq!(default_rpc_port("testnet"), 18332);
-        assert_eq!(default_rpc_port("signet"), 38332);
-        assert_eq!(default_rpc_port("mainnet"), 8332);
-    }
-
-    #[test]
-    fn scan_wallet_names_differ_for_same_timestamp() {
-        let first = scan_wallet_name(1_700_000_000_000);
-        let second = scan_wallet_name(1_700_000_000_000);
-        let pid = std::process::id();
-        assert!(
-            first.starts_with(&format!("_stealth_scan_1700000000000_{pid}_")),
-            "name must embed the process id to avoid cross-process collisions, got: {first}"
-        );
-        assert_ne!(
-            first, second,
-            "concurrent scans in the same millisecond must not collide"
-        );
     }
 
     #[test]
