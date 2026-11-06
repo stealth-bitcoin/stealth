@@ -1,3 +1,4 @@
+mod cors;
 mod error;
 mod jobs;
 mod routes;
@@ -7,8 +8,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use stealth_engine::gateway::BlockchainGateway;
-use tower_http::cors::CorsLayer;
 
+pub use cors::{AllowedOrigins, InvalidOrigin};
 use jobs::JobStore;
 
 /// Shared application state: an optional blockchain gateway.
@@ -25,14 +26,20 @@ pub fn app() -> Router {
     app_with_gateway(None)
 }
 
-/// Build the router with a concrete [`BlockchainGateway`].
+/// Build the router with a concrete [`BlockchainGateway`], allowing only
+/// loopback web origins.
 pub fn app_with_gateway(gateway: GatewayState) -> Router {
+    app_with_cors(gateway, AllowedOrigins::localhost())
+}
+
+/// Build the router with a gateway and the web origins allowed by CORS.
+pub fn app_with_cors(gateway: GatewayState, origins: AllowedOrigins) -> Router {
     let state = AppState {
         gateway,
         jobs: Arc::new(JobStore::default()),
     };
     Router::new()
         .nest("/api/wallet", routes::wallet::router())
-        .layer(CorsLayer::permissive())
+        .layer(origins.layer())
         .with_state(state)
 }

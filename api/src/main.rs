@@ -1,27 +1,64 @@
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ini::Ini;
-use stealth_api::app_with_gateway;
 use stealth_api::rpc::{self, RpcSettings};
+use stealth_api::{app_with_cors, AllowedOrigins};
 use stealth_bitcoincore::BitcoinCoreRpc;
 use stealth_engine::gateway::BlockchainGateway;
 use tracing_subscriber::EnvFilter;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+const USAGE: &str = "\
+Usage: stealth-api [--allow-origin <origin>]...
+
+Options:
+  --allow-origin <origin>  Also allow this web origin (scheme://host[:port]); repeatable
+  -h, --help               Print this help
+
+Environment:
+  STEALTH_API_BIND           Listen address (default 127.0.0.1:20899)
+  STEALTH_API_ALLOW_ORIGINS  Extra web origins, comma-separated
+  STEALTH_RPC_URL            bitcoind RPC endpoint (default: auto-detected)
+  STEALTH_RPC_USER           RPC username (used only when both are set)
+  STEALTH_RPC_PASS           RPC password (used only when both are set)
+  STEALTH_RPC_COOKIE         Path to the RPC .cookie file
+  RUST_LOG                   Log filter (default info)
+  HOME                       Used to find the node's cookie under ~/.bitcoin
+
+Without RPC credentials in the environment, the API reads ./bitcoin.conf and
+then looks for a cookie file under ~/.bitcoin.
+
+Loopback origins (localhost, 127.0.0.1, [::1]) are always allowed.
+";
+
+fn main() -> ExitCode {
     init_tracing();
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(origins) = read_allowed_origins()? else {
+        print!("{USAGE}");
+        return Ok(());
+    };
 
     // `BitcoinCoreRpc` uses `reqwest::blocking::Client`, which must be
     // constructed outside a Tokio runtime.
     let gateway: Arc<dyn BlockchainGateway + Send + Sync> = Arc::new(build_gateway()?);
-    let bind_addr = read_bind_addr()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let bind_addr = read_bind_addr()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run_server(bind_addr, gateway.clone()))?;
+    runtime.block_on(run_server(bind_addr, gateway.clone(), origins))?;
     // Keep one strong reference until after async serving ends so the blocking
     // client drops outside async context.
     drop(gateway);
@@ -31,8 +68,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_server(
     bind_addr: SocketAddr,
     gateway: Arc<dyn BlockchainGateway + Send + Sync>,
+    origins: AllowedOrigins,
 ) -> std::io::Result<()> {
-    let app = app_with_gateway(Some(gateway));
+    if !origins.extra().is_empty() {
+        tracing::info!(extra = ?origins.extra(), "CORS allows loopback origins plus extra origins");
+    }
+    let app = app_with_cors(Some(gateway), origins);
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
 
     tracing::info!(%bind_addr, "stealth-api listening");
@@ -44,6 +85,79 @@ fn read_bind_addr() -> Result<SocketAddr, String> {
     let raw = std::env::var("STEALTH_API_BIND").unwrap_or_else(|_| "127.0.0.1:20899".to_owned());
     raw.parse::<SocketAddr>()
         .map_err(|_| format!("invalid STEALTH_API_BIND value: {raw}"))
+}
+
+/// `None` when the user asked for `--help`.
+fn read_allowed_origins() -> Result<Option<AllowedOrigins>, String> {
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|arg| format!("argument is not valid UTF-8: {}", arg.to_string_lossy()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if wants_help(&args) {
+        return Ok(None);
+    }
+    let env = std::env::var_os("STEALTH_API_ALLOW_ORIGINS")
+        .map(|raw| {
+            raw.into_string().map_err(|raw| {
+                format!(
+                    "STEALTH_API_ALLOW_ORIGINS is not valid UTF-8: {}",
+                    raw.to_string_lossy()
+                )
+            })
+        })
+        .transpose()?;
+    allowed_origins_from(args.into_iter(), env).map(Some)
+}
+
+// A flag in the value position of --allow-origin is a missing value, not a request for help.
+fn wants_help(args: &[String]) -> bool {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return true,
+            "--allow-origin" => {
+                args.next();
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn allowed_origins_from(
+    mut args: impl Iterator<Item = String>,
+    env: Option<String>,
+) -> Result<AllowedOrigins, String> {
+    let mut origins = AllowedOrigins::localhost();
+    if let Some(raw) = env {
+        let values = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        origins = origins
+            .with_extra(values)
+            .map_err(|error| format!("invalid STEALTH_API_ALLOW_ORIGINS value: {error}"))?;
+    }
+
+    let mut flagged = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "--allow-origin" {
+            let value = args.next().filter(|value| !value.starts_with('-')).ok_or(
+                "--allow-origin needs a value, e.g. --allow-origin https://wallet.example.org",
+            )?;
+            flagged.push(value);
+        } else if let Some(value) = arg.strip_prefix("--allow-origin=") {
+            flagged.push(value.to_owned());
+        } else {
+            return Err(format!("unknown argument: {arg} (see --help)"));
+        }
+    }
+    origins
+        .with_extra(flagged)
+        .map_err(|error| format!("invalid --allow-origin value: {error}"))
 }
 
 fn build_gateway() -> Result<BitcoinCoreRpc, Box<dyn std::error::Error>> {
