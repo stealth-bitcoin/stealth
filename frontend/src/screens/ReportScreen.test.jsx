@@ -212,6 +212,27 @@ describe('ReportScreen — group summaries describe what the findings are', () =
     expect(screen.queryByText(/dust UTXOs detected/i)).toBeNull()
   })
 
+  it('says CIOH merges coins from several of your addresses', () => {
+    render(
+      <ReportScreen
+        report={makeReport({
+          txs: 5,
+          findings: [
+            finding('CIOH', 'TX aaa merges 2 of your addresses: 2 of its 2 inputs are yours (100% ownership)'),
+            finding('CIOH', 'TX bbb merges 3 of your addresses: 3 of its 5 inputs are yours (60% ownership)'),
+          ],
+        })}
+        descriptor="wpkh(x/0/*)"
+        kind="xpub"
+        onReset={() => {}}
+      />,
+    )
+    expect(
+      screen.getByText('2 transactions merge coins from several of your addresses (common-input-ownership)'),
+    ).toBeTruthy()
+    expect(screen.queryByText(/merge your inputs/i)).toBeNull()
+  })
+
   it('counts peel-chain findings rather than claiming distinct chains', () => {
     render(
       <ReportScreen

@@ -17,7 +17,7 @@ const KIND_LABELS = {
 
 const GROUP_SUMMARIES = {
   ADDRESS_REUSE: (n) => `${n} addresses were reused across transactions`,
-  CIOH: (n) => `${n} transactions merge your inputs (common-input-ownership)`,
+  CIOH: (n) => `${n} transactions merge coins from several of your addresses (common-input-ownership)`,
   // Historical, already-spent dust is a DUST finding too.
   DUST: (n) => `${n} dust outputs detected`,
   DUST_SPENDING: (n) => `${n} transactions spend dust alongside normal inputs`,
