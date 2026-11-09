@@ -16,7 +16,7 @@ use stealth_engine::gateway::{
     DecodedTransaction, DescriptorType, TxInputRef, TxOutput, Utxo, WalletHistory,
     WalletTxCategory, WalletTxEntry,
 };
-use stealth_engine::{TxGraph, VulnerabilityType};
+use stealth_engine::{Finding, TxGraph, VulnerabilityType};
 
 // ─── builders ───────────────────────────────────────────────────────────────
 
@@ -444,4 +444,472 @@ fn cioh_and_consolidation_corrections_recommend_payjoin() {
             "{vtype} correction does not mention Payjoin: {correction}"
         );
     }
+}
+
+// ─── cluster merge: same chain vs distinct origins ──────────────────────────
+
+fn spend_history(
+    ours: &[Address<NetworkUnchecked>],
+    receipts: &[Txid],
+    spend: DecodedTransaction,
+    txs: Vec<DecodedTransaction>,
+) -> WalletHistory {
+    let mut wallet_txs: Vec<WalletTxEntry> =
+        receipts.iter().map(|r| recv(*r, &ours[0], 1, 5)).collect();
+    wallet_txs.push(sent(spend.txid));
+    let mut transactions: HashMap<Txid, DecodedTransaction> =
+        txs.into_iter().map(|t| (t.txid, t)).collect();
+    transactions.insert(spend.txid, spend);
+    WalletHistory {
+        wallet_txs,
+        utxos: vec![],
+        transactions,
+        internal_addresses: HashSet::new(),
+        derived_addresses: ours.iter().cloned().collect(),
+    }
+}
+
+fn cluster_merge_findings(history: &WalletHistory) -> Vec<Finding> {
+    TxGraph::from_wallet_history(history.clone())
+        .detect_all(&DetectorThresholds::default(), None, None)
+        .findings
+        .into_iter()
+        .filter(|f| f.vulnerability_type == VulnerabilityType::ClusterMerge)
+        .collect()
+}
+
+fn cluster_merges(history: &WalletHistory) -> Vec<String> {
+    cluster_merge_findings(history)
+        .into_iter()
+        .map(|f| f.description)
+        .collect()
+}
+
+/// A tx of ours: `id` spends a coin at our `from` (paid by `prev`) into `outs`.
+fn own_tx(
+    id: Txid,
+    prev: Txid,
+    from: &Address<NetworkUnchecked>,
+    outs: Vec<TxOutput>,
+) -> [DecodedTransaction; 2] {
+    let total = outs.iter().map(|o| o.value.to_sat()).sum::<u64>() + 10_000;
+    [
+        tx(prev, vec![vin(txid(0x5E0), 0)], vec![out(0, from, total)]),
+        tx(id, vec![vin(prev, 0)], outs),
+    ]
+}
+
+#[test]
+fn cluster_merge_ignores_the_mainnet_same_chain_spend() {
+    // Mainnet shape of dfa822be…: both coins at the scanned address, funded by `source` and by `child`.
+    let w = wpkh(201);
+    let payer = wpkh(202);
+    let source = txid(0x501);
+    let child = txid(0x502);
+    let spend = txid(0x503);
+    let txs = vec![
+        tx(
+            source,
+            vec![vin(txid(0x5F1), 0)],
+            vec![out(0, &w, 400_000), out(1, &payer, 600_000)],
+        ),
+        tx(
+            child,
+            vec![vin(txid(0x5F2), 0), vin(source, 1)],
+            vec![out(0, &w, 500_000)],
+        ),
+    ];
+    let history = spend_history(
+        std::slice::from_ref(&w),
+        &[source, child],
+        tx(
+            spend,
+            vec![vin(source, 0), vin(child, 0)],
+            vec![out(0, &wpkh(203), 890_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history), Vec::<String>::new());
+}
+
+fn two_receipts_paid_by(
+    payer_a: &Address<NetworkUnchecked>,
+    payer_b: &Address<NetworkUnchecked>,
+) -> WalletHistory {
+    let (w1, w2) = (wpkh(211), wpkh(212));
+    let (pa, pb) = (txid(0x511), txid(0x512));
+    let (fa, fb) = (txid(0x513), txid(0x514));
+    let spend = txid(0x515);
+    let txs = vec![
+        tx(
+            pa,
+            vec![vin(txid(0x5F3), 0)],
+            vec![out(0, payer_a, 900_000)],
+        ),
+        tx(
+            pb,
+            vec![vin(txid(0x5F4), 0)],
+            vec![out(0, payer_b, 900_000)],
+        ),
+        tx(fa, vec![vin(pa, 0)], vec![out(0, &w1, 400_000)]),
+        tx(fb, vec![vin(pb, 0)], vec![out(0, &w2, 400_000)]),
+    ];
+    spend_history(
+        &[w1, w2],
+        &[fa, fb],
+        tx(
+            spend,
+            vec![vin(fa, 0), vin(fb, 0)],
+            vec![out(0, &wpkh(213), 790_000)],
+        ),
+        txs,
+    )
+}
+
+#[test]
+fn cluster_merge_flags_coins_paid_by_the_same_address() {
+    // Two withdrawals from one exchange hot wallet to two fresh addresses: the spend is what links them.
+    let exchange = wpkh(214);
+    let history = two_receipts_paid_by(&exchange, &exchange);
+    assert_eq!(cluster_merges(&history).len(), 1);
+}
+
+#[test]
+fn cluster_merge_still_flags_coins_from_distinct_origins() {
+    let history = two_receipts_paid_by(&wpkh(214), &wpkh(215));
+    assert_eq!(cluster_merges(&history).len(), 1);
+}
+
+#[test]
+fn cluster_merge_counts_chains_not_inputs() {
+    // Two inputs come from one tx of ours, the third is a distinct origin.
+    let w: Vec<Address<NetworkUnchecked>> = (224u8..=227).map(wpkh).collect();
+    let source = txid(0x521);
+    let other = txid(0x523);
+    let spend = txid(0x524);
+    let mut txs = own_tx(
+        source,
+        txid(0x520),
+        &w[3],
+        vec![out(0, &w[0], 400_000), out(1, &w[1], 500_000)],
+    )
+    .to_vec();
+    txs.push(tx(
+        other,
+        vec![vin(txid(0x5F6), 0)],
+        vec![out(0, &w[2], 300_000)],
+    ));
+    let history = spend_history(
+        &w,
+        &[source, other],
+        tx(
+            spend,
+            vec![vin(source, 0), vin(source, 1), vin(other, 0)],
+            vec![out(0, &wpkh(223), 1_190_000)],
+        ),
+        txs,
+    );
+    let merges = cluster_merge_findings(&history);
+    assert_eq!(merges.len(), 1);
+    assert!(
+        merges[0]
+            .description
+            .ends_with("from 2 different funding chains"),
+        "{}",
+        merges[0].description
+    );
+    let details = merges[0].details.as_ref().expect("finding has details");
+    assert!(details.get("funding_sources").is_none(), "{details}");
+    let chain_inputs: Vec<Vec<String>> = details["chains"]
+        .as_array()
+        .expect("chains is an array")
+        .iter()
+        .map(|c| {
+            c.as_array()
+                .expect("a chain is an array of inputs")
+                .iter()
+                .map(|i| {
+                    format!(
+                        "{}:{}",
+                        i["funding_txid"].as_str().unwrap_or(""),
+                        i["funding_vout"]
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        chain_inputs,
+        vec![
+            vec![format!("{source}:0"), format!("{source}:1")],
+            vec![format!("{other}:0")],
+        ]
+    );
+    assert_eq!(
+        details["chains"][1][0]["address"],
+        w[2].assume_checked_ref().to_string()
+    );
+}
+
+fn two_coinbase_coins(
+    w1: &Address<NetworkUnchecked>,
+    w2: &Address<NetworkUnchecked>,
+) -> WalletHistory {
+    let (ca, cb) = (txid(0x531), txid(0x532));
+    let spend = txid(0x533);
+    let coinbase = TxInputRef {
+        previous_txid: Txid::all_zeros(),
+        previous_vout: u32::MAX,
+        sequence: 0xffff_ffff,
+        coinbase: true,
+    };
+    let txs = vec![
+        tx(ca, vec![coinbase.clone()], vec![out(0, w1, 400_000)]),
+        tx(cb, vec![coinbase], vec![out(0, w2, 400_000)]),
+    ];
+    spend_history(
+        &[w1.clone(), w2.clone()],
+        &[ca, cb],
+        tx(
+            spend,
+            vec![vin(ca, 0), vin(cb, 0)],
+            vec![out(0, &wpkh(233), 790_000)],
+        ),
+        txs,
+    )
+}
+
+#[test]
+fn cluster_merge_flags_two_coinbase_payouts_at_two_addresses() {
+    // Coinbase payouts from different blocks are unlinked until a spend joins them.
+    let history = two_coinbase_coins(&wpkh(231), &wpkh(232));
+    assert_eq!(cluster_merges(&history).len(), 1);
+}
+
+#[test]
+fn cluster_merge_ignores_two_coinbase_payouts_at_one_address() {
+    let w = wpkh(231);
+    let history = two_coinbase_coins(&w, &w);
+    assert_eq!(cluster_merges(&history), Vec::<String>::new());
+}
+
+#[test]
+fn cluster_merge_ignores_coins_at_one_own_address() {
+    // Coins at one address are already linked by it, whatever paid them.
+    let w = wpkh(241);
+    let funding: Vec<Txid> = (0x541..=0x543).map(txid).collect();
+    let spend = txid(0x544);
+    let txs = funding
+        .iter()
+        .zip(0x5F7u64..)
+        .zip(242u8..)
+        .flat_map(|((f, parent), payer)| {
+            let p = tx(
+                txid(parent),
+                vec![vin(txid(parent + 0x10), 0)],
+                vec![out(0, &wpkh(payer), 900_000)],
+            );
+            vec![
+                p,
+                tx(*f, vec![vin(txid(parent), 0)], vec![out(0, &w, 400_000)]),
+            ]
+        })
+        .collect();
+    let history = spend_history(
+        std::slice::from_ref(&w),
+        &funding,
+        tx(
+            spend,
+            funding.iter().map(|f| vin(*f, 0)).collect(),
+            vec![out(0, &wpkh(249), 1_190_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history), Vec::<String>::new());
+}
+
+#[test]
+fn cluster_merge_flags_two_outputs_of_a_foreign_batch() {
+    // An exchange batch pays two fresh addresses of ours; spending both joins them.
+    let (w1, w2) = (wpkh(101), wpkh(102));
+    let funding = txid(0x551);
+    let spend = txid(0x552);
+    let txs = vec![tx(
+        funding,
+        vec![vin(txid(0x5FA), 0)],
+        vec![out(0, &w1, 400_000), out(1, &w2, 400_000)],
+    )];
+    let history = spend_history(
+        &[w1, w2],
+        &[funding],
+        tx(
+            spend,
+            vec![vin(funding, 0), vin(funding, 1)],
+            vec![out(0, &wpkh(103), 790_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history).len(), 1);
+}
+
+#[test]
+fn cluster_merge_ignores_two_outputs_of_our_own_tx() {
+    let (w1, w2, z) = (wpkh(101), wpkh(102), wpkh(104));
+    let funding = txid(0x551);
+    let spend = txid(0x552);
+    let txs = own_tx(
+        funding,
+        txid(0x550),
+        &z,
+        vec![out(0, &w1, 400_000), out(1, &w2, 400_000)],
+    )
+    .to_vec();
+    let history = spend_history(
+        &[w1, w2, z],
+        &[funding],
+        tx(
+            spend,
+            vec![vin(funding, 0), vin(funding, 1)],
+            vec![out(0, &wpkh(103), 790_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history), Vec::<String>::new());
+}
+
+#[test]
+fn cluster_merge_flags_a_coinbase_coin_spent_with_an_ordinary_one() {
+    let (w1, w2) = (wpkh(105), wpkh(106));
+    let (cb, paid) = (txid(0x553), txid(0x554));
+    let spend = txid(0x555);
+    let coinbase = TxInputRef {
+        previous_txid: Txid::all_zeros(),
+        previous_vout: u32::MAX,
+        sequence: 0xffff_ffff,
+        coinbase: true,
+    };
+    let txs = vec![
+        tx(cb, vec![coinbase], vec![out(0, &w1, 400_000)]),
+        tx(paid, vec![vin(txid(0x5F9), 0)], vec![out(0, &w2, 400_000)]),
+    ];
+    let history = spend_history(
+        &[w1, w2],
+        &[cb, paid],
+        tx(
+            spend,
+            vec![vin(cb, 0), vin(paid, 0)],
+            vec![out(0, &wpkh(107), 790_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history).len(), 1);
+}
+
+#[test]
+fn cluster_merge_flags_a_counterparty_paid_from_the_same_batch() {
+    // An exchange batch pays us and Alice; Alice later pays us from her output of that batch.
+    let (x, y) = (wpkh(111), wpkh(112));
+    let (exchange, alice) = (wpkh(113), wpkh(114));
+    let (hot, batch, alice_pays) = (txid(0x561), txid(0x562), txid(0x563));
+    let spend = txid(0x564);
+    let txs = vec![
+        tx(
+            hot,
+            vec![vin(txid(0x5FB), 0)],
+            vec![out(0, &exchange, 2_000_000)],
+        ),
+        tx(
+            batch,
+            vec![vin(hot, 0)],
+            vec![out(0, &x, 400_000), out(1, &alice, 1_500_000)],
+        ),
+        tx(alice_pays, vec![vin(batch, 1)], vec![out(0, &y, 400_000)]),
+    ];
+    let history = spend_history(
+        &[x, y],
+        &[batch, alice_pays],
+        tx(
+            spend,
+            vec![vin(batch, 0), vin(alice_pays, 0)],
+            vec![out(0, &wpkh(115), 790_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history).len(), 1);
+}
+
+#[test]
+fn cluster_merge_groups_inputs_linked_only_through_a_third() {
+    // `a` and `c` share an own address, `c` and `b` share a funding tx; `a` and `b` share nothing.
+    let (x, y, z) = (wpkh(121), wpkh(122), wpkh(123));
+    let (fa, fbc) = (txid(0x574), txid(0x575));
+    let spend = txid(0x577);
+    let mut txs = own_tx(
+        fbc,
+        txid(0x576),
+        &z,
+        vec![out(0, &y, 400_000), out(1, &x, 400_000)],
+    )
+    .to_vec();
+    txs.push(tx(fa, vec![vin(txid(0x5FC), 0)], vec![out(0, &x, 400_000)]));
+    let history = spend_history(
+        &[x, y, z],
+        &[fa, fbc],
+        tx(
+            spend,
+            vec![vin(fa, 0), vin(fbc, 0), vin(fbc, 1)],
+            vec![out(0, &wpkh(125), 1_190_000)],
+        ),
+        txs,
+    );
+    assert_eq!(cluster_merges(&history), Vec::<String>::new());
+}
+
+/// Two of our addresses paid by one `funding` tx whose inputs are our coin at `z` plus `extra`.
+fn shared_funding_with(extra: Vec<DecodedTransaction>, extra_in: TxInputRef) -> WalletHistory {
+    let (w1, w2, z) = (wpkh(131), wpkh(132), wpkh(133));
+    let (prev, funding, spend) = (txid(0x581), txid(0x582), txid(0x583));
+    let mut txs = extra;
+    txs.push(tx(
+        prev,
+        vec![vin(txid(0x5E1), 0)],
+        vec![out(0, &z, 500_000)],
+    ));
+    txs.push(tx(
+        funding,
+        vec![vin(prev, 0), extra_in],
+        vec![out(0, &w1, 400_000), out(1, &w2, 400_000)],
+    ));
+    spend_history(
+        &[w1, w2, z],
+        &[funding],
+        tx(
+            spend,
+            vec![vin(funding, 0), vin(funding, 1)],
+            vec![out(0, &wpkh(134), 790_000)],
+        ),
+        txs,
+    )
+}
+
+#[test]
+fn cluster_merge_flags_two_outputs_of_a_coinjoin_we_joined() {
+    // The classic post-mix merge: our coin and a stranger's go in, two of our addresses come out.
+    let stranger = txid(0x584);
+    let history = shared_funding_with(
+        vec![tx(
+            stranger,
+            vec![vin(txid(0x5E2), 0)],
+            vec![out(0, &wpkh(135), 500_000)],
+        )],
+        vin(stranger, 0),
+    );
+    assert_eq!(cluster_merges(&history).len(), 1);
+}
+
+#[test]
+fn cluster_merge_flags_a_shared_funding_tx_with_an_unresolved_input() {
+    // An input whose owner we cannot see is not counted as ours.
+    let history = shared_funding_with(vec![], vin(txid(0x5E3), 0));
+    assert_eq!(cluster_merges(&history).len(), 1);
 }

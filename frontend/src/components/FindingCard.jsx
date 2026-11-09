@@ -93,13 +93,15 @@ function DetailsPanel({ details }) {
     }
   }
 
-  if (details.funding_sources && typeof details.funding_sources === 'object' && !Array.isArray(details.funding_sources)) {
-    const rows = Object.entries(details.funding_sources).map(([k, v]) => ({
-      address: k,
-      role: Array.isArray(v) ? v.join(', ') : String(v),
-    }))
-    parts.push(<AddrGroup key="funding_sources" label="funding sources" items={rows} />)
-    skip.add('funding_sources')
+  if (Array.isArray(details.chains)) {
+    details.chains.forEach((inputs, i) => {
+      const rows = (Array.isArray(inputs) ? inputs : []).map(({ address, funding_txid, funding_vout }) => ({
+        address,
+        role: `${String(funding_txid).slice(0, 10)}…:${funding_vout}`,
+      }))
+      parts.push(<AddrGroup key={`chain-${i}`} label={`chain ${i + 1}`} items={rows} />)
+    })
+    skip.add('chains')
   }
 
   for (const f of ['reasons', 'patterns', 'signals', 'script_types']) {

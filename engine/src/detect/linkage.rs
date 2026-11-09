@@ -1,7 +1,9 @@
 //! Input-ownership and input/output linkage detectors.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::{Address, Txid};
 use serde_json::json;
 
 use crate::config::DetectorThresholds;
@@ -92,66 +94,73 @@ impl TxGraph {
                 continue;
             }
 
-            // Trace each input one hop back to find funding sources.
-            let mut funding_sources: HashMap<String, HashSet<String>> = HashMap::new();
+            let mut origins: Vec<Origin> = Vec::new();
             for ia in &our_in {
                 let parent_tx = match self.fetch_tx(&ia.funding_txid) {
                     Some(t) => t,
                     None => continue,
                 };
-                let mut gp_sources = HashSet::new();
-                for p_vin in &parent_tx.vin {
-                    if p_vin.coinbase {
-                        gp_sources.insert("coinbase".into());
-                    } else {
-                        let ptxid = p_vin.previous_txid.to_string();
-                        gp_sources.insert(ptxid[..16].to_string());
-                    }
-                }
-                let ftxid = ia.funding_txid.to_string();
-                let key = format!("{}:{}", &ftxid[..16], ia.funding_vout);
-                funding_sources.insert(key, gp_sources);
+                // Coinbase and unresolved inputs are missing from the payers, so they fail the count.
+                let payers = self.get_input_addresses(&ia.funding_txid);
+                origins.push(Origin {
+                    funding_txid: ia.funding_txid,
+                    funding_vout: ia.funding_vout,
+                    address: ia.address.clone(),
+                    own_funding: payers.len() == parent_tx.vin.len()
+                        && payers.iter().all(|p| self.is_ours(&p.address)),
+                });
             }
 
-            let all_sources: Vec<&HashSet<String>> = funding_sources.values().collect();
-            if all_sources.len() >= 2 {
-                let mut merged = false;
-                'outer: for i in 0..all_sources.len() {
-                    for j in (i + 1)..all_sources.len() {
-                        if all_sources[i].is_disjoint(all_sources[j]) {
-                            merged = true;
-                            break 'outer;
+            let mut chain: Vec<usize> = (0..origins.len()).collect();
+            for i in 0..origins.len() {
+                for j in (i + 1)..origins.len() {
+                    let linked = origins[i].same_chain(&origins[j]);
+                    if linked && chain[i] != chain[j] {
+                        let (from, to) = (chain[j], chain[i]);
+                        for c in chain.iter_mut().filter(|c| **c == from) {
+                            *c = to;
                         }
                     }
                 }
-
-                if merged {
-                    findings.push(Finding {
-                        vulnerability_type: VulnerabilityType::ClusterMerge,
-                        severity: Severity::High,
-                        description: format!(
-                            "TX {} merges UTXOs from {} different funding chains",
-                            txid,
-                            funding_sources.len()
-                        ),
-                        details: Some(json!({
-                            "txid": txid,
-                            "funding_sources": funding_sources.iter()
-                                .map(|(k, v)| {
-                                    let mut sources: Vec<String> = v.iter().cloned().collect();
-                                    sources.sort_unstable();
-                                    (k.clone(), sources)
-                                })
-                                .collect::<BTreeMap<_, _>>(),
-                        })),
-                        correction: Some(
-                            "Use coin control to spend UTXOs from only one funding source \
-                             per transaction. Keep UTXOs received from different counterparties \
-                             in separate wallets."
-                                .into(),
-                        ),
-                    });
+            }
+            let mut labels: Vec<usize> = Vec::new();
+            for c in &chain {
+                if !labels.contains(c) {
+                    labels.push(*c);
                 }
+            }
+            let chains = labels.len();
+
+            if chains >= 2 {
+                findings.push(Finding {
+                    vulnerability_type: VulnerabilityType::ClusterMerge,
+                    severity: Severity::High,
+                    description: format!(
+                        "TX {} merges UTXOs from {} different funding chains",
+                        txid, chains
+                    ),
+                    details: Some(json!({
+                        "txid": txid,
+                        "chains": labels.iter()
+                            .map(|label| {
+                                origins.iter().zip(&chain)
+                                    .filter(|(_, c)| *c == label)
+                                    .map(|(o, _)| json!({
+                                        "funding_txid": o.funding_txid,
+                                        "funding_vout": o.funding_vout,
+                                        "address": o.address,
+                                    }))
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>(),
+                    })),
+                    correction: Some(
+                        "Use coin control to spend UTXOs from only one funding source \
+                         per transaction. Keep UTXOs received from different counterparties \
+                         in separate wallets."
+                            .into(),
+                    ),
+                });
             }
         }
     }
@@ -396,5 +405,22 @@ impl TxGraph {
                 });
             }
         }
+    }
+}
+
+/// Where one of our inputs came from, as far back as cluster merge looks.
+struct Origin {
+    funding_txid: Txid,
+    funding_vout: u32,
+    address: Address<NetworkUnchecked>,
+    /// Every input of the funding tx is a coin of ours, so we built it alone.
+    own_funding: bool,
+}
+
+impl Origin {
+    /// Same funding tx built only from our coins, or same own address.
+    fn same_chain(&self, other: &Origin) -> bool {
+        (self.funding_txid == other.funding_txid && self.own_funding)
+            || self.address == other.address
     }
 }
