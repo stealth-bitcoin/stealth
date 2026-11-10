@@ -250,3 +250,78 @@ fn detect_dust_attack() {
         dust_findings
     );
 }
+
+// A dust attack that also pays many outputs back to the sender's own input
+// address (the shape of mainnet tx 707545c7...): those outputs are the
+// sender's change, so they must not dilute the address-diversity ratio.
+
+fn dust_attack_with_self_outputs(node: &Node) -> stealth_engine::Report {
+    let da = node.client.new_address().unwrap();
+    mine(node, 110, &da);
+
+    let alice = node.create_wallet("alice").unwrap();
+    let (attacker, attacker_addr) = fund_sender(node, &da, "attacker", 1_000_000);
+
+    let mut outputs = vec![(alice.new_address().unwrap(), 330)];
+    for _ in 0..11 {
+        outputs.push((node.client.new_address().unwrap(), 330));
+    }
+    for _ in 0..12 {
+        outputs.push((attacker_addr.clone(), 900));
+    }
+    spend_to(&attacker, &outputs, &attacker_addr);
+    mine(node, 1, &da);
+
+    scan_wallet(&gateway_for(node), "alice")
+}
+
+#[test]
+fn dust_attack_ignores_sender_self_outputs() {
+    let node = node();
+    let report = dust_attack_with_self_outputs(&node);
+
+    let escalated = report.findings.iter().find(|f| {
+        f.vulnerability_type == VulnerabilityType::Dust
+            && f.severity == stealth_engine::Severity::Critical
+    });
+    let evidence = escalated
+        .and_then(|f| f.details.as_ref())
+        .and_then(|d| d.get("dust_attack"))
+        .unwrap_or_else(|| panic!("expected a dust-attack finding: {:?}", report.findings));
+    assert_eq!(evidence["total_outputs"], 12);
+    assert_eq!(evidence["unique_addresses"], 12);
+}
+
+#[test]
+fn dust_attack_with_self_outputs_is_not_exchange_origin() {
+    let node = node();
+    let report = dust_attack_with_self_outputs(&node);
+    assert!(
+        !has_finding(&report, VulnerabilityType::ExchangeOrigin),
+        "a dust attack is not an exchange withdrawal: {:?}",
+        report.findings
+    );
+}
+
+// The attack needs ten recipients; change back to the sender does not count.
+
+#[test]
+fn dust_attack_needs_ten_recipients_besides_change() {
+    let report = payout_report(&[330], &[330; 8], &[], false);
+    assert!(has_finding(&report, VulnerabilityType::Dust));
+    assert!(
+        !has_dust_attack(&report),
+        "nine recipients plus change is below the attack threshold: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn dust_attack_fires_at_ten_recipients_besides_change() {
+    let report = payout_report(&[330], &[330; 9], &[], false);
+    assert!(
+        has_dust_attack(&report),
+        "ten recipients plus change is a dust attack: {:?}",
+        report.findings
+    );
+}
