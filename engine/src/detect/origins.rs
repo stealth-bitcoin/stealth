@@ -15,6 +15,7 @@ impl TxGraph {
         &self,
         thresholds: &DetectorThresholds,
         findings: &mut Vec<Finding>,
+        warnings: &mut Vec<Finding>,
     ) {
         let min_inputs = thresholds.consolidation_min_inputs;
         let max_outputs = thresholds.consolidation_max_outputs;
@@ -29,14 +30,34 @@ impl TxGraph {
             };
             let n_in = parent.vin.len();
             let n_out = parent.vout.len();
+            if n_in < min_inputs || n_out > max_outputs {
+                continue;
+            }
 
-            if n_in >= min_inputs && n_out <= max_outputs {
-                let parent_inputs = self.get_input_addresses(&utxo.txid);
-                let our_parent_in = parent_inputs
-                    .iter()
-                    .filter(|ia| self.is_ours(&ia.address))
-                    .count();
+            let resolved = self.get_input_addresses(&utxo.txid);
+            let ours = resolved
+                .iter()
+                .filter(|ia| self.is_ours(&ia.address))
+                .count();
+            // Only a funding tx missing from the cache is unknown; an addressless prevout is not ours.
+            let spent: Vec<_> = parent.vin.iter().filter(|input| !input.coinbase).collect();
+            let unresolved = spent
+                .iter()
+                .filter(|input| self.fetch_tx(&input.previous_txid).is_none())
+                .count();
+            let unrecognised = spent.len().saturating_sub(unresolved + ours);
+            let details = json!({
+                "txid": utxo.txid,
+                "vout": utxo.vout,
+                "amount_sats": utxo.amount.to_sat(),
+                "consolidation_inputs": n_in,
+                "consolidation_outputs": n_out,
+                "our_inputs_in_consolidation": ours,
+                "unrecognised_inputs": unrecognised,
+                "unresolved_inputs": unresolved,
+            });
 
+            if ours >= 2 {
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::Consolidation,
                     severity: Severity::Medium,
@@ -47,14 +68,7 @@ impl TxGraph {
                         utxo.amount.to_btc(),
                         n_in
                     ),
-                    details: Some(json!({
-                        "txid": utxo.txid,
-                        "vout": utxo.vout,
-                        "amount_sats": utxo.amount.to_sat(),
-                        "consolidation_inputs": n_in,
-                        "consolidation_outputs": n_out,
-                        "our_inputs_in_consolidation": our_parent_in,
-                    })),
+                    details: Some(details),
                     correction: Some(
                         "Avoid consolidating many UTXOs into one in a single transaction. \
                          If fee savings require consolidation, do it through a CoinJoin, \
@@ -62,6 +76,54 @@ impl TxGraph {
                          so the merge looks like an ordinary spend."
                             .into(),
                     ),
+                });
+            } else {
+                // Only the user's wallet pays its change chain, alone or with others.
+                let on_change = self.addr_map.get(&utxo.address).is_some_and(|m| m.internal);
+                let vouched = self.ranged_addrs.contains(&utxo.address);
+                if vouched && unresolved == 0 && !on_change {
+                    continue;
+                }
+                let coin = format!(
+                    "UTXO {}:{} ({:.8} BTC)",
+                    utxo.txid,
+                    utxo.vout,
+                    utxo.amount.to_btc()
+                );
+                // Only a ranged change address with every input fetched points at our wallet.
+                let (description, correction) = if on_change && vouched && unresolved == 0 {
+                    (
+                        format!(
+                            "{coin} sits on your change address and came from a {n_in}-input \
+                             consolidation; this scan recognises {ours} of its inputs as yours \
+                             and cannot tell whose the others are. Either your wallet merged \
+                             coins from another account or script type, or coins of this wallet \
+                             beyond the scanned derivation range, or this was a collaborative \
+                             transaction (Payjoin, CoinJoin, dual-funded channel) whose other \
+                             inputs belong to others"
+                        ),
+                        "If these inputs were yours, from another account, script type or \
+                         beyond the scanned derivation range: avoid merging many coins in one transaction; consolidate through a \
+                         CoinJoin, or inside a Payjoin (BIP-78) payment so the merge looks like \
+                         an ordinary spend.",
+                    )
+                } else {
+                    (
+                        format!(
+                            "{coin} came from a {n_in}-input consolidation; this scan recognises \
+                             {ours} of its inputs as yours and cannot tell whose the others are"
+                        ),
+                        "If these inputs were yours: avoid merging many coins in one \
+                         transaction; consolidate through a CoinJoin, or inside a Payjoin \
+                         (BIP-78) payment so the merge looks like an ordinary spend.",
+                    )
+                };
+                warnings.push(Finding {
+                    vulnerability_type: VulnerabilityType::Consolidation,
+                    severity: Severity::Low,
+                    description,
+                    details: Some(details),
+                    correction: Some(correction.into()),
                 });
             }
         }

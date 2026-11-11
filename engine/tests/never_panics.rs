@@ -784,6 +784,7 @@ fn build(s: &Scenario) -> WalletHistory {
             transactions: HashMap::new(),
             internal_addresses: HashSet::new(),
             derived_addresses: HashSet::new(),
+            ranged_addresses: HashSet::new(),
         };
         add_fingerprint(
             f,
@@ -1032,6 +1033,7 @@ fn build(s: &Scenario) -> WalletHistory {
         utxos,
         transactions,
         internal_addresses: s.internal.iter().map(|&i| s.pool[i].clone()).collect(),
+        ranged_addresses: derived.clone(),
         derived_addresses: derived,
     }
 }
@@ -1150,6 +1152,7 @@ fn empty_history_yields_an_empty_report() {
         transactions: HashMap::new(),
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
+        ranged_addresses: HashSet::new(),
     };
     let report = TxGraph::from_wallet_history(history).detect_all(
         &DetectorThresholds::default(),

@@ -77,6 +77,7 @@ fn chain_history(payments: u32, still_unspent: u32) -> WalletHistory {
         transactions: (1..=payments).map(|n| (txid(n), payment(n))).collect(),
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([addr()]),
+        ranged_addresses: HashSet::new(),
     }
 }
 
@@ -377,4 +378,39 @@ fn a_failed_index_probe_fails_the_utxo_scan() {
     let result = AnalysisEngine::new(&gateway, EngineSettings::default())
         .analyze(ScanTarget::Utxos(vec![pasted()]));
     assert_eq!(result.err(), Some(busy));
+}
+
+const XPUB: &str = "tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7we1vwNCpn8tGbBcgfVYjXyhWo4E1xkh56hjod1RhGjxbaTLV3X4FyWuejifB9jusQ46QzG87VKp";
+const PUBKEY: &str = "03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd";
+const PUBKEY2: &str = "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+
+fn ranged(descriptor: &str) -> bool {
+    crate::descriptor::is_ranged(descriptor)
+}
+
+#[test]
+fn a_single_script_descriptor_is_not_ranged() {
+    for d in [
+        format!("addr({ADDR})"),
+        "raw(0014e0a63d7b9c3a6a5b2c1d0e9f8a7b6c5d4e3f2a1b)".to_owned(),
+        format!("wpkh({PUBKEY})"),
+        format!("pkh({PUBKEY})#8fhd9pwu"),
+        format!("tr({PUBKEY})"),
+        format!("combo({PUBKEY})"),
+        format!("wsh(multi(1,{PUBKEY},{PUBKEY2}))"),
+        format!("wpkh({XPUB}/0/5)"),
+    ] {
+        assert!(!ranged(&d), "{d}");
+    }
+}
+
+#[test]
+fn a_wildcard_descriptor_is_ranged() {
+    for d in [
+        format!("wpkh({XPUB}/0/*)"),
+        format!("wpkh({XPUB}/1/*')#qwer"),
+        format!("wsh(multi(1,{XPUB}/0/*,{PUBKEY}))"),
+    ] {
+        assert!(ranged(&d), "{d}");
+    }
 }

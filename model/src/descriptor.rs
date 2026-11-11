@@ -38,6 +38,14 @@ const MULTISIG_VERSIONS: [[u8; 4]; 4] = [
 // version(4) + depth(1) + fingerprint(4) + child(4) + chain code(32) + key(33)
 const EXTENDED_KEY_LEN: usize = 78;
 
+/// True when the descriptor is ranged, i.e. derives a chain of addresses
+/// rather than naming fixed scripts. In descriptor syntax (BIP 380) `*`
+/// occurs only as a derivation wildcard, never in keys, scripts or the
+/// checksum, so its presence is the ranged check.
+pub fn is_ranged(descriptor: &str) -> bool {
+    descriptor.contains('*')
+}
+
 /// Expand a raw scan input into descriptor candidates.
 ///
 /// Bare extended public keys become descriptor templates on the receive

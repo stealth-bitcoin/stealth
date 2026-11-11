@@ -319,6 +319,7 @@ fn build_history() -> WalletHistory {
         utxos,
         transactions,
         internal_addresses,
+        ranged_addresses: derived_addresses.clone(),
         derived_addresses,
     }
 }
@@ -466,6 +467,7 @@ fn spend_history(
         transactions,
         internal_addresses: HashSet::new(),
         derived_addresses: ours.iter().cloned().collect(),
+        ranged_addresses: ours.iter().cloned().collect(),
     }
 }
 

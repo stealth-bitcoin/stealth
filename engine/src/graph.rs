@@ -35,6 +35,10 @@ pub struct TxGraph {
     /// that spends that output. Built once from `input_cache` so child
     /// lookups during detection are O(1) instead of O(N·M).
     pub spending_index: HashMap<(Txid, u32), Txid>,
+    /// Addresses derived from ranged descriptors. A coin elsewhere sits where
+    /// the scan knows only fixed scripts, so it cannot vouch for whose the
+    /// coin's unrecognised inputs are.
+    pub ranged_addrs: HashSet<Address<NetworkUnchecked>>,
 }
 
 /// A UTXO entry from `listunspent`.
@@ -234,6 +238,7 @@ impl TxGraph {
             input_cache,
             output_cache,
             spending_index,
+            ranged_addrs: history.ranged_addresses,
         }
     }
 }

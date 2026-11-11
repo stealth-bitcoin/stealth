@@ -195,3 +195,176 @@ pub fn has_dust_attack(report: &stealth_engine::Report) -> bool {
                 .is_some()
     })
 }
+
+// Funds `n` fresh UTXOs of `sats` each in `wallet`, returning them as inputs.
+pub fn fund_coins(node: &Node, wallet: &corepc_node::Client, n: usize, sats: u64) -> Vec<Input> {
+    let addrs = (0..n).map(|_| wallet.new_address().unwrap()).collect();
+    fund_coins_at(node, wallet, addrs, sats)
+}
+
+// Funds one UTXO of `sats` at each of `addrs` (owned by `wallet`), returning them as inputs.
+pub fn fund_coins_at(
+    node: &Node,
+    wallet: &corepc_node::Client,
+    addrs: Vec<Address>,
+    sats: u64,
+) -> Vec<Input> {
+    let da = node.client.new_address().unwrap();
+    let mut txids = Vec::new();
+    for a in addrs {
+        let sent = node
+            .client
+            .send_to_address(&a, Amount::from_sat(sats))
+            .unwrap();
+        txids.push(sent.txid().unwrap());
+    }
+    mine(node, 1, &da);
+    wallet
+        .list_unspent()
+        .unwrap()
+        .0
+        .iter()
+        .filter(|u| txids.contains(&u.txid.parse().unwrap()))
+        .map(|u| Input {
+            txid: u.txid.parse().unwrap(),
+            vout: u.vout as u64,
+            sequence: None,
+        })
+        .collect()
+}
+
+// Spends `inputs` into one output at `dest`, each signer signing its own inputs.
+pub fn merge_into(
+    node: &Node,
+    signers: &[&corepc_node::Client],
+    inputs: &[Input],
+    dest: Address,
+    total_sats: u64,
+) {
+    let outputs = [Output::new(dest, Amount::from_sat(total_sats - 10_000))];
+    spend(node, signers, inputs, &outputs);
+}
+
+// Spends `inputs` into `outputs`, each signer signing its own inputs, and mines it.
+pub fn spend(node: &Node, signers: &[&corepc_node::Client], inputs: &[Input], outputs: &[Output]) {
+    let raw = signers[0].create_raw_transaction(inputs, outputs).unwrap();
+    let mut tx = raw.transaction().unwrap();
+    for signer in signers {
+        tx = signer
+            .sign_raw_transaction_with_wallet(&tx)
+            .unwrap()
+            .into_model()
+            .unwrap()
+            .tx;
+    }
+    node.client.send_raw_transaction(&tx).unwrap();
+    let da = node.client.new_address().unwrap();
+    mine(node, 1, &da);
+}
+
+pub fn consolidation_finding(report: &stealth_engine::Report) -> &stealth_engine::Finding {
+    report
+        .findings
+        .iter()
+        .find(|f| f.vulnerability_type == VulnerabilityType::Consolidation)
+        .expect("expected a consolidation finding")
+}
+
+// The neutral, low-severity warning, with its (ours, unrecognised, unresolved) input counts.
+pub fn assert_consolidation_warning(
+    report: &stealth_engine::Report,
+    ours: u64,
+    unrecognised: u64,
+    unresolved: u64,
+) {
+    assert!(!has_finding(report, VulnerabilityType::Consolidation));
+    let warning = report
+        .warnings
+        .iter()
+        .find(|w| w.vulnerability_type == VulnerabilityType::Consolidation)
+        .expect("expected a consolidation warning");
+    assert_eq!(warning.severity, stealth_engine::Severity::Low);
+    assert!(
+        warning.description.contains("cannot tell whose"),
+        "{}",
+        warning.description
+    );
+    let correction = warning.correction.as_deref().unwrap_or_default();
+    assert!(
+        correction.starts_with("If these inputs were yours")
+            && correction.contains("avoid merging"),
+        "{correction}"
+    );
+    assert!(!correction.contains("nothing to do"), "{correction}");
+    let details = warning.details.as_ref().expect("warning details");
+    assert_eq!(details["our_inputs_in_consolidation"], ours);
+    assert_eq!(details["unrecognised_inputs"], unrecognised);
+    assert_eq!(details["unresolved_inputs"], unresolved);
+}
+
+pub fn assert_no_consolidation(report: &stealth_engine::Report) {
+    assert!(!has_finding(report, VulnerabilityType::Consolidation));
+    assert!(!has_warning(report, VulnerabilityType::Consolidation));
+}
+
+pub fn has_warning(report: &stealth_engine::Report, vtype: VulnerabilityType) -> bool {
+    report
+        .warnings
+        .iter()
+        .any(|f| f.vulnerability_type == vtype)
+}
+
+pub fn change_address(wallet: &corepc_node::Client) -> Address {
+    let change: String = wallet
+        .call("getrawchangeaddress", &[serde_json::json!("bech32")])
+        .unwrap();
+    change.parse::<Address<_>>().unwrap().assume_checked()
+}
+
+// Alice merges one wpkh coin and three taproot coins into `dest`; returns her
+// wpkh descriptors, the view a zpub scan has.
+pub fn merge_across_script_types_into(
+    node: &Node,
+    dest: impl Fn(&corepc_node::Client) -> Address,
+) -> (corepc_node::Client, Vec<String>) {
+    let da = node.client.new_address().unwrap();
+    mine(node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let taproot = (0..3)
+        .map(|_| alice.new_address_with_type(AddressType::Bech32m).unwrap())
+        .collect();
+    let mut inputs = fund_coins_at(node, &alice, vec![alice.new_address().unwrap()], 300_000);
+    inputs.extend(fund_coins_at(node, &alice, taproot, 300_000));
+    merge_into(node, &[&alice], &inputs, dest(&alice), 1_200_000);
+
+    let wpkh: Vec<String> = wallet_descriptors(&alice)
+        .into_iter()
+        .filter(|d| d.starts_with("wpkh("))
+        .collect();
+    assert_eq!(wpkh.len(), 2, "receive and change wpkh descriptors");
+    (alice, wpkh)
+}
+
+// The change-address warning names both a cross-account merge and a collaborative tx.
+pub fn assert_change_address_wording(warning: &stealth_engine::Finding) {
+    for part in [
+        "your change address",
+        "another account or script type",
+        "beyond the scanned derivation range",
+        "collaborative transaction (Payjoin, CoinJoin, dual-funded channel)",
+    ] {
+        assert!(
+            warning.description.contains(part),
+            "{}",
+            warning.description
+        );
+    }
+    let correction = warning.correction.as_deref().unwrap_or_default();
+    assert!(
+        correction.starts_with(
+            "If these inputs were yours, from another account, script type or beyond the \
+             scanned derivation range:"
+        ),
+        "{correction}"
+    );
+}

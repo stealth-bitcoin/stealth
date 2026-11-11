@@ -14,6 +14,7 @@ fn empty_history() -> WalletHistory {
         transactions: HashMap::new(),
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
+        ranged_addresses: HashSet::new(),
     }
 }
 

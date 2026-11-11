@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bitcoin::{Amount, Txid};
 
-use crate::descriptor::{expand_input, normalize_descriptors};
+use crate::descriptor::{expand_input, is_ranged, normalize_descriptors};
 use crate::error::AnalysisError;
 use crate::gateway::{
     BlockchainGateway, DecodedTransaction, DescriptorType, Utxo, WalletHistory, WalletTxCategory,
@@ -247,7 +247,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             depth += 1;
         }
 
-        let (internal_addresses, derived_addresses) = self.derive_ownership_addresses()?;
+        let (internal_addresses, derived_addresses, ranged_addresses) =
+            self.derive_ownership_addresses()?;
 
         Ok(WalletHistory {
             wallet_txs,
@@ -255,16 +256,21 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             transactions,
             internal_addresses,
             derived_addresses,
+            ranged_addresses,
         })
     }
 
     /// Derive the addresses of `ownership_descriptors` so `is_ours()` can
     /// recognise the user's own inputs in UTXO scans.
-    fn derive_ownership_addresses(&self) -> Result<(AddressSet, AddressSet), AnalysisError> {
+    /// The third set holds the addresses derived from ranged descriptors.
+    fn derive_ownership_addresses(
+        &self,
+    ) -> Result<(AddressSet, AddressSet, AddressSet), AnalysisError> {
         let mut internal = HashSet::new();
         let mut derived = HashSet::new();
+        let mut ranged = HashSet::new();
         if self.settings.ownership_descriptors.is_empty() {
-            return Ok((internal, derived));
+            return Ok((internal, derived, ranged));
         }
 
         let mut expanded = Vec::new();
@@ -281,9 +287,12 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             if descriptor.internal {
                 internal.extend(addrs.iter().cloned());
             }
+            if is_ranged(&descriptor.desc) {
+                ranged.extend(addrs.iter().cloned());
+            }
             derived.extend(addrs);
         }
-        Ok((internal, derived))
+        Ok((internal, derived, ranged))
     }
 }
 
@@ -311,6 +320,7 @@ pub(crate) fn merge_chain_history(history: &mut WalletHistory, full: WalletHisto
     history.transactions.extend(full.transactions);
     history.internal_addresses.extend(full.internal_addresses);
     history.derived_addresses.extend(full.derived_addresses);
+    history.ranged_addresses.extend(full.ranged_addresses);
 }
 
 #[cfg(test)]

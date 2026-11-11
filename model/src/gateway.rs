@@ -245,6 +245,9 @@ pub struct WalletHistory {
     /// Used by `TxGraph` to seed `our_addrs`
     #[serde(default, with = "serde_addr_set")]
     pub derived_addresses: HashSet<Address<NetworkUnchecked>>,
+    /// The subset of `derived_addresses` that came from ranged descriptors.
+    #[serde(default, with = "serde_addr_set")]
+    pub ranged_addresses: HashSet<Address<NetworkUnchecked>>,
 }
 
 /// A participant (input or output) in a transaction, enriched with
