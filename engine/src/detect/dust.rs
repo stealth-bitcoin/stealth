@@ -2,7 +2,8 @@
 
 use std::collections::HashSet;
 
-use bitcoin::Txid;
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::{Address, Amount, OutPoint, Txid};
 use serde_json::json;
 
 use crate::config::DetectorThresholds;
@@ -20,134 +21,302 @@ impl TxGraph {
 
     pub(super) fn detect_dust(&self, thresholds: &DetectorThresholds, findings: &mut Vec<Finding>) {
         let dust = thresholds.dust;
-        let strict_dust = thresholds.strict_dust;
 
-        // Current UTXOs
+        // Current UTXOs; a pasted one is spent when a confirmed tx in the
+        // history spends it or the node says so, and otherwise stays as pasted.
         for utxo in &self.utxos {
-            if !self.is_ours(&utxo.address) {
+            if !self.is_ours(&utxo.address) || utxo.amount > dust {
                 continue;
             }
-            let amt = utxo.amount;
-            if amt <= dust {
-                let label = if amt <= strict_dust {
-                    "STRICT_DUST"
+            let key = (utxo.txid, utxo.vout);
+            let finding =
+                if self.confirmed_spend(&key) || self.chain_unspent.get(&key) == Some(&false) {
+                    let mut finding = self.spent_dust_finding(
+                        &utxo.txid,
+                        utxo.vout,
+                        &utxo.address,
+                        utxo.amount,
+                        thresholds,
+                    );
+                    finding.description = format!(
+                    "Dust output {}:{} at {} ({} sats) was pasted as unspent but is already spent",
+                    utxo.txid,
+                    utxo.vout,
+                    utxo.address.assume_checked_ref(),
+                    utxo.amount.to_sat(),
+                );
+                    finding
                 } else {
-                    "dust-class"
-                };
-                let base_severity = if amt <= strict_dust {
-                    Severity::High
-                } else {
-                    Severity::Medium
-                };
-                let attack = self.dust_attack_evidence(&utxo.txid, thresholds);
-                let severity = if attack.is_some() {
-                    Severity::Critical
-                } else {
-                    base_severity
-                };
-                let mut details = json!({
-                    "status": "unspent",
-                    "address": utxo.address.assume_checked_ref().to_string(),
-                    "sats": amt.to_sat(),
-                    "label": label,
-                    "txid": utxo.txid,
-                    "vout": utxo.vout,
-                });
-                if let Some(ev) = attack.as_ref() {
-                    details["dust_attack"] = ev.clone();
-                }
-                let description = if attack.is_some() {
-                    format!(
-                        "Dust UTXO at {} ({} sats, {}, unspent) — parent TX {} matches a dust-attack pattern",
-                        utxo.address.assume_checked_ref(),
-                        amt.to_sat(),
-                        label,
-                        utxo.txid,
-                    )
-                } else {
-                    format!(
-                        "Dust UTXO at {} ({} sats, {}, unspent)",
-                        utxo.address.assume_checked_ref(),
-                        amt.to_sat(),
-                        label,
+                    self.unspent_dust_finding(
+                        &utxo.txid,
+                        utxo.vout,
+                        &utxo.address,
+                        utxo.amount,
+                        thresholds,
                     )
                 };
-                let correction = if attack.is_some() {
-                    "Do NOT spend this dust UTXO — spending it links your other addresses \
-                     to this one via common-input-ownership. Freeze it in your wallet immediately."
-                } else {
-                    "Do not spend this dust output — doing so links your other addresses \
-                     to this one via CIOH. Use your wallet's coin freeze feature to \
-                     exclude it from future transactions."
-                };
-                findings.push(Finding {
-                    vulnerability_type: VulnerabilityType::Dust,
-                    severity,
-                    description,
-                    details: Some(details),
-                    correction: Some(correction.into()),
-                });
-            }
+            findings.push(finding);
         }
 
-        // Historical dust (already spent)
-        let txids = self.ordered_txids();
-        let current_keys: HashSet<(Txid, String)> = self
-            .utxos
+        // Own dust outside the UTXO list: spent when a confirmed tx in the
+        // history spends it, else the node's answer, else unknown.
+        for (txid, out) in self.dust_outside_utxos(dust) {
+            let key = (txid, out.index);
+            let unspent = if self.confirmed_spend(&key) {
+                Some(false)
+            } else {
+                self.chain_unspent.get(&key).copied()
+            };
+            let finding = match unspent {
+                Some(true) => Self::unspent_dust_finding,
+                Some(false) => Self::spent_dust_finding,
+                None => Self::unknown_dust_finding,
+            };
+            findings.push(finding(
+                self,
+                &txid,
+                out.index,
+                &out.address,
+                out.value,
+                thresholds,
+            ));
+        }
+    }
+
+    /// A confirmed tx in the history spends this output; an unconfirmed one
+    /// may still be replaced.
+    fn confirmed_spend(&self, key: &(Txid, u32)) -> bool {
+        self.spending_index
+            .get(key)
+            .and_then(|child| self.tx_cache.get(child))
+            .is_some_and(|child| child.confirmations > 0)
+    }
+
+    /// Outpoints of own dust in the UTXO list that no confirmed tx in the
+    /// history spends.
+    pub(crate) fn listed_dust(&self, thresholds: &DetectorThresholds) -> Vec<OutPoint> {
+        self.utxos
             .iter()
-            .map(|u| (u.txid, u.address.assume_checked_ref().to_string()))
-            .collect();
+            .filter(|u| self.is_ours(&u.address) && u.amount <= thresholds.dust)
+            .filter(|u| !self.confirmed_spend(&(u.txid, u.vout)))
+            .map(|u| OutPoint::new(u.txid, u.vout))
+            .collect()
+    }
+
+    /// Own outputs at or under `dust` that are not in the UTXO list, once each.
+    fn dust_outside_utxos(&self, dust: Amount) -> Vec<(Txid, OutputInfo)> {
+        let current_keys: HashSet<(Txid, u32)> =
+            self.utxos.iter().map(|u| (u.txid, u.vout)).collect();
         let mut seen = HashSet::new();
-        for txid in &txids {
-            let outputs = self.get_output_addresses(txid);
-            for out in &outputs {
-                let amt = out.value;
-                if amt <= dust && self.is_ours(&out.address) {
-                    let key = (*txid, out.address.assume_checked_ref().to_string());
-                    if !current_keys.contains(&key) && seen.insert(key) {
-                        let attack = self.dust_attack_evidence(txid, thresholds);
-                        let severity = if attack.is_some() {
-                            Severity::Critical
-                        } else {
-                            Severity::Low
-                        };
-                        let mut details = json!({
-                            "status": "spent",
-                            "address": out.address.assume_checked_ref().to_string(),
-                            "sats": amt.to_sat(),
-                            "txid": txid,
-                        });
-                        if let Some(ev) = attack.as_ref() {
-                            details["dust_attack"] = ev.clone();
-                        }
-                        let description = if attack.is_some() {
-                            format!(
-                                "Historical dust output at {} ({} sats, already spent) — parent TX {} matches a dust-attack pattern",
-                                out.address.assume_checked_ref(),
-                                amt.to_sat(),
-                                txid,
-                            )
-                        } else {
-                            format!(
-                                "Historical dust output at {} ({} sats, already spent)",
-                                out.address.assume_checked_ref(),
-                                amt.to_sat(),
-                            )
-                        };
-                        findings.push(Finding {
-                            vulnerability_type: VulnerabilityType::Dust,
-                            severity,
-                            description,
-                            details: Some(details),
-                            correction: Some(
-                                "This dust has already been spent. Going forward, reject \
-                                 unsolicited dust by enabling automatic dust rejection."
-                                    .into(),
-                            ),
-                        });
-                    }
+        let mut found = Vec::new();
+        for txid in self.ordered_txids() {
+            for out in self.get_output_addresses(&txid) {
+                let key = (txid, out.index);
+                if out.value <= dust
+                    && self.is_ours(&out.address)
+                    && !current_keys.contains(&key)
+                    && seen.insert(key)
+                {
+                    found.push((txid, out));
                 }
             }
+        }
+        found
+    }
+
+    /// Outpoints of own dust outside the UTXO list whose spend the history
+    /// does not show, or shows only in an unconfirmed (replaceable) tx.
+    pub(crate) fn dust_needing_chain_status(
+        &self,
+        thresholds: &DetectorThresholds,
+    ) -> Vec<OutPoint> {
+        self.dust_outside_utxos(thresholds.dust)
+            .into_iter()
+            .filter(|(txid, out)| !self.confirmed_spend(&(*txid, out.index)))
+            .map(|(txid, out)| OutPoint::new(txid, out.index))
+            .collect()
+    }
+
+    fn unspent_dust_finding(
+        &self,
+        txid: &Txid,
+        vout: u32,
+        address: &Address<NetworkUnchecked>,
+        amt: Amount,
+        thresholds: &DetectorThresholds,
+    ) -> Finding {
+        let strict_dust = thresholds.strict_dust;
+        let label = if amt <= strict_dust {
+            "STRICT_DUST"
+        } else {
+            "dust-class"
+        };
+        let base_severity = if amt <= strict_dust {
+            Severity::High
+        } else {
+            Severity::Medium
+        };
+        let attack = self.dust_attack_evidence(txid, thresholds);
+        let severity = if attack.is_some() {
+            Severity::Critical
+        } else {
+            base_severity
+        };
+        let mut details = json!({
+            "status": "unspent",
+            "address": address.assume_checked_ref().to_string(),
+            "sats": amt.to_sat(),
+            "label": label,
+            "txid": txid,
+            "vout": vout,
+        });
+        if let Some(ev) = attack.as_ref() {
+            details["dust_attack"] = ev.clone();
+        }
+        let description = if attack.is_some() {
+            format!(
+                "Dust UTXO {}:{} at {} ({} sats, {}, unspent) — parent TX {} matches a dust-attack pattern",
+                txid,
+                vout,
+                address.assume_checked_ref(),
+                amt.to_sat(),
+                label,
+                txid,
+            )
+        } else {
+            format!(
+                "Dust UTXO {}:{} at {} ({} sats, {}, unspent)",
+                txid,
+                vout,
+                address.assume_checked_ref(),
+                amt.to_sat(),
+                label,
+            )
+        };
+        let correction = if attack.is_some() {
+            "Do NOT spend this dust UTXO — spending it links your other addresses \
+             to this one via common-input-ownership. Freeze it in your wallet immediately."
+        } else {
+            "Do not spend this dust output — doing so links your other addresses \
+             to this one via CIOH. Use your wallet's coin freeze feature to \
+             exclude it from future transactions."
+        };
+        Finding {
+            vulnerability_type: VulnerabilityType::Dust,
+            severity,
+            description,
+            details: Some(details),
+            correction: Some(correction.into()),
+        }
+    }
+
+    fn spent_dust_finding(
+        &self,
+        txid: &Txid,
+        vout: u32,
+        address: &Address<NetworkUnchecked>,
+        amt: Amount,
+        thresholds: &DetectorThresholds,
+    ) -> Finding {
+        let attack = self.dust_attack_evidence(txid, thresholds);
+        let severity = if attack.is_some() {
+            Severity::Critical
+        } else {
+            Severity::Low
+        };
+        let mut details = json!({
+            "status": "spent",
+            "address": address.assume_checked_ref().to_string(),
+            "sats": amt.to_sat(),
+            "txid": txid,
+            "vout": vout,
+        });
+        if let Some(ev) = attack.as_ref() {
+            details["dust_attack"] = ev.clone();
+        }
+        let description = if attack.is_some() {
+            format!(
+                "Historical dust output {}:{} at {} ({} sats, already spent) — parent TX {} matches a dust-attack pattern",
+                txid,
+                vout,
+                address.assume_checked_ref(),
+                amt.to_sat(),
+                txid,
+            )
+        } else {
+            format!(
+                "Historical dust output {}:{} at {} ({} sats, already spent)",
+                txid,
+                vout,
+                address.assume_checked_ref(),
+                amt.to_sat(),
+            )
+        };
+        Finding {
+            vulnerability_type: VulnerabilityType::Dust,
+            severity,
+            description,
+            details: Some(details),
+            correction: Some(
+                "This dust has already been spent. Going forward, reject \
+                 unsolicited dust by enabling automatic dust rejection."
+                    .into(),
+            ),
+        }
+    }
+
+    fn unknown_dust_finding(
+        &self,
+        txid: &Txid,
+        vout: u32,
+        address: &Address<NetworkUnchecked>,
+        amt: Amount,
+        thresholds: &DetectorThresholds,
+    ) -> Finding {
+        let attack = self.dust_attack_evidence(txid, thresholds);
+        let severity = if attack.is_some() {
+            Severity::Critical
+        } else {
+            Severity::Low
+        };
+        let mut details = json!({
+            "status": "unknown",
+            "address": address.assume_checked_ref().to_string(),
+            "sats": amt.to_sat(),
+            "txid": txid,
+            "vout": vout,
+        });
+        if let Some(ev) = attack.as_ref() {
+            details["dust_attack"] = ev.clone();
+        }
+        let description = if attack.is_some() {
+            format!(
+                "Dust output {}:{} at {} ({} sats, spend status unknown) — parent TX {} matches a dust-attack pattern",
+                txid,
+                vout,
+                address.assume_checked_ref(),
+                amt.to_sat(),
+                txid,
+            )
+        } else {
+            format!(
+                "Dust output {}:{} at {} ({} sats, spend status unknown)",
+                txid,
+                vout,
+                address.assume_checked_ref(),
+                amt.to_sat(),
+            )
+        };
+        Finding {
+            vulnerability_type: VulnerabilityType::Dust,
+            severity,
+            description,
+            details: Some(details),
+            correction: Some(
+                "Stealth could not confirm whether this output was spent. \
+                 Check it in your wallet before relying on this entry."
+                    .into(),
+            ),
         }
     }
 

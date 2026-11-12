@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bitcoin::address::NetworkUnchecked;
-use bitcoin::{Address, Amount, Txid};
+use bitcoin::{Address, Amount, OutPoint, Txid};
 use serde::{Deserialize, Serialize};
 
 use crate::descriptor::DescriptorNormalizer;
@@ -60,6 +60,13 @@ pub trait BlockchainGateway {
         Ok(false)
     }
 
+    /// Whether each output is in the confirmed UTXO set: a spend only in the
+    /// mempool leaves it present. Absent covers spent in a block, created by
+    /// a tx not yet confirmed, and never created (an evicted or replaced
+    /// creating tx, or a vout it does not have). The outer `Result` is
+    /// transport-level; per-output failures come back in the inner `Result`s.
+    fn outputs_in_utxo_set(&self, outpoints: &[OutPoint]) -> Result<UtxoSetResults, AnalysisError>;
+
     /// Install a progress sink for scans started on the current thread.
     /// Default: no-op for gateways without progress reporting.
     fn set_progress_sink(&self, _sink: ScanProgress) {}
@@ -81,6 +88,9 @@ where
 }
 
 // ── Gateway model types ─────────────────────────────────────────────────────
+
+/// Per-output UTXO-set answers paired with their outpoints.
+pub type UtxoSetResults = Vec<(OutPoint, Result<bool, AnalysisError>)>;
 
 /// Per-transaction fetch results paired with their txids.
 pub type TxFetchResults = Vec<(Txid, Result<DecodedTransaction, AnalysisError>)>;

@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::{Address, Amount, Txid};
+use bitcoin::{Address, Amount, OutPoint, Txid};
 use ini::Ini;
 use reqwest::blocking::{Client, Response};
 use reqwest::StatusCode;
@@ -20,7 +20,7 @@ use stealth_model::descriptor::is_ranged;
 use stealth_model::error::AnalysisError;
 use stealth_model::gateway::{
     BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, TxFetchResults,
-    TxInputRef, TxOutput, Utxo, WalletHistory, WalletTxCategory, WalletTxEntry,
+    TxInputRef, TxOutput, Utxo, UtxoSetResults, WalletHistory, WalletTxCategory, WalletTxEntry,
 };
 use stealth_model::progress::{ScanPhase, ScanProgress};
 use stealth_model::types::btc_to_amount;
@@ -404,6 +404,21 @@ impl BitcoinCoreRpc {
         }
         envelopes.sort_by_key(|envelope| envelope.id);
         Ok(envelopes)
+    }
+
+    /// Like [`call_batch`](Self::call_batch), one answer per call, where a
+    /// null result is an answer (`None`), as `gettxout` gives for a spent
+    /// output.
+    fn call_batch_nullable<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params_list: &[Vec<Value>],
+    ) -> Result<Vec<Result<Option<T>, AnalysisError>>, AnalysisError> {
+        Ok(self
+            .call_batch(method, params_list)?
+            .into_iter()
+            .map(|envelope| batch_answer(method, envelope))
+            .collect())
     }
 
     fn decode_transactions(&self, txids: &[Txid]) -> Result<TxFetchResults, AnalysisError> {
@@ -1221,6 +1236,15 @@ impl BlockchainGateway for BitcoinCoreRpc {
         self.decode_transactions(txids)
     }
 
+    fn outputs_in_utxo_set(&self, outpoints: &[OutPoint]) -> Result<UtxoSetResults, AnalysisError> {
+        if outpoints.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(utxo_set_answers(outpoints, |params| {
+            self.call_batch_nullable::<Value>("gettxout", params)
+        }))
+    }
+
     fn set_progress_sink(&self, sink: ScanProgress) {
         self.progress_sinks
             .lock()
@@ -1366,6 +1390,53 @@ fn infer_network_from_port(port: u16) -> String {
 }
 
 const RPC_BATCH_SIZE: usize = 100;
+
+/// Runs `call` over `items` in chunks of `size`; a chunk whose call fails
+/// hands its error to each of its items and leaves the other chunks alone.
+fn per_chunk<I: Copy, A>(
+    items: &[I],
+    size: usize,
+    mut call: impl FnMut(&[I]) -> Result<Vec<Result<A, AnalysisError>>, AnalysisError>,
+) -> Vec<(I, Result<A, AnalysisError>)> {
+    let mut out = Vec::with_capacity(items.len());
+    for chunk in items.chunks(size) {
+        match call(chunk) {
+            Ok(answers) => out.extend(chunk.iter().copied().zip(answers)),
+            Err(error) => out.extend(chunk.iter().map(|&item| (item, Err(error.clone())))),
+        }
+    }
+    out
+}
+
+/// gettxout over `outpoints` in chunks, against the confirmed UTXO set so a
+/// spend only in the mempool leaves the output present.
+fn utxo_set_answers(
+    outpoints: &[OutPoint],
+    mut call: impl FnMut(
+        &[Vec<Value>],
+    ) -> Result<Vec<Result<Option<Value>, AnalysisError>>, AnalysisError>,
+) -> UtxoSetResults {
+    per_chunk(outpoints, RPC_BATCH_SIZE, |chunk| {
+        let params: Vec<Vec<Value>> = chunk
+            .iter()
+            .map(|op| vec![json!(op.txid.to_string()), json!(op.vout), json!(false)])
+            .collect();
+        Ok(call(&params)?
+            .into_iter()
+            .map(|answer| answer.map(|txout| txout.is_some()))
+            .collect())
+    })
+}
+
+fn batch_answer<T>(
+    method: &str,
+    envelope: JsonRpcBatchEnvelope<T>,
+) -> Result<Option<T>, AnalysisError> {
+    match envelope.error {
+        Some(error) => Err(RpcError::Node(method.to_string(), error).into()),
+        None => Ok(envelope.result),
+    }
+}
 const DEFAULT_TX_PAGE_SIZE: usize = 1000;
 // What getrawtransaction returns for a tx the node cannot look up.
 const RPC_INVALID_ADDRESS_OR_KEY: i64 = -5;
@@ -1697,11 +1768,13 @@ struct RawScriptPubKey {
 #[cfg(test)]
 mod tests {
     use super::{
-        cache_wallet_name, default_cookie_candidates, default_rpc_port, network_datadir_subdir,
-        network_for_rpc_port, scan_wallet_name, BitcoinCoreConfig, BitcoinCoreRpc,
-        JsonRpcBatchEnvelope, ListTransactionEntry, ListUnspentEntry, RawTransaction, RpcAuth,
+        batch_answer, cache_wallet_name, default_cookie_candidates, default_rpc_port,
+        network_datadir_subdir, network_for_rpc_port, per_chunk, scan_wallet_name,
+        utxo_set_answers, BitcoinCoreConfig, BitcoinCoreRpc, JsonRpcBatchEnvelope, JsonRpcError,
+        ListTransactionEntry, ListUnspentEntry, RawTransaction, RpcAuth, RPC_BATCH_SIZE,
     };
-    use bitcoin::{Amount, Txid};
+    use bitcoin::hashes::Hash;
+    use bitcoin::{Amount, OutPoint, Txid};
     use serde_json::{json, Value};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
@@ -2003,6 +2076,79 @@ mod tests {
                 "{network} cookie must be read from <datadir>/{subdir}/.cookie"
             );
         }
+    }
+
+    #[test]
+    fn gettxout_is_chunked_and_a_failed_chunk_only_fails_its_outputs() {
+        let txid = Txid::all_zeros();
+        let outpoints: Vec<OutPoint> = (0..250).map(|vout| OutPoint::new(txid, vout)).collect();
+        let mut chunks = Vec::new();
+        let answers = utxo_set_answers(&outpoints, |params: &[Vec<Value>]| {
+            chunks.push(params.len());
+            assert!(
+                params.iter().all(|p| p[2] == json!(false)),
+                "mempool spends must not count: {params:?}"
+            );
+            if params[0][1] == json!(RPC_BATCH_SIZE) {
+                return Err(AnalysisError::EnvironmentUnavailable("timeout".into()));
+            }
+            Ok(params
+                .iter()
+                .map(|p| Ok((p[1].as_u64() != Some(0)).then(|| json!({}))))
+                .collect())
+        });
+        assert_eq!(chunks, [100, 100, 50]);
+        assert_eq!(answers.len(), 250);
+        for (op, answer) in answers {
+            match op.vout {
+                100..=199 => assert!(answer.is_err(), "{op}"),
+                0 => assert_eq!(answer, Ok(false), "{op}"),
+                _ => assert_eq!(answer, Ok(true), "{op}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_chunk_only_fails_its_own_items() {
+        let items: Vec<u32> = (0..5).collect();
+        let answers = per_chunk(&items, 2, |chunk| {
+            if chunk.contains(&2) {
+                Err(AnalysisError::EnvironmentUnavailable("timeout".into()))
+            } else {
+                Ok(chunk.iter().map(|&i| Ok(i * 10)).collect())
+            }
+        });
+        let shape: Vec<(u32, Option<u32>)> = answers
+            .into_iter()
+            .map(|(item, answer)| (item, answer.ok()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (0, Some(0)),
+                (1, Some(10)),
+                (2, None),
+                (3, None),
+                (4, Some(40))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_per_call_error_names_its_method() {
+        let envelope = JsonRpcBatchEnvelope::<u32> {
+            id: 0,
+            result: None,
+            error: Some(JsonRpcError {
+                code: None,
+                message: "Work queue depth exceeded".into(),
+            }),
+        };
+        let error = batch_answer("gettxout", envelope).expect_err("error answer");
+        assert_eq!(
+            error,
+            AnalysisError::EnvironmentUnavailable("gettxout: Work queue depth exceeded".into())
+        );
     }
 
     #[test]

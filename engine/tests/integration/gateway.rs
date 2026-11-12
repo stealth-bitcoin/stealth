@@ -229,3 +229,49 @@ fn cookie_gateway_survives_node_restart() {
     assert_ne!(old_cookie, new_cookie, "restart must regenerate the cookie");
     after.expect("gateway must re-read the regenerated cookie");
 }
+
+// ─── Output spend status ───────────────────────────────────────────────────
+
+#[test]
+fn outputs_in_utxo_set_follows_the_chain_and_the_mempool() {
+    let node = node();
+    let da = node.client.new_address().expect("default address");
+    mine(&node, 110, &da);
+
+    let alice = node.create_wallet("alice").expect("create alice");
+    let aa = alice.new_address().expect("alice address");
+    node.client
+        .send_to_address(&aa, Amount::ONE_BTC)
+        .expect("fund alice");
+    mine(&node, 1, &da);
+    let coin = alice.list_unspent().expect("list_unspent").0;
+    let coin = coin.first().expect("alice coin");
+    let funded = bitcoin::OutPoint::new(coin.txid.parse().expect("txid"), coin.vout as u32);
+    let missing = bitcoin::OutPoint::new(funded.txid, 99);
+
+    let gateway = gateway_for(&node);
+    let status = |op| {
+        let answers = gateway.outputs_in_utxo_set(&[op]).expect("gettxout");
+        answers
+            .into_iter()
+            .next()
+            .and_then(|(_, unspent)| unspent.ok())
+    };
+    assert_eq!(status(funded), Some(true));
+    assert_eq!(
+        status(missing),
+        Some(false),
+        "an output that never existed is absent too; the engine decides what absence means"
+    );
+
+    alice
+        .send_to_address(&da, Amount::from_sat(50_000_000))
+        .expect("spend alice coin");
+    assert_eq!(
+        status(funded),
+        Some(true),
+        "a spend only in the mempool is not final"
+    );
+    mine(&node, 1, &da);
+    assert_eq!(status(funded), Some(false), "a confirmed spend removes it");
+}

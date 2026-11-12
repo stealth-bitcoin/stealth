@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bitcoin::{Amount, Txid};
+use bitcoin::{Amount, OutPoint, Txid};
 
 use crate::descriptor::{expand_input, is_ranged, normalize_descriptors};
 use crate::error::AnalysisError;
@@ -81,7 +81,8 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .gateway
             .scan_descriptors(&resolved, self.settings.persist_scan_wallet)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let graph = TxGraph::from_wallet_history(history);
+        let mut graph = TxGraph::from_wallet_history(history);
+        self.ask_dust_status(&mut graph, false);
         Ok(graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -94,9 +95,13 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
     fn analyze_utxos(&self, utxos: Vec<UtxoInput>) -> Result<Report, AnalysisError> {
         self.mark_phase(ScanPhase::LoadingHistory);
         let mut history = self.resolve_utxo_history(&utxos)?;
-        let addresses_without_history = self.merge_address_history(&mut history)?;
+        let (addresses_without_history, listed) = self.merge_address_history(&mut history)?;
         self.mark_phase(ScanPhase::Analyzing);
-        let graph = TxGraph::from_wallet_history(history);
+        let mut graph = TxGraph::from_wallet_history(history);
+        graph
+            .chain_unspent
+            .extend(listed.into_iter().map(|op| ((op.txid, op.vout), true)));
+        self.ask_dust_status(&mut graph, true);
         let mut report = graph.detect_all(
             &self.settings.config.thresholds,
             self.settings.known_risky_txids.as_ref(),
@@ -106,13 +111,66 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         Ok(report)
     }
 
+    /// Own dust whose spend the history does not settle (and, for a UTXO
+    /// scan, the pasted dust) is looked up on the node, unless an answer is
+    /// already in. Absent from the confirmed UTXO set means spent only when
+    /// the node has the creating tx confirmed; otherwise there is no entry.
+    fn ask_dust_status(&self, graph: &mut TxGraph, include_listed: bool) {
+        let thresholds = &self.settings.config.thresholds;
+        let mut outpoints = graph.dust_needing_chain_status(thresholds);
+        if include_listed {
+            outpoints.extend(graph.listed_dust(thresholds));
+        }
+        outpoints.retain(|op| !graph.chain_unspent.contains_key(&(op.txid, op.vout)));
+        if outpoints.is_empty() {
+            return;
+        }
+        // The creating txs are checked first, so a block arriving before
+        // gettxout cannot make "absent while unconfirmed" read as spent.
+        let creating: Vec<Txid> = outpoints
+            .iter()
+            .map(|op| op.txid)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let confirmed: HashSet<Txid> = self
+            .gateway
+            .get_transactions(&creating)
+            .map(|fetched| {
+                fetched
+                    .into_iter()
+                    .filter(|(_, tx)| tx.as_ref().is_ok_and(|tx| tx.confirmations > 0))
+                    .map(|(txid, _)| txid)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Ok(answers) = self.gateway.outputs_in_utxo_set(&outpoints) else {
+            return;
+        };
+        for (op, answer) in answers {
+            match answer {
+                Ok(true) => {
+                    graph.chain_unspent.insert((op.txid, op.vout), true);
+                }
+                Ok(false) if confirmed.contains(&op.txid) => {
+                    graph.chain_unspent.insert((op.txid, op.vout), false);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// A pasted output names its address; the chain knows the rest of that
     /// address's history, fetched the way a single-address scan fetches it.
     /// One scan covers every address, so the node serves all of them or
     /// none; the return value is how many it could not serve, in which case
-    /// the pasted outputs stay as their only history. Any other error, such
-    /// as invalid data in the history it did serve, fails the scan.
-    fn merge_address_history(&self, history: &mut WalletHistory) -> Result<usize, AnalysisError> {
+    /// the pasted outputs stay as their only history, and the outputs the
+    /// node listed as unspent at those addresses. Any other error, such as
+    /// invalid data in the history it did serve, fails the scan.
+    fn merge_address_history(
+        &self,
+        history: &mut WalletHistory,
+    ) -> Result<(usize, HashSet<OutPoint>), AnalysisError> {
         let addresses: BTreeSet<String> = history
             .utxos
             .iter()
@@ -120,7 +178,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             .map(|a| a.assume_checked_ref().to_string())
             .collect();
         if addresses.is_empty() {
-            return Ok(0);
+            return Ok((0, HashSet::new()));
         }
         let raw: Vec<String> = addresses.iter().map(|a| format!("addr({a})")).collect();
         let fetched = normalize_descriptors(
@@ -130,14 +188,11 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
         )
         .and_then(|resolved| self.gateway.scan_descriptors(&resolved, false));
         match fetched {
-            Ok(full) => {
-                merge_chain_history(history, full);
-                Ok(0)
-            }
+            Ok(full) => Ok((0, merge_chain_history(history, full))),
             // A user whose rpcwhitelist leaves out a call this load needs
             // cannot have the history served either.
             Err(AnalysisError::HistoryUnavailable(_) | AnalysisError::RpcForbidden { .. }) => {
-                Ok(addresses.len())
+                Ok((addresses.len(), HashSet::new()))
             }
             // Without a synced txindex the node cannot look up the address's
             // older txs; with one, a missing wallet tx is a real failure.
@@ -145,7 +200,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
                 if self.gateway.txindex_synced()? {
                     Err(AnalysisError::TransactionNotFound(message))
                 } else {
-                    Ok(addresses.len())
+                    Ok((addresses.len(), HashSet::new()))
                 }
             }
             Err(error) => Err(error),
@@ -313,7 +368,16 @@ fn name_pasted_output(error: AnalysisError, utxo: &UtxoInput) -> AnalysisError {
 
 /// The node's entries replace the ones built from the pasted outputs for the
 /// transactions it returned; an output the node did not return keeps its entry.
-pub(crate) fn merge_chain_history(history: &mut WalletHistory, full: WalletHistory) {
+/// Returns the outputs the node listed as unspent.
+pub(crate) fn merge_chain_history(
+    history: &mut WalletHistory,
+    full: WalletHistory,
+) -> HashSet<OutPoint> {
+    let listed = full
+        .utxos
+        .iter()
+        .map(|u| OutPoint::new(u.txid, u.vout))
+        .collect();
     let fetched: HashSet<Txid> = full.wallet_txs.iter().map(|e| e.txid).collect();
     history.wallet_txs.retain(|e| !fetched.contains(&e.txid));
     history.wallet_txs.extend(full.wallet_txs);
@@ -321,6 +385,7 @@ pub(crate) fn merge_chain_history(history: &mut WalletHistory, full: WalletHisto
     history.internal_addresses.extend(full.internal_addresses);
     history.derived_addresses.extend(full.derived_addresses);
     history.ranged_addresses.extend(full.ranged_addresses);
+    listed
 }
 
 #[cfg(test)]
