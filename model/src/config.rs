@@ -46,7 +46,9 @@ pub struct DetectorThresholds {
     /// Lower bound (inclusive) on values considered "toxic change".
     pub toxic_change_lower: Amount,
     pub toxic_change_upper: Amount,
-    /// Maximum hops to trace forward when looking for a peel chain.
+    /// Most hops a peel-chain finding counts, and most txids it lists. A
+    /// longer chain is reported as "at least" this many hops; a finding that
+    /// does not list every tx of its chains is marked truncated.
     pub peel_chain_max_hops: u32,
     /// Minimum hop count required to emit a peel-chain finding.
     pub peel_chain_min_hops: u32,
@@ -76,7 +78,7 @@ impl Default for DetectorThresholds {
             dust_attack_diversity: 0.8,
             toxic_change_lower: Amount::from_sat(546),
             toxic_change_upper: Amount::from_sat(10_000),
-            peel_chain_max_hops: 6,
+            peel_chain_max_hops: 1_000,
             peel_chain_min_hops: 2,
             peel_chain_critical_hops: 4,
             peel_chain_ratio: 0.3,

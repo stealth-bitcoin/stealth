@@ -1,6 +1,6 @@
 //! Wallet behaviour detectors: script mixing, UTXO age, fingerprint, peel chain.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bitcoin::{Amount, Txid};
 use serde_json::json;
@@ -331,79 +331,196 @@ impl TxGraph {
         findings: &mut Vec<Finding>,
     ) {
         let ratio_cutoff = thresholds.peel_chain_ratio;
-        let max_hops = thresholds.peel_chain_max_hops;
-        let min_hops = thresholds.peel_chain_min_hops;
+        let max_hops = thresholds.peel_chain_max_hops as usize;
+        let min_hops = thresholds.peel_chain_min_hops as usize;
         let critical_hops = thresholds.peel_chain_critical_hops;
 
+        // One pass: each peel-shaped tx's next hop (the peel spending its large
+        // output), and whether a chain can start there.
         let txids = self.ordered_txids();
-        for txid in txids {
-            let input_addrs = self.get_input_addresses(&txid);
-            let our_in: Vec<_> = input_addrs
-                .iter()
-                .filter(|ia| self.is_ours(&ia.address))
-                .collect();
-            if our_in.is_empty() {
-                continue;
-            }
-            if input_addrs.len() > 2 {
-                continue; // Peel chains have 1-2 inputs
-            }
-
+        let mut next: HashMap<Txid, Option<Txid>> = HashMap::new();
+        let mut starts: Vec<(Txid, f64)> = Vec::new();
+        for &txid in &txids {
             let outputs = self.get_output_addresses(&txid);
             if outputs.len() != 2 {
                 continue;
             }
-
-            let mut values: Vec<u64> = outputs.iter().map(|o| o.value.to_sat()).collect();
-            values.sort_unstable();
-            let small = values[0];
-            let large = values[1];
-            if large == 0 {
+            let (small, large) = if outputs[0].value >= outputs[1].value {
+                (&outputs[1], &outputs[0])
+            } else {
+                (&outputs[0], &outputs[1])
+            };
+            if large.value.to_sat() == 0 {
                 continue;
             }
-            let ratio = small as f64 / large as f64;
+            let ratio = small.value.to_sat() as f64 / large.value.to_sat() as f64;
             if ratio >= ratio_cutoff {
                 continue; // Outputs are too similar for a peel
             }
+            next.insert(txid, self.spending_index.get(&(txid, large.index)).copied());
 
-            // Trace forward: does the "large" output feed into another
-            // 2-output transaction? If so, count the chain length.
-            let mut hops = 1u32;
-            let large_idx = if outputs[0].value.to_sat() >= outputs[1].value.to_sat() {
-                0
-            } else {
-                1
-            };
-            let mut trace_txid = txid;
-            let mut trace_vout = outputs[large_idx].index;
-
-            while hops < max_hops {
-                // Find the child transaction that spends trace_txid:trace_vout
-                let Some(child_txid) = self.spending_index.get(&(trace_txid, trace_vout)).copied()
-                else {
-                    break;
-                };
-                let child_outs = self.get_output_addresses(&child_txid);
-                if child_outs.len() != 2 {
-                    break;
-                }
-                let mut cv: Vec<u64> = child_outs.iter().map(|o| o.value.to_sat()).collect();
-                cv.sort_unstable();
-                if cv[1] == 0 || cv[0] as f64 / cv[1] as f64 >= ratio_cutoff {
-                    break;
-                }
-                hops += 1;
-                let large_child = if child_outs[0].value.to_sat() >= child_outs[1].value.to_sat() {
-                    0
-                } else {
-                    1
-                };
-                trace_txid = child_txid;
-                trace_vout = child_outs[large_child].index;
+            let input_addrs = self.get_input_addresses(&txid);
+            if input_addrs.len() > 2 {
+                continue; // Peel chains have 1-2 inputs
             }
+            if input_addrs.iter().any(|ia| self.is_ours(&ia.address)) {
+                starts.push((txid, ratio));
+            }
+        }
+        // A child that is not itself peel-shaped ends the chain.
+        let step = |txid: &Txid| -> Option<Txid> {
+            next.get(txid)
+                .copied()
+                .flatten()
+                .filter(|child| next.contains_key(child))
+        };
 
-            if hops < min_hops {
+        // Txs reached from some start, the start itself only if a loop leads back.
+        let mut covered: HashSet<Txid> = HashSet::new();
+        for (start, _) in &starts {
+            let mut cur = step(start);
+            while let Some(t) = cur {
+                if !covered.insert(t) {
+                    break;
+                }
+                cur = step(&t);
+            }
+        }
+        // Hops from each peel to its chain's end, counting a loop's txs once.
+        let mut remaining: HashMap<Txid, usize> = HashMap::with_capacity(next.len());
+        for &first in &txids {
+            if !next.contains_key(&first) || remaining.contains_key(&first) {
+                continue;
+            }
+            let mut path: Vec<Txid> = Vec::new();
+            let mut on_path: HashMap<Txid, usize> = HashMap::new();
+            let mut beyond = 0;
+            let mut cur = Some(first);
+            while let Some(t) = cur {
+                if let Some(&known) = remaining.get(&t) {
+                    beyond = known;
+                    break;
+                }
+                if let Some(&pos) = on_path.get(&t) {
+                    beyond = path.len() - pos;
+                    for &member in &path[pos..] {
+                        remaining.insert(member, beyond);
+                    }
+                    path.truncate(pos);
+                    break;
+                }
+                on_path.insert(t, path.len());
+                path.push(t);
+                cur = step(&t);
+            }
+            for &t in path.iter().rev() {
+                beyond += 1;
+                remaining.insert(t, beyond);
+            }
+        }
+
+        // Chains that merge, or where a chain starts from another's peeled
+        // output, are one flow.
+        let starts_set: HashSet<Txid> = starts.iter().map(|(t, _)| *t).collect();
+        let mut nodes: Vec<Txid> = starts.iter().map(|(t, _)| *t).collect();
+        let mut index: HashMap<Txid, usize> = HashMap::with_capacity(nodes.len());
+        for (i, t) in nodes.iter().enumerate() {
+            index.insert(*t, i);
+        }
+        for &t in &covered {
+            if let std::collections::hash_map::Entry::Vacant(slot) = index.entry(t) {
+                slot.insert(nodes.len());
+                nodes.push(t);
+            }
+        }
+        let mut parent: Vec<usize> = (0..nodes.len()).collect();
+        fn root(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        let length = |t: &Txid| remaining.get(t).copied().unwrap_or(1);
+        let is_chain = |t: &Txid| starts_set.contains(t) && length(t) >= min_hops;
+        for (i, t) in nodes.iter().enumerate() {
+            // The change feeding the next hop joins it, and so does any output
+            // spent by a start that is a chain of its own.
+            let mut links: Vec<Txid> = step(t).into_iter().collect();
+            if is_chain(t) {
+                links.extend(self.get_input_addresses(t).iter().map(|ia| ia.funding_txid));
+            }
+            for linked in links {
+                if let Some(&j) = index.get(&linked) {
+                    let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                    parent[a] = b;
+                }
+            }
+        }
+        let mut size: HashMap<usize, usize> = HashMap::new();
+        for i in 0..nodes.len() {
+            *size.entry(root(&mut parent, i)).or_default() += 1;
+        }
+
+        // One finding per flow: its longest path first, then the other chains,
+        // each tx once, up to `max_hops` txids.
+        let mut flows: Vec<usize> = Vec::new();
+        let mut members: HashMap<usize, Vec<(Txid, f64)>> = HashMap::new();
+        for &(start, ratio) in &starts {
+            let flow = index.get(&start).map_or(0, |&i| root(&mut parent, i));
+            let entry = members.entry(flow).or_default();
+            if entry.is_empty() {
+                flows.push(flow);
+            }
+            entry.push((start, ratio));
+        }
+        let mut listed: HashSet<Txid> = HashSet::new();
+        for flow in flows {
+            let Some(flow_starts) = members.get(&flow) else {
+                continue;
+            };
+            let Some(&(txid, ratio)) = flow_starts.iter().rev().max_by_key(|(t, _)| length(t))
+            else {
+                continue;
+            };
+            let longest = length(&txid);
+            if longest.min(max_hops) < min_hops {
                 continue; // At least `min_hops` to qualify
+            }
+            let hops = u32::try_from(longest.min(max_hops)).unwrap_or(u32::MAX);
+            let at_least = longest > max_hops;
+            let chains = flow_starts
+                .iter()
+                .filter(|(t, _)| !covered.contains(t) && length(t) >= min_hops)
+                .count();
+
+            let mut chain = Vec::new();
+            let firsts = std::iter::once(txid).chain(flow_starts.iter().map(|(t, _)| *t));
+            'list: for first in firsts {
+                let mut cur = Some(first);
+                // Spends cannot form a cycle; a tx already listed ends bad data too.
+                while let Some(t) = cur.filter(|t| !listed.contains(t)) {
+                    if chain.len() >= max_hops {
+                        break 'list;
+                    }
+                    listed.insert(t);
+                    chain.push(t);
+                    cur = step(&t);
+                }
+            }
+            let truncated = size.get(&flow).copied().unwrap_or(0) > chain.len();
+
+            let mut details = json!({
+                "start_txid": txid.to_string(),
+                "hops": hops,
+                "txids": chain.iter().map(Txid::to_string).collect::<Vec<_>>(),
+                "initial_ratio": (ratio * 100.0).round() as u32,
+            });
+            if truncated {
+                details["truncated"] = json!(true); // Only shown when the chain was cut.
+            }
+            if chains > 1 {
+                details["merged_chains"] = json!(chains);
             }
 
             let severity = if hops >= critical_hops {
@@ -416,14 +533,12 @@ impl TxGraph {
                 vulnerability_type: VulnerabilityType::PeelChain,
                 severity,
                 description: format!(
-                    "Peel chain detected from TX {}: {} hops of asymmetric 2-output transactions",
-                    txid, hops
+                    "Peel chain detected from TX {}: {}{} hops of asymmetric 2-output transactions",
+                    txid,
+                    if at_least { "at least " } else { "" },
+                    hops
                 ),
-                details: Some(json!({
-                    "start_txid": txid.to_string(),
-                    "hops": hops,
-                    "initial_ratio": (ratio * 100.0).round() as u32,
-                })),
+                details: Some(details),
                 correction: Some(
                     "Avoid sending sequential transactions from the change output. \
                      Use PayJoin or CoinJoin between sends. Send the exact UTXO \

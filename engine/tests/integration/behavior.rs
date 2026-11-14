@@ -145,6 +145,7 @@ fn detect_peel_chain() {
 
     // Alice creates a peel chain: 3 consecutive 2-output transactions
     // where the large output feeds the next transaction
+    let mut chain = Vec::new();
     for i in 0..3 {
         let utxos = alice.list_unspent().unwrap();
         let big = utxos
@@ -176,10 +177,21 @@ fn detect_peel_chain() {
         let signed = alice.sign_raw_transaction_with_wallet(&tx).unwrap();
         let stx = signed.into_model().unwrap().tx;
         alice.send_raw_transaction(&stx).unwrap();
+        chain.push(stx.compute_txid().to_string());
         mine(&node, 1, &da);
     }
 
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
-    assert!(has_finding(&report, VulnerabilityType::PeelChain));
+    // The two-hop tail starting at the second peel is part of the same chain.
+    let peels: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.vulnerability_type == VulnerabilityType::PeelChain)
+        .collect();
+    assert_eq!(peels.len(), 1, "{peels:#?}");
+    let details = peels[0].details.as_ref().unwrap();
+    assert_eq!(details["start_txid"], chain[0].as_str());
+    assert_eq!(details["hops"], 3);
+    assert_eq!(details["txids"], serde_json::json!(chain));
 }
