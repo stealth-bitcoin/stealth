@@ -29,6 +29,60 @@ fn detect_change_detection() {
     assert!(has_finding(&report, VulnerabilityType::ChangeDetection));
 }
 
+#[test]
+fn change_back_to_the_input_address_is_the_named_change() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let funded = alice.new_address().unwrap();
+    pay_with_change_back_to_input(&node, &alice, funded);
+    assert_change_back_reason(&node);
+}
+
+#[test]
+fn change_back_to_an_internal_change_address_is_the_named_change() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let internal = alice
+        .get_raw_change_address()
+        .unwrap()
+        .into_model()
+        .unwrap()
+        .0
+        .assume_checked();
+    pay_with_change_back_to_input(&node, &alice, internal);
+    assert_change_back_reason(&node);
+}
+
+fn assert_change_back_reason(node: &Node) {
+    let report = scan_wallet(&gateway_for(node), "alice");
+    let change: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.vulnerability_type == VulnerabilityType::ChangeDetection)
+        .collect();
+    assert_eq!(change.len(), 1, "{change:?}");
+    let reasons = change[0].details.as_ref().unwrap()["reasons"].to_string();
+    assert!(
+        reasons.contains("Change went back to an input address (output 1, 69990000 sats)"),
+        "{reasons}"
+    );
+    // The round 0.3 BTC payment is the only other evidence.
+    assert!(
+        change[0].description.ends_with("(2 heuristic(s) matched)"),
+        "{} {reasons}",
+        change[0].description
+    );
+    let correction = change[0].correction.as_deref().unwrap();
+    assert!(
+        correction.starts_with("Send change to a fresh change address"),
+        "{correction}"
+    );
+}
+
 // ─── 17. Toxic Change Detection ────────────────────────────────────────────
 
 #[test]
@@ -123,4 +177,5 @@ fn detect_toxic_change() {
     let gateway = gateway_for(&node);
     let report = scan_wallet(&gateway, "alice");
     assert!(has_finding(&report, VulnerabilityType::ToxicChange));
+    assert_dust_advice(&report, VulnerabilityType::ToxicChange, "never merge it");
 }

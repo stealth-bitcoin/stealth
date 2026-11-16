@@ -6,9 +6,21 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, OutPoint, Txid};
 use serde_json::json;
 
+use super::list_addresses;
 use crate::config::DetectorThresholds;
+use crate::gateway::DecodedTransaction;
 use crate::graph::TxGraph;
 use crate::types::*;
+
+/// How to get rid of a live dust coin without linking it, given after "freeze it".
+const FEE_ONLY_SPEND: &str = "To get rid of it, spend it alone as fee: one coin per transaction, \
+     with a single input and one 0-value OP_RETURN output carrying 4 bytes of data, sent when \
+     mempool fee rates are low enough for it to confirm (a 546-sat coin pays about 6 to 7 sat/vB \
+     from a native segwit or taproot address, about 5 from wrapped segwit and about 3 from \
+     legacy). Send each one apart from the others, at different times and not in the same \
+     block, since transactions of the same shape sent together can be grouped. If the coin \
+     holds an ordinals inscription or runes, spending it as fee loses them: an ordinals \
+     inscription goes to the miner and runes are burned; either way they are lost.";
 
 impl TxGraph {
     // ── 3. Dust UTXO Detection ─────────────────────────────────────────────
@@ -29,6 +41,9 @@ impl TxGraph {
                 continue;
             }
             let key = (utxo.txid, utxo.vout);
+            if self.disposed_alone(&key) {
+                continue;
+            }
             let finding =
                 if self.confirmed_spend(&key) || self.chain_unspent.get(&key) == Some(&false) {
                     let mut finding = self.spent_dust_finding(
@@ -62,6 +77,9 @@ impl TxGraph {
         // history spends it, else the node's answer, else unknown.
         for (txid, out) in self.dust_outside_utxos(dust) {
             let key = (txid, out.index);
+            if self.disposed_alone(&key) {
+                continue;
+            }
             let unspent = if self.confirmed_spend(&key) {
                 Some(false)
             } else {
@@ -86,10 +104,46 @@ impl TxGraph {
     /// A confirmed tx in the history spends this output; an unconfirmed one
     /// may still be replaced.
     fn confirmed_spend(&self, key: &(Txid, u32)) -> bool {
+        self.confirmed_child(key).is_some()
+    }
+
+    /// The confirmed tx spending this output, if any.
+    fn confirmed_child(&self, key: &(Txid, u32)) -> Option<&DecodedTransaction> {
         self.spending_index
             .get(key)
             .and_then(|child| self.tx_cache.get(child))
-            .is_some_and(|child| child.confirmations > 0)
+            .filter(|child| child.confirmations > 0)
+    }
+
+    /// A confirmed tx spends this output as its only input into nothing but 0-value
+    /// outputs with no address (OP_RETURN): the fee-only spend, which links nothing.
+    fn disposed_alone(&self, key: &(Txid, u32)) -> bool {
+        self.confirmed_child(key).is_some_and(|child| {
+            child.vin.len() == 1
+                && child
+                    .vout
+                    .iter()
+                    .all(|o| o.address.is_none() && o.value == Amount::ZERO)
+        })
+    }
+
+    /// Every input of the confirmed tx spending this output is at `address`, and every output
+    /// stays there or is a 0-value output with no address (OP_RETURN), so the spend tied no
+    /// other address to it.
+    fn spent_from_its_address_only(
+        &self,
+        key: &(Txid, u32),
+        address: &Address<NetworkUnchecked>,
+    ) -> bool {
+        self.confirmed_child(key).is_some_and(|child| {
+            let inputs = self.get_input_addresses(&child.txid);
+            inputs.len() == child.vin.len()
+                && inputs.iter().all(|i| i.address == *address)
+                && child.vout.iter().all(|o| match &o.address {
+                    Some(a) => a == address,
+                    None => o.value == Amount::ZERO,
+                })
+        })
     }
 
     /// Outpoints of own dust in the UTXO list that no confirmed tx in the
@@ -193,20 +247,16 @@ impl TxGraph {
                 label,
             )
         };
-        let correction = if attack.is_some() {
-            "Do NOT spend this dust UTXO — spending it links your other addresses \
-             to this one via common-input-ownership. Freeze it in your wallet immediately."
-        } else {
-            "Do not spend this dust output — doing so links your other addresses \
-             to this one via CIOH. Use your wallet's coin freeze feature to \
-             exclude it from future transactions."
-        };
+        let correction = format!(
+            "Freeze it in your wallet: spending it with your other coins links your \
+             other addresses to this one. {FEE_ONLY_SPEND}"
+        );
         Finding {
             vulnerability_type: VulnerabilityType::Dust,
             severity,
             description,
             details: Some(details),
-            correction: Some(correction.into()),
+            correction: Some(correction),
         }
     }
 
@@ -219,7 +269,8 @@ impl TxGraph {
         thresholds: &DetectorThresholds,
     ) -> Finding {
         let attack = self.dust_attack_evidence(txid, thresholds);
-        let severity = if attack.is_some() {
+        let alone = self.spent_from_its_address_only(&(*txid, vout), address);
+        let severity = if attack.is_some() && !alone {
             Severity::Critical
         } else {
             Severity::Low
@@ -258,9 +309,15 @@ impl TxGraph {
             description,
             details: Some(details),
             correction: Some(
-                "This dust has already been spent. Going forward, reject \
-                 unsolicited dust by enabling automatic dust rejection."
-                    .into(),
+                if alone {
+                    "This dust has already been spent with no coins from your other \
+                     addresses, so it linked none of them to this one. Keep any other dust \
+                     like it frozen in your wallet's coin control."
+                } else {
+                    "This dust has already been spent. From now on, freeze dust like this \
+                     in your wallet's coin control so it is never spent with your other coins."
+                }
+                .into(),
             ),
         }
     }
@@ -389,10 +446,16 @@ impl TxGraph {
 
             let mut dust_inputs = Vec::new();
             let mut normal_inputs = Vec::new();
+            let mut own_normal = false;
             for ia in &input_addrs {
                 if !self.is_ours(&ia.address) {
+                    // In a partial scan an unattributed coin may be the user's normal coin.
+                    if ia.value > normal_min && self.unattributed(txid, &ia.address) {
+                        normal_inputs.push(ia);
+                    }
                     continue;
                 }
+                own_normal |= ia.value > normal_min;
                 let amt = ia.value;
                 if amt <= dust {
                     dust_inputs.push(ia);
@@ -401,18 +464,49 @@ impl TxGraph {
                 }
             }
 
+            // Dust is newly tied only to addresses other than its own.
+            let mut certain = false;
+            let mut possible: Vec<String> = Vec::new();
+            dust_inputs.retain(|d| {
+                let (own, unattributed) = self.joined_addresses(txid, &d.address);
+                certain |= !own.is_empty();
+                for address in &unattributed {
+                    if !possible.contains(address) {
+                        possible.push(address.clone());
+                    }
+                }
+                !own.is_empty() || !unattributed.is_empty()
+            });
             if !dust_inputs.is_empty() && !normal_inputs.is_empty() {
+                let mut description = format!(
+                    "TX {} spends {} dust input(s) alongside {} normal input(s)",
+                    txid,
+                    dust_inputs.len(),
+                    normal_inputs.len()
+                );
+                if !possible.is_empty() {
+                    description.push_str(&format!(
+                        "; this ties the dust to {}, if {} yours",
+                        list_addresses(&possible),
+                        if possible.len() == 1 {
+                            "that address is"
+                        } else {
+                            "those addresses are"
+                        }
+                    ));
+                }
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::DustSpending,
-                    severity: Severity::High,
-                    description: format!(
-                        "TX {} spends {} dust input(s) alongside {} normal input(s)",
-                        txid,
-                        dust_inputs.len(),
-                        normal_inputs.len()
-                    ),
+                    // A tie only to addresses the scan cannot attribute may not be the user's.
+                    severity: if certain && own_normal {
+                        Severity::High
+                    } else {
+                        Severity::Medium
+                    },
+                    description,
                     details: Some(json!({
                         "txid": txid,
+                        "possibly_joined_addresses": possible,
                         "dust_inputs": dust_inputs.iter().map(|d| {
                             json!({"address": d.address.assume_checked_ref().to_string(), "sats": d.value.to_sat()})
                         }).collect::<Vec<_>>(),
@@ -421,8 +515,8 @@ impl TxGraph {
                         }).collect::<Vec<_>>(),
                     })),
                     correction: Some(
-                        "Freeze dust UTXOs in your wallet to prevent them from being \
-                         automatically selected as inputs."
+                        "Freeze dust like this in your wallet from now on, so it is never \
+                         spent with your other coins again."
                             .into(),
                     ),
                 });
@@ -430,3 +524,6 @@ impl TxGraph {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

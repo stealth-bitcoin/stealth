@@ -21,8 +21,8 @@
 //! |---|---------------|------------------|
 //! | 1 | Address reuse | HIGH |
 //! | 2 | Common-input-ownership heuristic (CIOH) | HIGH – CRITICAL |
-//! | 3 | Dust UTXO reception | MEDIUM – CRITICAL |
-//! | 4 | Dust spent alongside normal inputs | HIGH |
+//! | 3 | Dust UTXO reception | LOW – CRITICAL |
+//! | 4 | Dust spent alongside normal inputs | MEDIUM – HIGH (MEDIUM only for possible ties in partial scans) |
 //! | 5 | Identifiable change outputs | MEDIUM |
 //! | 6 | UTXOs born from consolidation transactions | MEDIUM |
 //! | 7 | Mixed script types in inputs | HIGH |
@@ -34,7 +34,7 @@
 //! | 13 | Peel chain detection | HIGH – CRITICAL |
 //! | 14 | Deterministic input→output links | HIGH |
 //! | 15 | Unnecessary input (excess CIOH exposure) | MEDIUM |
-//! | 16 | Toxic change consolidation | HIGH |
+//! | 16 | Toxic change consolidation | MEDIUM – HIGH (MEDIUM only for possible ties in partial scans) |
 //!
 //! Dust-attack patterns are detected as part of dust analysis (3): when the
 //! parent transaction matches the attack signature, the finding is escalated

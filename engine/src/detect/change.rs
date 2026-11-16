@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use serde_json::json;
 
+use super::list_addresses;
 use crate::config::DetectorThresholds;
 use crate::graph::TxGraph;
 use crate::types::*;
@@ -50,7 +51,7 @@ impl TxGraph {
                 continue;
             }
 
-            let our_outs: Vec<_> = outputs
+            let mut our_outs: Vec<_> = outputs
                 .iter()
                 .filter(|o| self.is_ours(&o.address))
                 .collect();
@@ -75,6 +76,26 @@ impl TxGraph {
                     problems.push((heuristic, reason));
                 }
             };
+            // Change back to an input address is certain, so it is the only change judged.
+            let back_to_input: Vec<_> = our_outs
+                .iter()
+                .copied()
+                .filter(|o| our_in.iter().any(|ia| ia.address == o.address))
+                .collect();
+            for change in &back_to_input {
+                note(
+                    "input_address",
+                    format!(
+                        "Change went back to an input address (output {}, {} sats)",
+                        change.index,
+                        change.value.to_sat()
+                    ),
+                );
+            }
+            let change_back = !back_to_input.is_empty();
+            if change_back {
+                our_outs = back_to_input;
+            }
             for change in &our_outs {
                 let ch_sats = change.value.to_sat();
                 let ch_round = ch_sats % 100_000 == 0 || ch_sats % 1_000_000 == 0;
@@ -94,6 +115,10 @@ impl TxGraph {
                         );
                     }
 
+                    // Change back to an input address already implies these two lines.
+                    if change_back {
+                        continue;
+                    }
                     if in_types.contains(&ch_type) && change.script_type != payment.script_type {
                         note(
                             "script_type",
@@ -129,11 +154,16 @@ impl TxGraph {
                         "txid": txid,
                         "reasons": problems,
                     })),
-                    correction: Some(
-                        "Use PayJoin (BIP-78) so the receiver also contributes an input. \
-                         Avoid sending round amounts so the change amount is not the obvious leftover."
-                            .into(),
-                    ),
+                    correction: Some(format!(
+                        "{}Use PayJoin (BIP-78) so the receiver also contributes an input. \
+                         Avoid sending round amounts so the change amount is not the obvious leftover.",
+                        if change_back {
+                            "Send change to a fresh change address, never back to the address \
+                             you spent from; wallets do this by default. "
+                        } else {
+                            ""
+                        }
+                    )),
                 });
             }
         }
@@ -188,20 +218,58 @@ impl TxGraph {
                 if child_inputs.len() < 2 {
                     continue;
                 }
-                let has_larger = child_inputs
-                    .iter()
-                    .any(|ci| ci.value > toxic_upper && self.is_ours(&ci.address));
-                if !has_larger {
+                let larger = child_inputs.iter().filter(|ci| ci.value > toxic_upper);
+                let own_larger = larger.clone().any(|ci| self.is_ours(&ci.address));
+                if !own_larger
+                    && !larger
+                        .clone()
+                        .any(|ci| self.unattributed(&child_txid, &ci.address))
+                {
                     continue;
                 }
+                // Only addresses other than the change's are newly tied to it.
+                let (tied, possibly_tied) = self.joined_addresses(&child_txid, &out.address);
+                if tied.is_empty() && possibly_tied.is_empty() {
+                    continue;
+                }
+                let if_yours = if possibly_tied.len() == 1 {
+                    "if that address is yours"
+                } else {
+                    "if those addresses are yours"
+                };
+                let ties = match (tied.is_empty(), possibly_tied.is_empty()) {
+                    (false, true) => format!(
+                        "which ties {} to the change's address {}",
+                        list_addresses(&tied),
+                        out.address.assume_checked_ref()
+                    ),
+                    (false, false) => format!(
+                        "which ties {} to the change's address {}; it also ties {} to it, {}",
+                        list_addresses(&tied),
+                        out.address.assume_checked_ref(),
+                        list_addresses(&possibly_tied),
+                        if_yours
+                    ),
+                    _ => format!(
+                        "which ties {} to the change's address {}, {}",
+                        list_addresses(&possibly_tied),
+                        out.address.assume_checked_ref(),
+                        if_yours
+                    ),
+                };
 
                 findings.push(Finding {
                     vulnerability_type: VulnerabilityType::ToxicChange,
-                    severity: Severity::High,
+                    // A tie only to addresses the scan cannot attribute may not be the user's.
+                    severity: if !tied.is_empty() && own_larger {
+                        Severity::High
+                    } else {
+                        Severity::Medium
+                    },
                     description: format!(
-                        "Toxic change ({} sats) from TX {}:{} was later merged with a larger \
-                         UTXO in TX {}, linking both transactions",
-                        sats, txid, out.index, child_txid
+                        "Toxic change ({} sats) from TX {}:{} was later spent with a larger \
+                         coin in TX {}, {}",
+                        sats, txid, out.index, child_txid, ties
                     ),
                     details: Some(json!({
                         "source_txid": txid.to_string(),
@@ -210,11 +278,12 @@ impl TxGraph {
                         "change_sats": sats,
                         "spending_txid": child_txid.to_string(),
                         "total_inputs_in_child": child_inputs.len(),
+                        "tied_addresses": tied,
+                        "possibly_tied_addresses": possibly_tied,
                     })),
                     correction: Some(
-                        "Absorb tiny change into the miner fee (bump fee to consume it) \
-                         or freeze small change outputs. Never consolidate small change \
-                         with unrelated UTXOs."
+                        "Freeze small change like this in your wallet from now on and never \
+                         merge it with your other coins: that ties their addresses together."
                             .into(),
                     ),
                 });

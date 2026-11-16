@@ -56,6 +56,20 @@ pub fn has_finding(report: &stealth_engine::Report, vtype: VulnerabilityType) ->
         .any(|f| f.vulnerability_type == vtype)
 }
 
+/// The correction of the first finding of `vtype` says freeze first, contains `needle`
+/// and never says to bump the fee to consume the coin.
+pub fn assert_dust_advice(report: &stealth_engine::Report, vtype: VulnerabilityType, needle: &str) {
+    let correction = report
+        .findings
+        .iter()
+        .find(|f| f.vulnerability_type == vtype)
+        .and_then(|f| f.correction.as_deref())
+        .unwrap_or_default();
+    assert!(correction.starts_with("Freeze"), "{correction}");
+    assert!(correction.contains(needle), "{needle}: {correction}");
+    assert!(!correction.contains("bump fee"), "{correction}");
+}
+
 /// A client bound to one of the node's wallets, for RPCs the engine does not expose.
 pub fn node_wallet(node: &Node, name: &str) -> corepc_node::Client {
     corepc_node::Client::new_with_auth(
@@ -367,4 +381,44 @@ pub fn assert_change_address_wording(warning: &stealth_engine::Finding) {
         ),
         "{correction}"
     );
+}
+
+/// Alice receives 1 BTC at `funded`, then pays bob 0.3 BTC from it with the
+/// change sent back to that same address. Returns `funded`.
+pub fn pay_with_change_back_to_input(
+    node: &Node,
+    alice: &corepc_node::Client,
+    funded: Address,
+) -> Address {
+    let da = node.client.new_address().unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    node.client
+        .send_to_address(&funded, Amount::ONE_BTC)
+        .unwrap();
+    mine(node, 1, &da);
+
+    let coin = alice.list_unspent().unwrap().0.remove(0);
+    let coin_sats = (coin.amount * 1e8).round() as u64;
+    let payment = Amount::from_sat(30_000_000);
+    let change = Amount::from_sat(coin_sats - 30_000_000 - 10_000);
+    let raw = alice
+        .create_raw_transaction(
+            &[Input {
+                txid: coin.txid.parse().unwrap(),
+                vout: coin.vout as u64,
+                sequence: None,
+            }],
+            &[
+                Output::new(bob.new_address().unwrap(), payment),
+                Output::new(funded.clone(), change),
+            ],
+        )
+        .unwrap();
+    let tx = raw.transaction().unwrap();
+    let signed = alice.sign_raw_transaction_with_wallet(&tx).unwrap();
+    alice
+        .send_raw_transaction(&signed.into_model().unwrap().tx)
+        .unwrap();
+    mine(node, 1, &da);
+    funded
 }

@@ -39,6 +39,10 @@ pub struct TxGraph {
     /// the scan knows only fixed scripts, so it cannot vouch for whose the
     /// coin's unrecognised inputs are.
     pub ranged_addrs: HashSet<Address<NetworkUnchecked>>,
+    /// Set by the engine when the scan has no ranged descriptor, so it knows only some of the
+    /// wallet's addresses: UTXO scans without, or with only addr()/single-key, ownership
+    /// descriptors; descriptor scans of addr()/raw()/single keys.
+    pub partial_scan: bool,
     /// The node's answer on whether an output is unspent, for own outputs
     /// whose status the history does not settle. Filled by the engine.
     pub chain_unspent: HashMap<(Txid, u32), bool>,
@@ -242,6 +246,7 @@ impl TxGraph {
             output_cache,
             spending_index,
             ranged_addrs: history.ranged_addresses,
+            partial_scan: false,
             chain_unspent: HashMap::new(),
         }
     }

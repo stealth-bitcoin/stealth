@@ -2,7 +2,8 @@
 
 use std::collections::HashSet;
 
-use bitcoin::Txid;
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::{Address, Txid};
 
 use crate::config::DetectorThresholds;
 use crate::graph::TxGraph;
@@ -14,6 +15,18 @@ mod change;
 mod dust;
 mod linkage;
 mod origins;
+
+/// Most addresses a description names before "and N more"; details keep them all.
+const MAX_LISTED_ADDRESSES: usize = 5;
+
+/// `addresses` joined for a description, the ones past the cap counted instead of named.
+fn list_addresses(addresses: &[String]) -> String {
+    let shown = addresses[..addresses.len().min(MAX_LISTED_ADDRESSES)].join(", ");
+    match addresses.len().saturating_sub(MAX_LISTED_ADDRESSES) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
 
 impl TxGraph {
     /// Run all vulnerability detectors and produce a [`Report`].
@@ -65,6 +78,60 @@ impl TxGraph {
         };
 
         Report::new(stats, findings, warnings)
+    }
+
+    /// The spend looks like a CoinJoin round: two or more outputs of exactly the same value
+    /// and more than two input addresses the scan cannot attribute. Full CoinJoin detection
+    /// is separate work; this only keeps a round's participants from being called the user's.
+    fn coinjoin_shaped(&self, txid: &Txid) -> bool {
+        let Some(tx) = self.tx_cache.get(txid) else {
+            return false;
+        };
+        let equal_outputs = tx
+            .vout
+            .iter()
+            .enumerate()
+            .any(|(i, o)| tx.vout[i + 1..].iter().any(|p| p.value == o.value));
+        let mut strangers: Vec<&Address<NetworkUnchecked>> = Vec::new();
+        for input in self.input_cache.get(txid).into_iter().flatten() {
+            if !self.is_ours(&input.address) && !strangers.contains(&&input.address) {
+                strangers.push(&input.address);
+            }
+        }
+        equal_outputs && strangers.len() > 2
+    }
+
+    /// In a partial scan, an input address of `txid` the scan cannot tell apart from one of
+    /// the user's, unless the spend is shaped like a CoinJoin round.
+    fn unattributed(&self, txid: &Txid, address: &Address<NetworkUnchecked>) -> bool {
+        self.partial_scan && !self.is_ours(address) && !self.coinjoin_shaped(txid)
+    }
+
+    /// Addresses of `txid`'s inputs, other than `address`, that the spend ties to it: the
+    /// wallet's own, then, in a partial scan, those it cannot attribute.
+    fn joined_addresses(
+        &self,
+        txid: &Txid,
+        address: &Address<NetworkUnchecked>,
+    ) -> (Vec<String>, Vec<String>) {
+        let (mut own, mut unattributed) = (Vec::new(), Vec::new());
+        for input in self.get_input_addresses(txid) {
+            if input.address == *address {
+                continue;
+            }
+            let list = if self.is_ours(&input.address) {
+                &mut own
+            } else if self.unattributed(txid, &input.address) {
+                &mut unattributed
+            } else {
+                continue;
+            };
+            let text = input.address.assume_checked_ref().to_string();
+            if !list.contains(&text) {
+                list.push(text);
+            }
+        }
+        (own, unattributed)
     }
 
     /// Our transaction IDs in a stable order, so detector output never
