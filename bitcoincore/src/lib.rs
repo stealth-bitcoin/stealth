@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,8 +19,9 @@ use stealth_model::config::AnalysisConfig;
 use stealth_model::descriptor::is_ranged;
 use stealth_model::error::AnalysisError;
 use stealth_model::gateway::{
-    BlockchainGateway, DecodedTransaction, DescriptorType, ResolvedDescriptor, TxFetchResults,
-    TxInputRef, TxOutput, Utxo, UtxoSetResults, WalletHistory, WalletTxCategory, WalletTxEntry,
+    BlockchainGateway, DecodedTransaction, DescriptorType, LeftOut, ResolvedDescriptor,
+    TxFetchResults, TxInputRef, TxOutput, Utxo, UtxoSetResults, WalletHistory, WalletTxCategory,
+    WalletTxEntry,
 };
 use stealth_model::progress::{ScanPhase, ScanProgress};
 use stealth_model::types::btc_to_amount;
@@ -460,8 +461,15 @@ impl BitcoinCoreRpc {
     }
 
     fn load_history_for_wallet(&self, wallet_name: &str) -> Result<WalletHistory, AnalysisError> {
-        let wallet_txs = self.list_transactions(wallet_name)?;
-        let utxos = self.list_unspent(wallet_name)?;
+        let (mut wallet_txs, mut left_out) = self.list_transactions(wallet_name)?;
+        let (mut utxos, conflicted_utxos) = self.list_unspent(wallet_name)?;
+        left_out.conflicted.extend(conflicted_utxos);
+        let confirmed: HashSet<Txid> = wallet_txs
+            .iter()
+            .filter(|entry| entry.confirmations > 0)
+            .map(|entry| entry.txid)
+            .chain(utxos.iter().filter(|u| u.confirmations > 0).map(|u| u.txid))
+            .collect();
         let mut txids = wallet_txs
             .iter()
             .map(|entry| entry.txid)
@@ -480,9 +488,20 @@ impl BitcoinCoreRpc {
                 break;
             }
             let mut next = HashSet::new();
-            for (txid, fetched) in self.decode_transactions(&frontier)? {
+            let mut fetched_txs = self.decode_transactions(&frontier)?;
+            if depth == 0 {
+                fetched_txs = self.refetch_missing(fetched_txs, &confirmed)?;
+            }
+            for (txid, fetched) in fetched_txs {
                 let tx = match fetched {
                     Ok(tx) => tx,
+                    // Replaced, double-spent, expired, evicted, never broadcast, or a child of one.
+                    Err(AnalysisError::TransactionNotFound(_))
+                        if depth == 0 && !confirmed.contains(&txid) =>
+                    {
+                        left_out.unavailable.insert(txid);
+                        continue;
+                    }
                     Err(error) if depth == 0 => return Err(error),
                     Err(_) => continue,
                 };
@@ -499,6 +518,8 @@ impl BitcoinCoreRpc {
             frontier = next.into_iter().collect();
             depth += 1;
         }
+        wallet_txs.retain(|entry| !left_out.unavailable.contains(&entry.txid));
+        utxos.retain(|utxo| !left_out.unavailable.contains(&utxo.txid));
 
         Ok(WalletHistory {
             wallet_txs,
@@ -507,20 +528,58 @@ impl BitcoinCoreRpc {
             internal_addresses: HashSet::new(),
             derived_addresses: HashSet::new(),
             ranged_addresses: HashSet::new(),
+            left_out,
         })
     }
 
-    fn list_transactions(&self, wallet_name: &str) -> Result<Vec<WalletTxEntry>, AnalysisError> {
+    /// The wallet's entries, except those left out of the history, and why those were.
+    fn list_transactions(
+        &self,
+        wallet_name: &str,
+    ) -> Result<(Vec<WalletTxEntry>, LeftOut), AnalysisError> {
         // A block landing mid-pagination shifts the skip windows; refetch once.
         let tip = self.block_count()?;
         let mut entries = self.fetch_transaction_pages(wallet_name)?;
         if self.block_count()? != tip {
             entries = self.fetch_transaction_pages(wallet_name)?;
         }
-        entries
-            .into_iter()
-            .map(Self::convert_list_transaction_entry)
-            .collect()
+        Self::convert_list_transactions(entries)
+    }
+
+    fn convert_list_transactions(
+        entries: Vec<ListTransactionEntry>,
+    ) -> Result<(Vec<WalletTxEntry>, LeftOut), AnalysisError> {
+        let mut kept = Vec::new();
+        let mut left_out = LeftOut::default();
+        for entry in entries {
+            let txid = || parse_txid("listtransactions", &entry.txid);
+            // Core serves neither a tx a mempool one conflicts with nor an abandoned tx
+            // outside the wallet. replaced_by_txid stays after a replacement is gone,
+            // so only mempoolconflicts says the conflict is live.
+            let unconfirmed = depth(entry.confirmations) == 0;
+            let conflicts = &entry.mempoolconflicts;
+            let conflicts_with = entry
+                .replaced_by_txid
+                .as_ref()
+                .filter(|by| conflicts.contains(by))
+                .or(conflicts.first())
+                .map(String::as_str);
+            if is_conflicted(entry.confirmations) {
+                left_out.conflicted.insert(txid()?);
+            } else if unconfirmed && entry.category.as_deref() == Some("orphan") {
+                // Core marks it abandoned too; it is a coinbase from a stale block.
+                left_out.orphaned.insert(txid()?);
+            } else if unconfirmed && entry.abandoned == Some(true) {
+                left_out.abandoned.insert(txid()?);
+            } else if let (true, Some(by)) = (unconfirmed, conflicts_with) {
+                left_out
+                    .mempool_conflicted
+                    .insert(txid()?, parse_txid("listtransactions", by)?);
+            } else {
+                kept.push(Self::convert_list_transaction_entry(entry)?);
+            }
+        }
+        Ok((kept, left_out))
     }
 
     fn convert_list_transaction_entry(
@@ -551,7 +610,7 @@ impl BitcoinCoreRpc {
             amount: node_amount("listtransactions", btc, || {
                 format!("entry of tx {}", entry.txid)
             })?,
-            confirmations: entry.confirmations.unwrap_or_default(),
+            confirmations: depth(entry.confirmations),
             blockheight: entry.blockheight.unwrap_or_default(),
         })
     }
@@ -582,20 +641,86 @@ impl BitcoinCoreRpc {
         Ok(pages.into_iter().flatten().collect())
     }
 
+    /// Unconfirmed wallet txs the node did not have are asked for once more,
+    /// after checking its mempool has loaded: until then every unconfirmed tx
+    /// reads as not found, and loading may finish during the first fetch.
+    fn refetch_missing(
+        &self,
+        fetched: TxFetchResults,
+        confirmed: &HashSet<Txid>,
+    ) -> Result<TxFetchResults, AnalysisError> {
+        let missing: Vec<Txid> = fetched
+            .iter()
+            .filter(|(txid, result)| {
+                matches!(result, Err(AnalysisError::TransactionNotFound(_)))
+                    && !confirmed.contains(txid)
+            })
+            .map(|(txid, _)| *txid)
+            .collect();
+        if missing.is_empty() {
+            return Ok(fetched);
+        }
+        if self.mempool_loaded()? == Some(false) {
+            return Err(AnalysisError::EnvironmentUnavailable(
+                "the node is still loading its mempool; scan again once it has finished".into(),
+            ));
+        }
+        let mut again: HashMap<Txid, _> = self.decode_transactions(&missing)?.into_iter().collect();
+        Ok(fetched
+            .into_iter()
+            .map(|(txid, result)| match again.remove(&txid) {
+                Some(retried) => (txid, retried),
+                None => (txid, result),
+            })
+            .collect())
+    }
+
+    /// Whether the node has finished loading its mempool from disk; `None`
+    /// when it will not tell (no such RPC, or not allowed).
+    fn mempool_loaded(&self) -> Result<Option<bool>, AnalysisError> {
+        match self.call_rpc::<Value>(None, "getmempoolinfo", Vec::new()) {
+            Ok(info) => Ok(Some(info["loaded"] != json!(false))),
+            Err(RpcError::Node(
+                _,
+                JsonRpcError {
+                    code: Some(RPC_METHOD_NOT_FOUND),
+                    ..
+                },
+            ))
+            | Err(RpcError::Other(AnalysisError::RpcForbidden { .. })) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn block_count(&self) -> Result<u64, AnalysisError> {
         self.call::<u64>(None, "getblockcount", Vec::new())
     }
 
-    fn list_unspent(&self, wallet_name: &str) -> Result<Vec<Utxo>, AnalysisError> {
+    fn list_unspent(
+        &self,
+        wallet_name: &str,
+    ) -> Result<(Vec<Utxo>, BTreeSet<Txid>), AnalysisError> {
         let utxos = self.call::<Vec<ListUnspentEntry>>(
             Some(wallet_name),
             "listunspent",
             vec![json!(0), json!(9_999_999)],
         )?;
-        utxos
-            .into_iter()
-            .map(Self::convert_list_unspent_entry)
-            .collect()
+        Self::convert_list_unspent(utxos)
+    }
+
+    fn convert_list_unspent(
+        utxos: Vec<ListUnspentEntry>,
+    ) -> Result<(Vec<Utxo>, BTreeSet<Txid>), AnalysisError> {
+        let mut kept = Vec::new();
+        let mut conflicted = BTreeSet::new();
+        for utxo in utxos {
+            if is_conflicted(utxo.confirmations) {
+                conflicted.insert(parse_txid("listunspent", &utxo.txid)?);
+            } else {
+                kept.push(Self::convert_list_unspent_entry(utxo)?);
+            }
+        }
+        Ok((kept, conflicted))
     }
 
     fn convert_list_unspent_entry(utxo: ListUnspentEntry) -> Result<Utxo, AnalysisError> {
@@ -614,7 +739,7 @@ impl BitcoinCoreRpc {
                 .unwrap_or(DescriptorType::Unknown),
             address,
             amount: node_amount("listunspent", utxo.amount, place)?,
-            confirmations: utxo.confirmations.unwrap_or_default(),
+            confirmations: depth(utxo.confirmations),
         })
     }
 
@@ -721,7 +846,8 @@ impl BitcoinCoreRpc {
             version: tx.version.unwrap_or(2),
             locktime: tx.locktime.unwrap_or_default(),
             vsize: tx.vsize.unwrap_or_default(),
-            confirmations: tx.confirmations.unwrap_or_default(),
+            // Counted on the active chain, so never negative; if it were, read it as unconfirmed.
+            confirmations: depth(tx.confirmations),
         })
     }
 
@@ -1204,6 +1330,7 @@ impl BlockchainGateway for BitcoinCoreRpc {
         for wallet_name in wallet_names {
             txids.extend(
                 self.list_transactions(wallet_name)?
+                    .0
                     .into_iter()
                     .map(|entry| entry.txid),
             );
@@ -1347,6 +1474,17 @@ fn parse_txid(method: &str, s: &str) -> Result<Txid, AnalysisError> {
     s.parse::<Txid>().map_err(|e| {
         AnalysisError::EnvironmentUnavailable(format!("{method}: invalid txid '{s}': {e}"))
     })
+}
+
+/// Core reports a conflicted wallet tx, one that conflicts with another
+/// transaction or depends on one that does, at negative depth.
+fn is_conflicted(confirmations: Option<i64>) -> bool {
+    confirmations.is_some_and(|count| count < 0)
+}
+
+/// The depth of a kept tx; an absent count is unconfirmed.
+fn depth(confirmations: Option<i64>) -> u32 {
+    confirmations.map_or(0, |count| u32::try_from(count.max(0)).unwrap_or(u32::MAX))
 }
 
 // Accepts the same names as `network_datadir_subdir`, plus mainnet's.
@@ -1717,8 +1855,12 @@ struct ListTransactionEntry {
     address: Option<String>,
     category: Option<String>,
     amount: f64,
-    confirmations: Option<u32>,
+    confirmations: Option<i64>,
     blockheight: Option<u32>,
+    abandoned: Option<bool>,
+    replaced_by_txid: Option<String>,
+    #[serde(default)]
+    mempoolconflicts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1727,7 +1869,7 @@ struct ListUnspentEntry {
     vout: u32,
     address: Option<String>,
     amount: f64,
-    confirmations: Option<u32>,
+    confirmations: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1738,7 +1880,7 @@ struct RawTransaction {
     version: Option<i32>,
     locktime: Option<u32>,
     vsize: Option<u32>,
-    confirmations: Option<u32>,
+    confirmations: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2296,6 +2438,644 @@ mod tests {
         .unwrap()
     }
 
+    // A page as Core prints it after a fee bump whose replacement was mined.
+    const ORIGINAL: &str = "515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb";
+    const REPLACEMENT: &str = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
+    const IN_MEMPOOL: &str = "f5561a23e573423aeb6d9200aaf74db3ac73c83fae52f5261520d28506dadcd9";
+
+    #[test]
+    fn a_conflicted_listtransactions_entry_is_left_out_and_named() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            {
+                "address": ADDR, "amount": 0.01, "category": "receive", "confirmations": 2,
+                "blockheight": 111, "txid": TXID, "vout": 0, "walletconflicts": [],
+            },
+            {
+                "address": ADDR, "amount": -0.001, "bip125-replaceable": "yes",
+                "category": "send", "confirmations": -1, "fee": -0.0000141,
+                "replaced_by_txid": REPLACEMENT, "trusted": false, "txid": ORIGINAL,
+                "vout": 0, "walletconflicts": [REPLACEMENT],
+            },
+            {
+                "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 1,
+                "blockheight": 112, "fee": -0.0000282, "txid": REPLACEMENT, "vout": 0,
+                "walletconflicts": [ORIGINAL],
+            },
+            {
+                "address": ADDR, "amount": 0.002, "category": "receive", "confirmations": 0,
+                "trusted": false, "txid": IN_MEMPOOL, "vout": 0, "walletconflicts": [],
+            },
+        ]))
+        .expect("a negative confirmation count must parse");
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert_eq!(
+            left_out.conflicted.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+        let kept: Vec<_> = kept
+            .iter()
+            .map(|e| (e.txid.to_string(), e.confirmations, e.blockheight))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                (TXID.to_owned(), 2, 111),
+                (REPLACEMENT.to_owned(), 1, 112),
+                (IN_MEMPOOL.to_owned(), 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn replaced_and_abandoned_unconfirmed_entries_are_left_out_and_named() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            {
+                "address": ADDR, "amount": -0.001, "bip125-replaceable": "yes",
+                "category": "send", "confirmations": 0, "abandoned": false,
+                "replaced_by_txid": REPLACEMENT, "trusted": false, "txid": ORIGINAL,
+                "vout": 0, "walletconflicts": [REPLACEMENT], "mempoolconflicts": [REPLACEMENT],
+            },
+            {
+                "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 0,
+                "abandoned": false, "replaces_txid": ORIGINAL, "trusted": true,
+                "txid": REPLACEMENT, "vout": 0, "walletconflicts": [ORIGINAL],
+            },
+            {
+                "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 0,
+                "abandoned": true, "trusted": false, "txid": IN_MEMPOOL, "vout": 0,
+                "walletconflicts": [],
+            },
+            {
+                "address": ADDR, "amount": 0.01, "category": "receive", "confirmations": 0,
+                "abandoned": false, "trusted": false, "txid": TXID, "vout": 0,
+                "walletconflicts": [],
+            },
+        ]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            left_out.mempool_conflicted.into_iter().collect::<Vec<_>>(),
+            vec![(txid(ORIGINAL), txid(REPLACEMENT))]
+        );
+        assert_eq!(
+            left_out.abandoned.into_iter().collect::<Vec<_>>(),
+            vec![txid(IN_MEMPOOL)]
+        );
+        assert!(left_out.conflicted.is_empty());
+        let kept: Vec<_> = kept.iter().map(|e| e.txid).collect();
+        assert_eq!(kept, vec![txid(REPLACEMENT), txid(TXID)]);
+    }
+
+    fn unconfirmed_send(
+        txid: &str,
+        replaced_by: Option<&str>,
+        mempool_conflicts: &[&str],
+        abandoned: bool,
+    ) -> Value {
+        json!({
+            "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 0,
+            "abandoned": abandoned, "replaced_by_txid": replaced_by,
+            "mempoolconflicts": mempool_conflicts, "txid": txid, "vout": 0,
+        })
+    }
+
+    #[test]
+    fn a_coinbase_from_a_block_no_longer_in_the_chain_counts_as_orphaned_not_abandoned() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([{
+            "address": ADDR, "amount": 50.0, "category": "orphan", "confirmations": 0,
+            "abandoned": true, "generated": true, "mempoolconflicts": [],
+            "blockhash": TXID, "blockheight": 111, "txid": ORIGINAL, "vout": 0,
+            "walletconflicts": [],
+        }]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert!(kept.is_empty());
+        assert!(left_out.abandoned.is_empty());
+        assert_eq!(
+            left_out.orphaned.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn an_abandoned_entry_with_a_replacement_counts_as_abandoned() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([unconfirmed_send(
+            ORIGINAL,
+            Some(REPLACEMENT),
+            &[REPLACEMENT],
+            true
+        )]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert!(kept.is_empty());
+        assert!(left_out.mempool_conflicted.is_empty());
+        assert_eq!(
+            left_out.abandoned.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn a_tx_bumped_twice_names_the_tx_in_the_mempool() {
+        // Both earlier versions conflict with the last one, the only one in the mempool.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            unconfirmed_send(ORIGINAL, Some(REPLACEMENT), &[IN_MEMPOOL], false),
+            unconfirmed_send(REPLACEMENT, Some(IN_MEMPOOL), &[IN_MEMPOOL], false),
+            unconfirmed_send(IN_MEMPOOL, None, &[], false),
+        ]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            kept.iter().map(|e| e.txid).collect::<Vec<_>>(),
+            [txid(IN_MEMPOOL)]
+        );
+        let mut conflicts: Vec<_> = left_out.mempool_conflicted.into_iter().collect();
+        conflicts.sort();
+        let mut expected = vec![
+            (txid(ORIGINAL), txid(IN_MEMPOOL)),
+            (txid(REPLACEMENT), txid(IN_MEMPOOL)),
+        ];
+        expected.sort();
+        assert_eq!(conflicts, expected);
+    }
+
+    #[test]
+    fn a_replaced_by_txid_without_a_mempool_conflict_is_kept() {
+        // Core keeps replaced_by_txid on the original for good; back in the mempool, it is live.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([unconfirmed_send(
+            ORIGINAL,
+            Some(REPLACEMENT),
+            &[],
+            false
+        )]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert_eq!(left_out, Default::default());
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn of_two_txs_naming_each_other_only_the_one_out_of_the_mempool_is_left_out() {
+        // The replacement was evicted and the original rebroadcast.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            unconfirmed_send(ORIGINAL, Some(REPLACEMENT), &[], false),
+            unconfirmed_send(REPLACEMENT, None, &[ORIGINAL], false),
+        ]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            kept.iter().map(|e| e.txid).collect::<Vec<_>>(),
+            [txid(ORIGINAL)]
+        );
+        assert_eq!(
+            left_out.mempool_conflicted.into_iter().collect::<Vec<_>>(),
+            vec![(txid(REPLACEMENT), txid(ORIGINAL))]
+        );
+    }
+
+    #[test]
+    fn of_several_mempool_conflicts_the_wallets_own_replacement_is_named() {
+        // IN_MEMPOOL ("f5...") lists first; the bump the wallet made comes second.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([unconfirmed_send(
+            ORIGINAL,
+            Some(REPLACEMENT),
+            &[IN_MEMPOOL, REPLACEMENT],
+            false
+        )]))
+        .unwrap();
+        let (_, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            left_out.mempool_conflicted.into_iter().collect::<Vec<_>>(),
+            vec![(txid(ORIGINAL), txid(REPLACEMENT))]
+        );
+    }
+
+    #[test]
+    fn the_replacement_named_is_one_in_the_mempool_conflicts() {
+        // A stale replaced_by_txid names a tx no longer in the mempool.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([unconfirmed_send(
+            ORIGINAL,
+            Some(REPLACEMENT),
+            &[IN_MEMPOOL],
+            false
+        )]))
+        .unwrap();
+        let (_, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            left_out.mempool_conflicted.into_iter().collect::<Vec<_>>(),
+            vec![(txid(ORIGINAL), txid(IN_MEMPOOL))]
+        );
+    }
+
+    #[test]
+    fn a_receive_a_mempool_tx_conflicts_with_is_left_out_and_names_it() {
+        // The receiver of a bumped payment: no replaced_by_txid, only the sender has it.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([
+            {
+                "address": ADDR, "amount": 0.001, "category": "receive", "confirmations": 0,
+                "abandoned": false, "mempoolconflicts": [REPLACEMENT], "trusted": false,
+                "txid": ORIGINAL, "vout": 0, "walletconflicts": [REPLACEMENT],
+            },
+            {
+                "address": ADDR, "amount": 0.001, "category": "receive", "confirmations": 0,
+                "mempoolconflicts": [], "trusted": false, "txid": REPLACEMENT, "vout": 0,
+                "walletconflicts": [ORIGINAL],
+            },
+        ]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        let txid = |s: &str| s.parse::<Txid>().unwrap();
+        assert_eq!(
+            left_out.mempool_conflicted.into_iter().collect::<Vec<_>>(),
+            vec![(txid(ORIGINAL), txid(REPLACEMENT))]
+        );
+        assert_eq!(
+            kept.iter().map(|e| e.txid).collect::<Vec<_>>(),
+            [txid(REPLACEMENT)]
+        );
+    }
+
+    #[test]
+    fn a_confirmed_entry_with_mempool_conflicts_is_kept() {
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([{
+            "address": ADDR, "amount": 0.001, "category": "receive", "confirmations": 2,
+            "blockheight": 110, "mempoolconflicts": [REPLACEMENT], "txid": ORIGINAL, "vout": 0,
+        }]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert_eq!(left_out, Default::default());
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn a_confirmed_entry_is_kept_whatever_its_flags() {
+        // Mined after all: the replacement lost, and a mined tx is no longer abandoned.
+        let page: Vec<ListTransactionEntry> = serde_json::from_value(json!([{
+            "address": ADDR, "amount": -0.001, "category": "send", "confirmations": 3,
+            "blockheight": 110, "abandoned": true, "replaced_by_txid": REPLACEMENT,
+            "txid": ORIGINAL, "vout": 0,
+        }]))
+        .unwrap();
+        let (kept, left_out) = BitcoinCoreRpc::convert_list_transactions(page).unwrap();
+        assert_eq!(left_out, Default::default());
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn a_conflicted_listunspent_entry_is_left_out_and_named() {
+        let utxos: Vec<ListUnspentEntry> = serde_json::from_value(json!([
+            {
+                "txid": ORIGINAL, "vout": 1, "address": ADDR, "amount": 0.0089859,
+                "confirmations": -1, "spendable": true, "solvable": true, "safe": false,
+            },
+            {
+                "txid": TXID, "vout": 0, "address": ADDR, "amount": 0.01,
+                "confirmations": 2, "spendable": true, "solvable": true, "safe": true,
+            },
+        ]))
+        .expect("a negative confirmation count must parse");
+        let (kept, conflicted) = BitcoinCoreRpc::convert_list_unspent(utxos).unwrap();
+        assert_eq!(
+            conflicted.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+        let kept: Vec<_> = kept
+            .iter()
+            .map(|u| (u.txid.to_string(), u.confirmations))
+            .collect();
+        assert_eq!(kept, vec![(TXID.to_owned(), 2)]);
+    }
+
+    #[test]
+    fn the_wallet_history_names_a_conflicted_tx_only_listunspent_shows() {
+        let rpc = answering_node(vec![
+            ("getblockcount", json!(112)),
+            ("listtransactions", json!([])),
+            (
+                "listunspent",
+                json!([{
+                    "txid": ORIGINAL, "vout": 1, "address": ADDR, "amount": 0.0089859,
+                    "confirmations": -1, "spendable": true, "solvable": true, "safe": false,
+                }]),
+            ),
+        ]);
+        let history = rpc.load_history_for_wallet("alice").unwrap();
+        assert!(history.utxos.is_empty());
+        assert_eq!(
+            history.left_out.conflicted.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+    }
+
+    /// A wallet listing one entry at `confirmations`, whose tx getrawtransaction
+    /// answers with `error`.
+    fn node_failing_to_serve(confirmations: i64, error: Value) -> BitcoinCoreRpc {
+        node_failing_to_serve_with(confirmations, error, json!([]))
+    }
+
+    /// Like [`node_failing_to_serve`], with `unspent` as the listunspent answer.
+    fn node_failing_to_serve_with(
+        confirmations: i64,
+        error: Value,
+        unspent: Value,
+    ) -> BitcoinCoreRpc {
+        serve_node(move |method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "getmempoolinfo" => json!({ "loaded": true, "size": 0 }),
+                "listunspent" => unspent.clone(),
+                "listtransactions" => json!([{
+                    "address": ADDR, "amount": 0.001, "category": "receive",
+                    "confirmations": confirmations, "abandoned": false, "mempoolconflicts": [],
+                    "txid": ORIGINAL, "vout": 0,
+                }]),
+                "getrawtransaction" => {
+                    let batch = json!([{ "id": 0, "result": null, "error": error }]);
+                    return ("200 OK", batch.to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        })
+    }
+
+    fn not_found() -> Value {
+        json!({ "code": -5, "message": "No such mempool or blockchain transaction." })
+    }
+
+    #[test]
+    fn an_unconfirmed_wallet_tx_the_node_no_longer_has_is_left_out_and_named() {
+        let history = node_failing_to_serve(0, not_found())
+            .load_history_for_wallet("bob")
+            .expect("an unconfirmed tx the node lacks must not fail the scan");
+        assert!(history.wallet_txs.is_empty());
+        assert_eq!(
+            history.left_out.unavailable.into_iter().collect::<Vec<_>>(),
+            vec![ORIGINAL.parse::<Txid>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn the_outputs_of_an_unavailable_tx_leave_the_utxo_set_too() {
+        // listunspent still listed it, then it expired before the fetch.
+        let unspent = json!([{
+            "txid": ORIGINAL, "vout": 0, "address": ADDR, "amount": 0.001,
+            "confirmations": 0, "spendable": true, "solvable": true, "safe": false,
+        }]);
+        let history = node_failing_to_serve_with(0, not_found(), unspent)
+            .load_history_for_wallet("bob")
+            .expect("scan");
+        assert!(history.utxos.is_empty());
+        assert_eq!(history.left_out.unavailable.len(), 1);
+    }
+
+    #[test]
+    fn a_node_still_loading_its_mempool_fails_the_scan_instead_of_listing_txs_as_gone() {
+        let rpc = serve_node(|method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "getmempoolinfo" => json!({ "loaded": false, "size": 0 }),
+                "listunspent" => json!([]),
+                "listtransactions" => json!([{
+                    "address": ADDR, "amount": 0.001, "category": "receive",
+                    "confirmations": 0, "mempoolconflicts": [], "txid": ORIGINAL, "vout": 0,
+                }]),
+                "getrawtransaction" => {
+                    let batch = json!([{ "id": 0, "result": null, "error": not_found() }]);
+                    return ("200 OK", batch.to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        });
+        let error = rpc
+            .load_history_for_wallet("bob")
+            .expect_err("a mempool still loading cannot tell what is gone");
+        assert!(
+            error
+                .to_string()
+                .contains("the node is still loading its mempool; scan again once it has finished"),
+            "{error}"
+        );
+    }
+
+    /// A wallet listing one unconfirmed entry the node lacks on the first
+    /// fetch; `serves_later` makes the next fetch find it. `mempool_info`
+    /// is the getmempoolinfo reply as (status, body).
+    fn node_refetching(mempool_info: (&'static str, String), serves_later: bool) -> BitcoinCoreRpc {
+        let fetches = Arc::new(AtomicU64::new(0));
+        serve_node(move |method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "getmempoolinfo" => return mempool_info.clone(),
+                "listunspent" => json!([]),
+                "listtransactions" => json!([{
+                    "address": ADDR, "amount": 0.001, "category": "receive",
+                    "confirmations": 0, "mempoolconflicts": [], "txid": ORIGINAL, "vout": 0,
+                }]),
+                "getrawtransaction" => {
+                    let first = fetches.fetch_add(1, Ordering::SeqCst) == 0;
+                    let answer = if serves_later && !first {
+                        json!({ "id": 0, "error": null, "result": {
+                            "txid": ORIGINAL, "vin": [],
+                            "vout": [{ "value": 0.001, "n": 0, "scriptPubKey": { "address": ADDR } }],
+                        }})
+                    } else {
+                        json!({ "id": 0, "result": null, "error": not_found() })
+                    };
+                    return ("200 OK", json!([answer]).to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        })
+    }
+
+    fn loaded() -> (&'static str, String) {
+        let reply = json!({ "result": { "loaded": true, "size": 1 }, "error": null });
+        ("200 OK", reply.to_string())
+    }
+
+    #[test]
+    fn a_tx_the_mempool_served_once_it_finished_loading_is_kept() {
+        let history = node_refetching(loaded(), true)
+            .load_history_for_wallet("bob")
+            .expect("scan");
+        assert!(
+            history.left_out.unavailable.is_empty(),
+            "{:?}",
+            history.left_out
+        );
+        assert_eq!(history.wallet_txs.len(), 1);
+        assert!(history
+            .transactions
+            .contains_key(&ORIGINAL.parse::<Txid>().unwrap()));
+    }
+
+    #[test]
+    fn any_other_getmempoolinfo_error_fails_the_scan() {
+        let warming_up = json!({
+            "result": null, "error": { "code": -28, "message": "Loading block index..." },
+        });
+        let error = node_refetching(("500 Internal Server Error", warming_up.to_string()), true)
+            .load_history_for_wallet("bob")
+            .expect_err("a node that cannot answer is not a node that will not tell");
+        assert!(error.to_string().contains("Loading block index"), "{error}");
+    }
+
+    #[test]
+    fn a_node_that_will_not_tell_about_its_mempool_still_gets_the_refetch() {
+        let method_not_found = json!({
+            "result": null, "error": { "code": -32601, "message": "Method not found" },
+        });
+        for (mempool_info, what) in [
+            (("403 Forbidden", String::new()), "forbidden"),
+            (("200 OK", method_not_found.to_string()), "method not found"),
+        ] {
+            let served = node_refetching(mempool_info.clone(), true)
+                .load_history_for_wallet("bob")
+                .unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert!(served.left_out.unavailable.is_empty(), "{what}");
+            let missing = node_refetching(mempool_info, false)
+                .load_history_for_wallet("bob")
+                .unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert_eq!(missing.left_out.unavailable.len(), 1, "{what}");
+            assert!(missing.wallet_txs.is_empty(), "{what}");
+        }
+    }
+
+    #[test]
+    fn an_ancestor_the_node_cannot_find_is_skipped_without_a_second_fetch() {
+        let fetches = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&fetches);
+        let rpc = serve_node(move |method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "getmempoolinfo" => panic!("only a missing wallet tx asks about the mempool"),
+                "listunspent" => json!([]),
+                "listtransactions" => json!([{
+                    "address": ADDR, "amount": 0.001, "category": "receive",
+                    "confirmations": 3, "blockheight": 110, "txid": ORIGINAL, "vout": 0,
+                }]),
+                "getrawtransaction" => {
+                    // The wallet tx, then its parent, which the node lacks.
+                    let answer = if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                        json!({ "id": 0, "error": null, "result": {
+                            "txid": ORIGINAL, "confirmations": 3,
+                            "vin": [{ "txid": TXID, "vout": 0 }],
+                            "vout": [{ "value": 0.001, "n": 0, "scriptPubKey": { "address": ADDR } }],
+                        }})
+                    } else {
+                        json!({ "id": 0, "result": null, "error": not_found() })
+                    };
+                    return ("200 OK", json!([answer]).to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        });
+        let history = rpc.load_history_for_wallet("bob").expect("scan");
+        assert_eq!(history.wallet_txs.len(), 1);
+        assert_eq!(history.left_out, Default::default());
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            2,
+            "no second fetch of the parent"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_output_the_node_cannot_find_still_fails_the_scan() {
+        // Only listunspent says the tx is confirmed.
+        let rpc = serve_node(|method| {
+            let result = match method {
+                "getblockcount" => json!(112),
+                "getmempoolinfo" => json!({ "loaded": true, "size": 0 }),
+                "listtransactions" => json!([]),
+                "listunspent" => json!([{
+                    "txid": ORIGINAL, "vout": 0, "address": ADDR, "amount": 0.001,
+                    "confirmations": 3, "spendable": true, "solvable": true, "safe": true,
+                }]),
+                "getrawtransaction" => {
+                    let batch = json!([{ "id": 0, "result": null, "error": not_found() }]);
+                    return ("200 OK", batch.to_string());
+                }
+                other => panic!("unexpected call {other}"),
+            };
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        });
+        let error = rpc
+            .load_history_for_wallet("bob")
+            .expect_err("a confirmed output the node cannot find is a real failure");
+        assert!(
+            matches!(error, AnalysisError::TransactionNotFound(_)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_wallet_tx_the_node_cannot_find_still_fails_the_scan() {
+        let error = node_failing_to_serve(3, not_found())
+            .load_history_for_wallet("bob")
+            .expect_err("a confirmed tx the node cannot find is a real failure");
+        assert!(
+            matches!(error, AnalysisError::TransactionNotFound(_)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn any_other_error_on_an_unconfirmed_wallet_tx_still_fails_the_scan() {
+        let error = node_failing_to_serve(0, json!({ "code": -1, "message": "boom" }))
+            .load_history_for_wallet("bob")
+            .expect_err("only not found leaves a tx out");
+        assert!(
+            matches!(error, AnalysisError::EnvironmentUnavailable(_)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_negative_getrawtransaction_depth_parses_as_unconfirmed() {
+        let raw = |confirmations: i64| -> RawTransaction {
+            serde_json::from_value(json!({
+                "txid": ORIGINAL, "hash": ORIGINAL, "version": 2, "size": 222,
+                "vsize": 141, "weight": 561, "locktime": 0,
+                "vin": [{ "txid": TXID, "vout": 0, "sequence": 4294967293_u32 }],
+                "vout": [{
+                    "value": 0.001, "n": 0,
+                    "scriptPubKey": { "address": ADDR, "type": "witness_v0_keyhash" },
+                }],
+                "confirmations": confirmations,
+            }))
+            .expect("a negative confirmation count must parse")
+        };
+        for (reported, read) in [(-1, 0), (0, 0), (7, 7)] {
+            let tx = BitcoinCoreRpc::convert_raw_transaction(raw(reported)).unwrap();
+            assert_eq!(tx.confirmations, read, "{reported}");
+        }
+    }
+
     #[test]
     fn send_amounts_reported_negative_become_their_absolute_value() {
         let entry =
@@ -2649,13 +3429,51 @@ mod tests {
     /// null, a raw 200 body when it is a string) and every other call with an
     /// empty result.
     fn fake_node(failing: &'static str, error: serde_json::Value) -> BitcoinCoreRpc {
+        serve_node(move |method| {
+            if method != failing {
+                ("200 OK", json!({ "result": {}, "error": null }).to_string())
+            } else if let Some(raw) = error.as_str() {
+                // A string stands for a raw, non-JSON 200 reply.
+                ("200 OK", raw.to_string())
+            } else if error.is_null() {
+                // Null stands for Core's empty-bodied 403.
+                ("403 Forbidden", String::new())
+            } else {
+                (
+                    "500 Internal Server Error",
+                    json!({ "result": null, "error": error }).to_string(),
+                )
+            }
+        })
+    }
+
+    /// A node answering each method with its result from `results`.
+    fn answering_node(results: Vec<(&'static str, serde_json::Value)>) -> BitcoinCoreRpc {
+        serve_node(move |method| {
+            let result = results
+                .iter()
+                .find(|(name, _)| *name == method)
+                .map(|(_, result)| result.clone())
+                .unwrap_or_else(|| panic!("unexpected call {method}"));
+            (
+                "200 OK",
+                json!({ "result": result, "error": null }).to_string(),
+            )
+        })
+    }
+
+    // Serves JSON-RPC over HTTP, replying to each request by its method.
+    fn serve_node(
+        reply: impl Fn(&str) -> (&'static str, String) + Send + Sync + 'static,
+    ) -> BitcoinCoreRpc {
         use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let reply = Arc::new(reply);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
-                let error = error.clone();
+                let reply = Arc::clone(&reply);
                 std::thread::spawn(move || {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     let mut stream = stream;
@@ -2681,22 +3499,9 @@ mod tests {
                         let method = request
                             .get("method")
                             .or_else(|| request.get(0).and_then(|r| r.get("method")))
-                            .cloned()
+                            .and_then(|m| m.as_str().map(str::to_owned))
                             .unwrap_or_default();
-                        let (status, reply) = if method != failing {
-                            ("200 OK", json!({ "result": {}, "error": null }).to_string())
-                        } else if let Some(raw) = error.as_str() {
-                            // A string stands for a raw, non-JSON 200 reply.
-                            ("200 OK", raw.to_string())
-                        } else if error.is_null() {
-                            // Null stands for Core's empty-bodied 403.
-                            ("403 Forbidden", String::new())
-                        } else {
-                            (
-                                "500 Internal Server Error",
-                                json!({ "result": null, "error": error }).to_string(),
-                            )
-                        };
+                        let (status, reply) = reply(&method);
                         let _ = write!(
                             stream,
                             "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",

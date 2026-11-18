@@ -7,10 +7,10 @@ afterEach(cleanup)
 
 // Mirrors Report::new in model/src/types.rs: a scan is clean only when it
 // analyzed something and found nothing.
-function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0 } = {}) {
+function makeReport({ txs = 0, findings = [], warnings = [], unserved = 0, conflicted = [], replaced = [], abandoned = [], unavailable = [], orphaned = [] } = {}) {
   const analyzedNothing = txs === 0
   return {
-    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved },
+    stats: { transactions_analyzed: txs, addresses_seen: 0, utxos_current: 0, addresses_without_history: unserved, conflicted_txids: conflicted, mempool_conflicted_txids: replaced, abandoned_txids: abandoned, unavailable_txids: unavailable, orphaned_txids: orphaned },
     findings,
     warnings,
     summary: {
@@ -387,5 +387,157 @@ describe('ReportScreen — history the node could not serve', () => {
     render(<ReportScreen report={makeReport({ txs: 2, findings: [reuse] })} descriptor={two} kind="utxos" onReset={() => {}} />)
     expect(screen.queryByText(/could not serve/i)).toBeNull()
     expect(screen.queryByText(/you pasted/i)).toBeNull()
+  })
+})
+
+describe('ReportScreen — conflicted transactions left out', () => {
+  const original = '515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb'
+  const other = 'a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab'
+
+  it('names the conflicted transaction and says why it was left out', () => {
+    render(<ReportScreen report={makeReport({ txs: 2, conflicted: [original] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.getByText(/left out 1 transaction core reports as conflicted: it, or a transaction it depends on, conflicts with another one, so it is not part of the wallet's history\. it can only come back if a reorg removes the conflicting block\. if it was broadcast, it may have been seen by the network before it became conflicted; stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+  })
+
+  it('names every one of several', () => {
+    render(<ReportScreen report={makeReport({ txs: 2, conflicted: [original, other] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.getByText(/left out 2 transactions core reports as conflicted: each, or a transaction it depends on, conflicts with another one, so they are not part of the wallet's history\. they can only come back if a reorg removes the block or blocks holding the conflicting transactions\. if they were broadcast, they may have been seen by the network before they became conflicted; stealth does not analyze them\./i)).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+    expect(screen.getByText(other)).toBeTruthy()
+  })
+
+  it('gives no empty-scan hint when every transaction was left out', () => {
+    render(<ReportScreen report={makeReport({ txs: 0, conflicted: [original] })} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.getByText(original)).toBeTruthy()
+    expect(screen.getByText(/nothing else was left to analyze/i)).toBeTruthy()
+    expect(screen.queryByText(/no transactions found for this input/i)).toBeNull()
+    expect(screen.queryByText(/unused|off-chain|catching up/i)).toBeNull()
+  })
+
+  it('says nothing when no transaction was left out, or the report predates the field', () => {
+    const report = makeReport({ txs: 2 })
+    render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.queryByText(/conflicted/i)).toBeNull()
+    cleanup()
+    delete report.stats.conflicted_txids
+    render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+    expect(screen.queryByText(/conflicted/i)).toBeNull()
+  })
+})
+
+describe('ReportScreen — replaced and abandoned transactions left out', () => {
+  const original = '515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb'
+  const other = 'a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab'
+  const show = (report) => render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+
+  it('names a replaced transaction and the replacement not confirmed yet', () => {
+    show(makeReport({ txs: 2, replaced: [{ txid: original, conflicts_with: other }] }))
+    expect(screen.getByText(/left out 1 transaction that conflicts, or depends on one that conflicts, with a transaction in the mempool\. it may still confirm; until then it is not part of the history the wallet sees\. if it was broadcast, it may have been seen by the network before the conflicting one reached the mempool; stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(`${original}: it, or a transaction it depends on, conflicts with ${other}, which is in the mempool and not confirmed yet`)).toBeTruthy()
+  })
+
+  it('does not say a descendant conflicts with the mempool tx itself', () => {
+    const child = 'f5561a23e573423aeb6d9200aaf74db3ac73c83fae52f5261520d28506dadcd9'
+    show(makeReport({ txs: 2, replaced: [{ txid: original, conflicts_with: other }, { txid: child, conflicts_with: other }] }))
+    expect(screen.getByText(`${child}: it, or a transaction it depends on, conflicts with ${other}, which is in the mempool and not confirmed yet`)).toBeTruthy()
+    expect(screen.queryByText(new RegExp(`^${child} conflicts with`))).toBeNull()
+  })
+
+  it('names a single conflicting transaction in the singular for several left out', () => {
+    const child = 'f5561a23e573423aeb6d9200aaf74db3ac73c83fae52f5261520d28506dadcd9'
+    show(makeReport({ txs: 2, replaced: [{ txid: original, conflicts_with: other }, { txid: child, conflicts_with: other }] }))
+    expect(screen.getByText(/left out 2 transactions that conflict, or depend on ones that conflict, with a transaction in the mempool\. they may still confirm; until then they are not part of the history the wallet sees\. if they were broadcast, they may have been seen by the network before the conflicting one reached the mempool; stealth does not analyze them\./i)).toBeTruthy()
+  })
+
+  it('counts several replaced transactions', () => {
+    show(makeReport({ txs: 2, replaced: [{ txid: original, conflicts_with: other }, { txid: other, conflicts_with: original }] }))
+    expect(screen.getByText(/left out 2 transactions that conflict, or depend on ones that conflict, with transactions in the mempool\. they may still confirm; until then they are not part of the history the wallet sees\. if they were broadcast, they may have been seen by the network before the conflicting ones reached the mempool; stealth does not analyze them\./i)).toBeTruthy()
+  })
+
+  it('names abandoned transactions', () => {
+    show(makeReport({ txs: 2, abandoned: [original] }))
+    expect(screen.getByText(/left out 1 transaction that was abandoned in the wallet, by hand or by core after a reorg removed a coinbase it depends on\. it may still confirm, unless it depends on a coinbase a reorg removed; until then it is not part of the history the wallet sees\. if it was broadcast, it may have been seen by the network before it was abandoned; stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+    cleanup()
+    show(makeReport({ txs: 2, abandoned: [original, other] }))
+    expect(screen.getByText(/left out 2 transactions that were abandoned in the wallet, by hand or by core after a reorg removed a coinbase they depend on\. they may still confirm, unless they depend on a coinbase a reorg removed; until then they are not part of the history the wallet sees\. if they were broadcast, they may have been seen by the network before they were abandoned; stealth does not analyze them\./i)).toBeTruthy()
+  })
+
+  it('gives no empty-scan hint when every transaction was replaced or abandoned', () => {
+    for (const report of [
+      makeReport({ txs: 0, replaced: [{ txid: original, conflicts_with: other }] }),
+      makeReport({ txs: 0, abandoned: [original] }),
+    ]) {
+      show(report)
+      expect(screen.getByText(/nothing else was left to analyze/i)).toBeTruthy()
+      expect(screen.queryByText(/no transactions found for this input/i)).toBeNull()
+      cleanup()
+    }
+  })
+
+  it('says nothing when the report predates the fields', () => {
+    const report = makeReport({ txs: 2 })
+    delete report.stats.conflicted_txids
+    delete report.stats.mempool_conflicted_txids
+    delete report.stats.abandoned_txids
+    delete report.stats.unavailable_txids
+    delete report.stats.orphaned_txids
+    show(report)
+    // Words from each of the five notes.
+    expect(screen.queryByText(/left out|conflict|in the mempool|abandoned|does not have|coinbase/i)).toBeNull()
+  })
+})
+
+describe('ReportScreen — unconfirmed transactions the node does not have', () => {
+  const original = '515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb'
+  const other = 'a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab'
+  const show = (report) => render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+
+  it('names one and says why it was left out', () => {
+    show(makeReport({ txs: 2, unavailable: [original] }))
+    expect(screen.getByText(/left out 1 transaction that is unconfirmed and that this node does not have \(it may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. it may still confirm, unless it or a transaction it depends on has a conflicting transaction mined; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+  })
+
+  it('counts several', () => {
+    show(makeReport({ txs: 2, unavailable: [original, other] }))
+    expect(screen.getByText(/left out 2 transactions that are unconfirmed and that this node does not have \(they may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was\)\. they may still confirm, unless they or a transaction they depend on has a conflicting transaction mined; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
+    expect(screen.getByText(other)).toBeTruthy()
+  })
+
+  it('gives no empty-scan hint when every transaction was left out this way', () => {
+    show(makeReport({ txs: 0, unavailable: [original] }))
+    expect(screen.getByText(/nothing else was left to analyze/i)).toBeTruthy()
+    expect(screen.queryByText(/no transactions found for this input/i)).toBeNull()
+  })
+
+  it('says nothing when the report predates the field', () => {
+    const report = makeReport({ txs: 2 })
+    delete report.stats.unavailable_txids
+    show(report)
+    expect(screen.queryByText(/does not have/i)).toBeNull()
+  })
+})
+
+describe('ReportScreen — coinbases from blocks no longer in the chain', () => {
+  const original = '515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb'
+  const other = 'a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab'
+  const show = (report) => render(<ReportScreen report={report} descriptor="wpkh(x/0/*)" kind="xpub" onReset={() => {}} />)
+
+  it('names one and says how it could come back', () => {
+    show(makeReport({ txs: 2, orphaned: [original] }))
+    expect(screen.getByText(/left out 1 transaction that is a coinbase from a block no longer in the chain\. it can only come back if a reorg restores that block; until then it is not part of the history the wallet sees\. stealth does not analyze it\./i)).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+  })
+
+  it('counts several', () => {
+    show(makeReport({ txs: 2, orphaned: [original, other] }))
+    expect(screen.getByText(/left out 2 transactions that are coinbases from blocks no longer in the chain\. they can only come back if a reorg restores those blocks; until then they are not part of the history the wallet sees\. stealth does not analyze them\./i)).toBeTruthy()
+  })
+
+  it('gives no empty-scan hint when every transaction was left out this way', () => {
+    show(makeReport({ txs: 0, orphaned: [original] }))
+    expect(screen.getByText(/nothing else was left to analyze/i)).toBeTruthy()
   })
 })

@@ -182,6 +182,34 @@ pub struct Stats {
     /// not serve; their counts cover only the pasted outputs.
     #[serde(default)]
     pub addresses_without_history: usize,
+    /// Wallet transactions left out because Core reports them as conflicted,
+    /// sorted by their displayed hex.
+    #[serde(default)]
+    pub conflicted_txids: Vec<Txid>,
+    /// Wallet transactions left out because a tx in the mempool, not confirmed
+    /// yet, conflicts with them, sorted by their displayed hex.
+    #[serde(default)]
+    pub mempool_conflicted_txids: Vec<MempoolConflict>,
+    /// Wallet transactions left out because they were abandoned in the
+    /// wallet, sorted by their displayed hex.
+    #[serde(default)]
+    pub abandoned_txids: Vec<Txid>,
+    /// Unconfirmed wallet transactions left out because the node does not
+    /// have them, sorted by their displayed hex.
+    #[serde(default)]
+    pub unavailable_txids: Vec<Txid>,
+    /// Coinbases left out because their block is no longer in the chain,
+    /// sorted by their displayed hex.
+    #[serde(default)]
+    pub orphaned_txids: Vec<Txid>,
+}
+
+/// A wallet transaction a tx in the mempool conflicts with. That tx may not be
+/// a wallet one, so the scan may not analyze it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MempoolConflict {
+    pub txid: Txid,
+    pub conflicts_with: Txid,
 }
 
 /// Summary of the scan results.
@@ -237,6 +265,11 @@ mod summary_tests {
             addresses_seen: 0,
             utxos_current: 0,
             addresses_without_history: 0,
+            conflicted_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         }
     }
 
@@ -252,6 +285,38 @@ mod summary_tests {
         let report = Report::new(stats(7), Vec::new(), Vec::new());
         assert!(report.summary.clean);
         assert!(!report.summary.analyzed_nothing);
+    }
+
+    #[test]
+    fn left_out_txids_go_out_as_hex_and_may_be_absent() {
+        let txid = "515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb";
+        let mut with = stats(2);
+        with.conflicted_txids = vec![txid.parse().unwrap()];
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["conflicted_txids"], serde_json::json!([txid]));
+
+        let older: Stats = serde_json::from_value(serde_json::json!({
+            "transactions_analyzed": 2, "addresses_seen": 0, "utxos_current": 0,
+        }))
+        .unwrap();
+        assert!(older.conflicted_txids.is_empty());
+        assert!(older.mempool_conflicted_txids.is_empty());
+        assert!(older.abandoned_txids.is_empty());
+        assert!(older.unavailable_txids.is_empty());
+        assert!(older.orphaned_txids.is_empty());
+
+        let other = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
+        with.mempool_conflicted_txids = vec![MempoolConflict {
+            txid: txid.parse().unwrap(),
+            conflicts_with: other.parse().unwrap(),
+        }];
+        with.abandoned_txids = vec![other.parse().unwrap()];
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(
+            json["mempool_conflicted_txids"],
+            serde_json::json!([{ "txid": txid, "conflicts_with": other }])
+        );
+        assert_eq!(json["abandoned_txids"], serde_json::json!([other]));
     }
 
     #[test]

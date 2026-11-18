@@ -320,6 +320,7 @@ impl<'a, G: BlockchainGateway + ?Sized> AnalysisEngine<'a, G> {
             internal_addresses,
             derived_addresses,
             ranged_addresses,
+            left_out: Default::default(),
         })
     }
 
@@ -393,6 +394,7 @@ pub(crate) fn merge_chain_history(
     history.internal_addresses.extend(full.internal_addresses);
     history.derived_addresses.extend(full.derived_addresses);
     history.ranged_addresses.extend(full.ranged_addresses);
+    history.left_out.extend(full.left_out);
     listed
 }
 

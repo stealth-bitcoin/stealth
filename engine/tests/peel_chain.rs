@@ -157,6 +157,7 @@ fn history(txs: Vec<DecodedTransaction>) -> WalletHistory {
         internal_addresses: HashSet::new(),
         derived_addresses,
         ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
     }
 }
 
@@ -590,6 +591,7 @@ fn a_very_long_chain_is_scanned_in_linear_time() {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([us]),
         ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
     };
     let graph = TxGraph::from_wallet_history(history);
     let started = std::time::Instant::now();
@@ -778,6 +780,7 @@ fn many_chains_merging_into_one_tail_are_one_finding() {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([us]),
         ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
     };
     let graph = TxGraph::from_wallet_history(history);
     let started = std::time::Instant::now();

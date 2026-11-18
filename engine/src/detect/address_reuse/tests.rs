@@ -128,6 +128,7 @@ fn reuse_correction_at(
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::new(),
         ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
     };
     let mut findings = Vec::new();
     TxGraph::from_wallet_history(history).detect_address_reuse(&mut findings);

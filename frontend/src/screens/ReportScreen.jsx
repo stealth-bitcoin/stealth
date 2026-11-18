@@ -130,9 +130,142 @@ function effectiveKind(kind, descriptor) {
   return kind
 }
 
+// Why a note's transactions were left out, for one and for several; a settled
+// one is out of the history for good, the others may still confirm.
+const LEFT_OUT = {
+  conflicted: {
+    settled: true,
+    one: 'Core reports as conflicted: it, or a transaction it depends on, conflicts with another one',
+    many: 'Core reports as conflicted: each, or a transaction it depends on, conflicts with another one',
+    beforeOne: 'it became conflicted',
+    beforeMany: 'they became conflicted',
+    // It may never have been broadcast.
+    ifBroadcast: true,
+    comesBackOne: 'It can only come back if a reorg removes the conflicting block',
+    comesBackMany: 'They can only come back if a reorg removes the block or blocks holding the conflicting transactions',
+  },
+  mempoolConflicted: {
+    settled: false,
+    one: 'that conflicts, or depends on one that conflicts, with a transaction in the mempool',
+    many: 'that conflict, or depend on ones that conflict, with transactions in the mempool',
+    beforeOne: 'the conflicting one reached the mempool',
+    beforeMany: 'the conflicting ones reached the mempool',
+    // A wallet tx may be double-spent before it was ever broadcast.
+    ifBroadcast: true,
+  },
+  // Several left out against one mempool tx.
+  mempoolConflictedWithOne: {
+    settled: false,
+    one: 'that conflicts, or depends on one that conflicts, with a transaction in the mempool',
+    many: 'that conflict, or depend on ones that conflict, with a transaction in the mempool',
+    beforeOne: 'the conflicting one reached the mempool',
+    beforeMany: 'the conflicting one reached the mempool',
+    ifBroadcast: true,
+  },
+  abandoned: {
+    settled: false,
+    // Core abandons the descendants of a coinbase a reorg removed.
+    one: 'that was abandoned in the wallet, by hand or by Core after a reorg removed a coinbase it depends on',
+    many: 'that were abandoned in the wallet, by hand or by Core after a reorg removed a coinbase they depend on',
+    beforeOne: 'it was abandoned',
+    beforeMany: 'they were abandoned',
+    ifBroadcast: true,
+    unlessOne: 'it depends on a coinbase a reorg removed',
+    unlessMany: 'they depend on a coinbase a reorg removed',
+  },
+  // A tx never broadcast was not seen, so this note says nothing about the network.
+  unavailable: {
+    settled: false,
+    one: 'that is unconfirmed and that this node does not have (it may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was)',
+    many: 'that are unconfirmed and that this node does not have (they may have been replaced or double-spent, expired or been evicted from the mempool, never been broadcast, or depend on a transaction that was)',
+    beforeOne: null,
+    beforeMany: null,
+    // What would stop it from confirming.
+    unlessOne: 'it or a transaction it depends on has a conflicting transaction mined',
+    unlessMany: 'they or a transaction they depend on has a conflicting transaction mined',
+  },
+  orphaned: {
+    settled: false,
+    one: 'that is a coinbase from a block no longer in the chain',
+    many: 'that are coinbases from blocks no longer in the chain',
+    beforeOne: null,
+    beforeMany: null,
+    // It cannot confirm as it stands; this is how it could come back.
+    comesBackOne: 'It can only come back if a reorg restores that block',
+    comesBackMany: 'They can only come back if a reorg restores those blocks',
+  },
+}
+
+// "may still confirm", with what would stop it when the reason says.
+function mayConfirm(reason, one) {
+  const unless = one ? reason.unlessOne : reason.unlessMany
+  return unless ? `may still confirm, unless ${unless}` : 'may still confirm'
+}
+
+// Whether the transactions are out for good, may still confirm, or could come back.
+function standing(reason, one) {
+  const part = one ? 'it is' : 'they are'
+  const comesBack = one ? reason.comesBackOne : reason.comesBackMany
+  if (reason.settled) {
+    return `, so ${part} not part of the wallet's history.${comesBack ? ` ${comesBack}.` : ''}`
+  }
+  if (comesBack) return `. ${comesBack}; until then ${part} not part of the history the wallet sees.`
+  return `. ${one ? 'It' : 'They'} ${mayConfirm(reason, one)}; until then ${part} not part of the history the wallet sees.`
+}
+
+// What the network may have seen, hedged when the tx may never have been broadcast.
+function seenBefore(reason, one) {
+  const before = one ? reason.beforeOne : reason.beforeMany
+  if (reason.ifBroadcast) {
+    const [it, was] = one ? ['it', 'was'] : ['they', 'were']
+    return `If ${it} ${was} broadcast, ${it} may have been seen by the network before ${before}; `
+  }
+  return `${one ? 'It' : 'They'} may still have been seen by the network before ${before}; `
+}
+
+function LeftOutNote({ items, reason }) {
+  if (items.length === 0) return null
+  const one = items.length === 1
+  return (
+    <div className={styles.scopeNote}>
+      <p className={styles.noteText}>
+        Left out {items.length} {one ? 'transaction' : 'transactions'}{' '}
+        {one ? reason.one : reason.many}
+        {standing(reason, one)}{' '}
+        {reason.beforeOne && seenBefore(reason, one)}
+        Stealth does not analyze {one ? 'it' : 'them'}.
+      </p>
+      <ul className={styles.txidList}>
+        {items.map((item) => (
+          <li key={item} className={styles.txid}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 export default function ReportScreen({ report, descriptor, kind: rawKind, onReset }) {
   const { stats, findings, warnings, summary } = report
   const kind = effectiveKind(rawKind, descriptor)
+  const conflicted = stats.conflicted_txids ?? []
+  const inMempoolConflict = (stats.mempool_conflicted_txids ?? []).map(
+    (r) => `${r.txid}: it, or a transaction it depends on, conflicts with ${r.conflicts_with}, which is in the mempool and not confirmed yet`,
+  )
+  // The conflicting side counts the mempool txs, not the txs left out.
+  const conflicting = new Set((stats.mempool_conflicted_txids ?? []).map((r) => r.conflicts_with))
+  const mempoolReason =
+    conflicting.size === 1 ? LEFT_OUT.mempoolConflictedWithOne : LEFT_OUT.mempoolConflicted
+  const abandoned = stats.abandoned_txids ?? []
+  const unavailable = stats.unavailable_txids ?? []
+  const orphaned = stats.orphaned_txids ?? []
+  const anyLeftOut =
+    conflicted.length +
+      inMempoolConflict.length +
+      abandoned.length +
+      unavailable.length +
+      orphaned.length >
+    0
+  const emptyScan = summary.analyzed_nothing && findings.length === 0 && warnings.length === 0
 
   return (
     <div className={styles.root}>
@@ -193,8 +326,20 @@ export default function ReportScreen({ report, descriptor, kind: rawKind, onRese
           </div>
         )}
 
-        {/* Nothing-analyzed banner */}
-        {summary.analyzed_nothing && findings.length === 0 && warnings.length === 0 && (
+        {/* Wallet transactions left out */}
+        <LeftOutNote items={conflicted} reason={LEFT_OUT.conflicted} />
+        <LeftOutNote items={inMempoolConflict} reason={mempoolReason} />
+        <LeftOutNote items={abandoned} reason={LEFT_OUT.abandoned} />
+        <LeftOutNote items={unavailable} reason={LEFT_OUT.unavailable} />
+        <LeftOutNote items={orphaned} reason={LEFT_OUT.orphaned} />
+
+        {/* Nothing-analyzed banner; the notes above already say why, when they are shown */}
+        {emptyScan && anyLeftOut && (
+          <div className={styles.emptyBanner}>
+            <strong>Nothing else was left to analyze.</strong>
+          </div>
+        )}
+        {emptyScan && !anyLeftOut && (
           <div className={styles.emptyBanner}>
             <strong>No transactions found for this input.</strong>
             <p className={styles.emptyHint}>{emptyHint(kind)}</p>

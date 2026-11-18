@@ -232,6 +232,11 @@ mod ordering {
             addresses_seen: 3,
             utxos_current: 1,
             addresses_without_history: 0,
+            conflicted_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         };
         stealth_engine::Report::new(stats, findings, warnings)
     }
@@ -266,6 +271,11 @@ mod ordering {
             addresses_seen: 1,
             utxos_current: 0,
             addresses_without_history: 0,
+            conflicted_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert_eq!(
@@ -293,6 +303,11 @@ mod ordering {
             addresses_seen: 2,
             utxos_current: 2,
             addresses_without_history: 2,
+            conflicted_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(
             stats,
@@ -316,6 +331,11 @@ mod ordering {
             addresses_seen: 1,
             utxos_current: 2,
             addresses_without_history: 1,
+            conflicted_txids: Vec::new(),
+            mempool_conflicted_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
         };
         let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
         assert!(text.contains("No privacy issues found."), "{text}");
@@ -323,6 +343,316 @@ mod ordering {
             text.contains("could not serve the chain history of 1 address;"),
             "{text}"
         );
+    }
+
+    const CONFLICTED: &str = "515ef5fdbfaebe7e5819b68a302739e92d7485517893b8fd3f7706e5496b2ccb";
+
+    #[test]
+    fn the_text_report_names_each_conflicted_tx_it_left_out() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.conflicted_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction Core reports as conflicted: it, or a transaction \
+                 it depends on, conflicts with another one, so it is not part of the wallet's \
+                 history. It can only come back if a reorg removes the conflicting block. If it \
+                 was broadcast, it may have been seen by the network before it became \
+                 conflicted; Stealth does not analyze it.\n  {CONFLICTED}\n"
+            )),
+            "{text}"
+        );
+        assert!(
+            position(&text, CONFLICTED) < position(&text, "No privacy issues found."),
+            "the note comes before the verdict:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_conflicted_note_counts_several() {
+        let other = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.conflicted_txids = vec![CONFLICTED.parse().unwrap(), other.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 2 transactions Core reports as conflicted: each, or a transaction \
+                 it depends on, conflicts with another one, so they are not part of the wallet's \
+                 history. They can only come back if a reorg removes the block or blocks holding the \
+                 conflicting transactions. If they were broadcast, they may have been seen by the network before they became \
+                 conflicted; Stealth does not analyze them.\n  {CONFLICTED}\n  {other}\n"
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_scan_whose_every_tx_was_conflicted_gives_no_empty_scan_hint() {
+        let stats = stealth_engine::types::Stats {
+            transactions_analyzed: 0,
+            addresses_seen: 1,
+            utxos_current: 0,
+            addresses_without_history: 0,
+            conflicted_txids: vec![CONFLICTED.parse().unwrap()],
+            mempool_conflicted_txids: Vec::new(),
+            abandoned_txids: Vec::new(),
+            unavailable_txids: Vec::new(),
+            orphaned_txids: Vec::new(),
+        };
+        let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
+        assert!(text.contains(CONFLICTED), "{text}");
+        assert!(
+            text.ends_with(&format!(
+                "  {CONFLICTED}\n\nNothing else was left to analyze.\n"
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("No transactions found"), "{text}");
+        assert!(!text.contains("unused address"), "{text}");
+    }
+
+    const REPLACEMENT: &str = "a179853216e3e6c3bee813fb7f16c5cf4b81a85e974ebd8a99f45ebd13add7ab";
+
+    fn replaced(txid: &str, by: &str) -> stealth_engine::types::MempoolConflict {
+        stealth_engine::types::MempoolConflict {
+            txid: txid.parse().unwrap(),
+            conflicts_with: by.parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn the_text_report_names_a_replaced_tx_and_its_replacement() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.mempool_conflicted_txids = vec![replaced(CONFLICTED, REPLACEMENT)];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction that conflicts, or depends on one that conflicts, with \
+                 a transaction in the mempool. It may still confirm; until then it is not part \
+                 of the history the wallet sees. If it was broadcast, it may have been seen by \
+                 the network before the conflicting one reached the mempool; Stealth does not \
+                 analyze it.\n  \
+                 {CONFLICTED}: it, or a transaction it depends on, conflicts with {REPLACEMENT}, \
+                 which is in the mempool and not confirmed yet\n"
+            )),
+            "{text}"
+        );
+        assert!(
+            position(&text, REPLACEMENT) < position(&text, "No privacy issues found."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_descendant_of_a_tx_in_conflict_with_the_mempool_is_not_said_to_conflict_itself() {
+        // A payment double-spent in the mempool, and a child spending its change.
+        let child = "f5561a23e573423aeb6d9200aaf74db3ac73c83fae52f5261520d28506dadcd9";
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.mempool_conflicted_txids = vec![
+            replaced(CONFLICTED, REPLACEMENT),
+            replaced(child, REPLACEMENT),
+        ];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "  {child}: it, or a transaction it depends on, conflicts with {REPLACEMENT}, \
+                 which is in the mempool and not confirmed yet\n"
+            )),
+            "{text}"
+        );
+        assert!(!text.contains(&format!("{child} conflicts with")), "{text}");
+    }
+
+    #[test]
+    fn the_replaced_note_counts_several() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.mempool_conflicted_txids = vec![
+            replaced(CONFLICTED, REPLACEMENT),
+            replaced(REPLACEMENT, CONFLICTED),
+        ];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(
+                "Left out 2 transactions that conflict, or depend on ones that conflict, with \
+                 transactions in the mempool. They may still confirm; until then they are not \
+                 part of the history the wallet sees. If they were broadcast, they may have been \
+                 seen by the network before the conflicting ones reached the mempool; Stealth \
+                 does not analyze them.\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn several_left_out_against_one_mempool_tx_name_it_in_the_singular() {
+        // A raw double spend and the child of the payment it replaced, or a double bump.
+        let child = "f5561a23e573423aeb6d9200aaf74db3ac73c83fae52f5261520d28506dadcd9";
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.mempool_conflicted_txids = vec![
+            replaced(CONFLICTED, REPLACEMENT),
+            replaced(child, REPLACEMENT),
+        ];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(
+                "Left out 2 transactions that conflict, or depend on ones that conflict, with \
+                 a transaction in the mempool. They may still confirm; until then they are not \
+                 part of the history the wallet sees. If they were broadcast, they may have been \
+                 seen by the network before the conflicting one reached the mempool; Stealth \
+                 does not analyze them.\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_text_report_names_abandoned_txs() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.abandoned_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction that was abandoned in the wallet, by hand or by Core \
+                 after a reorg removed a coinbase it depends on. It may still confirm, unless it \
+                 depends on a coinbase a reorg removed; until then it is not part of the history \
+                 the wallet sees. If it was broadcast, it \
+                 may have been seen by the network before it was abandoned; Stealth does not \
+                 analyze it.\n  {CONFLICTED}\n"
+            )),
+            "{text}"
+        );
+        clean
+            .stats
+            .abandoned_txids
+            .push(REPLACEMENT.parse().unwrap());
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 2 transactions that were abandoned in the wallet, by hand or by Core \
+                 after a reorg removed a coinbase they depend on. They may still confirm, unless \
+                 they depend on a coinbase a reorg removed; until then they are not part of the \
+                 history the wallet sees. If they \
+                 were broadcast, they may have been seen by the network before they were \
+                 abandoned; Stealth does not analyze them.\n  {CONFLICTED}\n  {REPLACEMENT}\n"
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_scan_whose_every_tx_was_replaced_or_abandoned_gives_no_empty_scan_hint() {
+        for (mempool_conflicted_txids, abandoned_txids) in [
+            (vec![replaced(CONFLICTED, REPLACEMENT)], Vec::new()),
+            (Vec::new(), vec![CONFLICTED.parse().unwrap()]),
+        ] {
+            let stats = stealth_engine::types::Stats {
+                transactions_analyzed: 0,
+                addresses_seen: 1,
+                utxos_current: 0,
+                addresses_without_history: 0,
+                conflicted_txids: Vec::new(),
+                mempool_conflicted_txids,
+                abandoned_txids,
+                unavailable_txids: Vec::new(),
+                orphaned_txids: Vec::new(),
+            };
+            let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
+            assert!(text.contains(CONFLICTED), "{text}");
+            assert!(
+                text.ends_with("\n\nNothing else was left to analyze.\n"),
+                "{text}"
+            );
+            assert!(!text.contains("No transactions found"), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_text_report_names_unconfirmed_txs_the_node_does_not_have() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.unavailable_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction that is unconfirmed and that this node does not have (it \
+                 may have been replaced or double-spent, expired or been evicted from the \
+                 mempool, never been broadcast, or depend on a transaction that was). It may \
+                 still confirm, unless it or a transaction it depends on has a conflicting \
+                 transaction mined; until then it is not part of the history the wallet sees. Stealth does not analyze it.\n  \
+                 {CONFLICTED}\n"
+            )),
+            "{text}"
+        );
+        clean
+            .stats
+            .unavailable_txids
+            .push(REPLACEMENT.parse().unwrap());
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 2 transactions that are unconfirmed and that this node does not have \
+                 (they may have been replaced or double-spent, expired or been evicted from the \
+                 mempool, never been broadcast, or depend on a transaction that was). They may \
+                 still confirm, unless they or a transaction they depend on has a conflicting \
+                 transaction mined; until then they are not part of the history the wallet sees. Stealth does not analyze them.\n  \
+                 {CONFLICTED}\n  {REPLACEMENT}\n"
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_text_report_names_orphaned_coinbases() {
+        let mut clean = report(Vec::new(), Vec::new());
+        clean.stats.orphaned_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&clean);
+        assert!(
+            text.contains(&format!(
+                "Left out 1 transaction that is a coinbase from a block no longer in the chain. \
+                 It can only come back if a reorg restores that block; until then it is not \
+                 part of the history the wallet sees. Stealth does not analyze it.\n  \
+                 {CONFLICTED}\n"
+            )),
+            "{text}"
+        );
+        clean
+            .stats
+            .orphaned_txids
+            .push(REPLACEMENT.parse().unwrap());
+        let text = text_report(&clean);
+        assert!(
+            text.contains(
+                "Left out 2 transactions that are coinbases from blocks no longer in the chain. \
+                 They can only come back if a reorg restores those blocks; until then they are \
+                 not part of the history the wallet sees. Stealth does not analyze them.\n"
+            ),
+            "{text}"
+        );
+        let mut empty = clean.stats.clone();
+        empty.transactions_analyzed = 0;
+        let text = text_report(&stealth_engine::Report::new(empty, Vec::new(), Vec::new()));
+        assert!(
+            text.ends_with("\n\nNothing else was left to analyze.\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_scan_whose_every_tx_was_unavailable_gives_no_empty_scan_hint() {
+        let mut stats = report(Vec::new(), Vec::new()).stats;
+        stats.transactions_analyzed = 0;
+        stats.unavailable_txids = vec![CONFLICTED.parse().unwrap()];
+        let text = text_report(&stealth_engine::Report::new(stats, Vec::new(), Vec::new()));
+        assert!(
+            text.ends_with("\n\nNothing else was left to analyze.\n"),
+            "{text}"
+        );
+        assert!(!text.contains("No transactions found"), "{text}");
+    }
+
+    #[test]
+    fn a_report_without_conflicted_txs_has_no_note() {
+        let text = text_report(&report(Vec::new(), Vec::new()));
+        assert!(!text.contains("conflicted"), "{text}");
     }
 
     #[test]

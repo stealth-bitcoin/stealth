@@ -88,6 +88,38 @@ pasted outputs plus that history, and runs the detectors. When the node cannot
 serve the history, the scan completes on the pasted outputs alone and
 `stats.addresses_without_history` says how many addresses that affected.
 
+**Transactions left out:** a scan leaves some wallet transactions out of the
+analysis and lists them in `stats`, as hex txids:
+`conflicted_txids` for those Core reports at negative confirmations (it, or a
+transaction it depends on, conflicts with another one; they can only come
+back if a reorg removes the conflicting block), `mempool_conflicted_txids`
+for unconfirmed ones a transaction in the mempool conflicts with, such as the
+original of a fee bump or a payment double-spent by a raw transaction (each an
+object with `txid` and `conflicts_with`; the conflicting transaction is
+analyzed only when the wallet lists it and the scan keeps it),
+`abandoned_txids` for those abandoned in the scan's own wallet,
+`orphaned_txids` for coinbases from a block no longer in the chain (they can
+only come back if a reorg restores that block; Core also marks them abandoned,
+but they are listed here instead), and `unavailable_txids` for unconfirmed ones the node does not have (replaced or
+double-spent, expired or evicted from the mempool, never broadcast, or
+depending on a transaction that was; such a one may still confirm, unless it or a
+transaction it depends on has a conflicting transaction mined). The abandoned list fills
+when someone abandons a transaction in Stealth's cache wallet, or when Core
+abandons the spend of a coinbase a reorg removed; one abandoned in the user's
+own wallet lands in `unavailable_txids`. A wallet transaction the
+node cannot serve still fails the scan when it is confirmed, or when the node
+answers with any error other than not found. `mempoolconflicts`,
+which `mempool_conflicted_txids` relies on, appeared in Bitcoin Core 28.0; on
+an older node an unmined fee bump's original lands in `unavailable_txids`. A
+scan that hits an unconfirmed transaction the node does not have while the
+node is still loading its mempool fails, asking to scan again later; otherwise
+those transactions are fetched once more and only what is still missing is
+listed. This adds a `getmempoolinfo` call, made only when an unconfirmed
+transaction is missing; a node that refuses it is treated as having loaded. A fresh scan wallet
+only sees the active chain and the mempool, so through this API the lists can
+be non-empty only for a scan with `cache_wallet`, whose wallet was watching
+when these transactions were in the mempool.
+
 #### Example (real descriptor from Bitcoin Core)
 
 ```bash

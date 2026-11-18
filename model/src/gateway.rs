@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, OutPoint, Txid};
@@ -258,6 +258,41 @@ pub struct WalletHistory {
     /// The subset of `derived_addresses` that came from ranged descriptors.
     #[serde(default, with = "serde_addr_set")]
     pub ranged_addresses: HashSet<Address<NetworkUnchecked>>,
+    /// Wallet transactions left out above, by why.
+    #[serde(default)]
+    pub left_out: LeftOut,
+}
+
+/// Wallet transactions kept out of the history, which the report names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftOut {
+    /// Core reports them as conflicted (negative confirmations): each, or a
+    /// tx it depends on, conflicts with another one.
+    #[serde(default)]
+    pub conflicted: BTreeSet<Txid>,
+    /// In conflict with a tx in the mempool, not confirmed yet, keyed to that tx.
+    #[serde(default)]
+    pub mempool_conflicted: BTreeMap<Txid, Txid>,
+    /// Abandoned in the wallet.
+    #[serde(default)]
+    pub abandoned: BTreeSet<Txid>,
+    /// Unconfirmed, unflagged, and no longer (or never) on the node: expired or
+    /// evicted from the mempool, abandoned in another wallet, or never broadcast.
+    #[serde(default)]
+    pub unavailable: BTreeSet<Txid>,
+    /// Coinbases from a block no longer in the chain.
+    #[serde(default)]
+    pub orphaned: BTreeSet<Txid>,
+}
+
+impl LeftOut {
+    pub fn extend(&mut self, other: LeftOut) {
+        self.conflicted.extend(other.conflicted);
+        self.mempool_conflicted.extend(other.mempool_conflicted);
+        self.abandoned.extend(other.abandoned);
+        self.unavailable.extend(other.unavailable);
+        self.orphaned.extend(other.orphaned);
+    }
 }
 
 /// A participant (input or output) in a transaction, enriched with

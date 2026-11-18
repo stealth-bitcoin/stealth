@@ -136,6 +136,7 @@ fn history(spend_vout1: bool) -> WalletHistory {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([own]),
         ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
     }
 }
 
@@ -263,6 +264,7 @@ fn attack_graph(chain_unspent: Option<bool>) -> TxGraph {
         internal_addresses: HashSet::new(),
         derived_addresses: HashSet::from([own]),
         ranged_addresses: HashSet::new(),
+        left_out: Default::default(),
     };
     let mut graph = TxGraph::from_wallet_history(history);
     if let Some(unspent) = chain_unspent {

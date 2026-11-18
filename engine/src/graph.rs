@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::{Address, Amount, Txid};
 
-use crate::gateway::{DecodedTransaction, WalletHistory, WalletTxCategory};
+use crate::gateway::{DecodedTransaction, LeftOut, WalletHistory, WalletTxCategory};
 use crate::types::{AddressInfo, InputInfo, OutputInfo, WalletTx};
 
 /// Indexed view of all transactions touching a wallet's address set.
@@ -46,6 +46,8 @@ pub struct TxGraph {
     /// The node's answer on whether an output is unspent, for own outputs
     /// whose status the history does not settle. Filled by the engine.
     pub chain_unspent: HashMap<(Txid, u32), bool>,
+    /// Wallet txs the gateway left out; the report names them.
+    pub left_out: LeftOut,
 }
 
 /// A UTXO entry from `listunspent`.
@@ -248,6 +250,7 @@ impl TxGraph {
             ranged_addrs: history.ranged_addresses,
             partial_scan: false,
             chain_unspent: HashMap::new(),
+            left_out: history.left_out,
         }
     }
 }

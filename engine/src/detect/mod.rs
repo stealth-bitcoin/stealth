@@ -70,11 +70,36 @@ impl TxGraph {
             });
         }
 
+        // In the order they are printed, which reverses the bytes a Txid sorts by.
+        let mut conflicted_txids: Vec<Txid> = self.left_out.conflicted.iter().copied().collect();
+        conflicted_txids.sort_by_cached_key(Txid::to_string);
+        let mut mempool_conflicted_txids: Vec<MempoolConflict> = self
+            .left_out
+            .mempool_conflicted
+            .iter()
+            .map(|(&txid, &conflicts_with)| MempoolConflict {
+                txid,
+                conflicts_with,
+            })
+            .collect();
+        mempool_conflicted_txids.sort_by_cached_key(|r| r.txid.to_string());
+        let mut abandoned_txids: Vec<Txid> = self.left_out.abandoned.iter().copied().collect();
+        abandoned_txids.sort_by_cached_key(Txid::to_string);
+        let mut unavailable_txids: Vec<Txid> = self.left_out.unavailable.iter().copied().collect();
+        unavailable_txids.sort_by_cached_key(Txid::to_string);
+        let mut orphaned_txids: Vec<Txid> = self.left_out.orphaned.iter().copied().collect();
+        orphaned_txids.sort_by_cached_key(Txid::to_string);
+
         let stats = Stats {
             transactions_analyzed: self.our_txids.len(),
             addresses_seen: self.addr_map.len(),
             utxos_current: self.utxos.len(),
             addresses_without_history: 0,
+            conflicted_txids,
+            mempool_conflicted_txids,
+            abandoned_txids,
+            unavailable_txids,
+            orphaned_txids,
         };
 
         Report::new(stats, findings, warnings)

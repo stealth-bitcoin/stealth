@@ -13,6 +13,7 @@ mod common;
 mod address_reuse;
 mod behavior;
 mod change;
+mod conflicted;
 mod dust;
 mod gateway;
 mod linkage;
