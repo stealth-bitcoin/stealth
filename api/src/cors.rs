@@ -138,45 +138,76 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
     } else {
         return Err(invalid("scheme must be http:// or https://"));
     };
+    let (host, port) = parse_authority(authority).map_err(|error| {
+        invalid(match error {
+            AuthorityError::PathOrQuery => "an origin has no path, query or trailing slash",
+            AuthorityError::ForbiddenCharacter => "host contains characters an origin cannot have",
+            AuthorityError::RewrittenCharacter => "host cannot contain '%' or '\\'; browsers rewrite them, so write the host as the browser shows it",
+            AuthorityError::Other(reason) => reason,
+        })
+    })?;
+    // Browsers leave the scheme's default port out of the Origin header.
+    let origin = match port {
+        Some(port) if port != default_port => format!("{scheme}://{host}:{port}"),
+        _ => format!("{scheme}://{host}"),
+    };
+    HeaderValue::from_str(&origin).map_err(|_| invalid("not a valid header value"))?;
+    Ok(origin)
+}
+
+/// Why an authority was refused; the caller words the character errors for its own input.
+pub(crate) enum AuthorityError {
+    PathOrQuery,
+    ForbiddenCharacter,
+    RewrittenCharacter,
+    Other(&'static str),
+}
+
+/// Splits `host[:port]` (already lowercased) into a canonical host and port.
+pub(crate) fn parse_authority(authority: &str) -> Result<(String, Option<u16>), AuthorityError> {
     if authority.is_empty() {
-        return Err(invalid("host is missing"));
+        return Err(AuthorityError::Other("host is missing"));
     }
     if authority.contains(['/', '?', '#']) {
-        return Err(invalid("an origin has no path, query or trailing slash"));
+        return Err(AuthorityError::PathOrQuery);
     }
     if authority.contains(['@', '<', '>', '^', '|'])
         || authority
             .chars()
             .any(|c| c.is_whitespace() || c.is_control())
     {
-        return Err(invalid("host contains characters an origin cannot have"));
+        return Err(AuthorityError::ForbiddenCharacter);
     }
     if !authority.starts_with('[') && authority.contains(['[', ']']) {
-        return Err(invalid(
+        return Err(AuthorityError::Other(
             "square brackets are only allowed around an IPv6 address",
         ));
     }
     if !authority.starts_with('[') && authority.contains(['%', '\\']) {
-        return Err(invalid(
-            "host cannot contain '%' or '\\'; browsers rewrite them, so write the host as the browser shows it",
-        ));
+        return Err(AuthorityError::RewrittenCharacter);
     }
     let (host, port) = match authority.strip_prefix('[') {
         Some(bracketed) => {
             let (address, after) = bracketed
                 .split_once(']')
-                .ok_or_else(|| invalid("unclosed IPv6 bracket"))?;
+                .ok_or(AuthorityError::Other("unclosed IPv6 bracket"))?;
             let address: Ipv6Addr = address
                 .parse()
-                .map_err(|_| invalid("brackets must hold an IPv6 address"))?;
+                .map_err(|_| AuthorityError::Other("brackets must hold an IPv6 address"))?;
             // Browsers print these in hex and Rust in dotted form, so matching them would be fragile.
             if address.to_ipv4_mapped().is_some() {
-                return Err(invalid("IPv4-mapped IPv6 addresses are not supported"));
+                return Err(AuthorityError::Other(
+                    "IPv4-mapped IPv6 addresses are not supported",
+                ));
             }
             let port = match after.strip_prefix(':') {
                 Some(port) => Some(port),
                 None if after.is_empty() => None,
-                None => return Err(invalid("unexpected text after the IPv6 address")),
+                None => {
+                    return Err(AuthorityError::Other(
+                        "unexpected text after the IPv6 address",
+                    ))
+                }
             };
             (format!("[{address}]"), port)
         }
@@ -186,29 +217,23 @@ fn parse_origin(raw: &str) -> Result<String, InvalidOrigin> {
         },
     };
     if host.is_empty() {
-        return Err(invalid("host is missing"));
+        return Err(AuthorityError::Other("host is missing"));
     }
     if !is_canonical_unless_ipv4(&host) {
-        return Err(invalid(
+        return Err(AuthorityError::Other(
             "an IPv4 address must be four decimal numbers from 0 to 255 without leading zeros",
         ));
     }
     let port = match port {
         Some("") => {
-            return Err(invalid(
+            return Err(AuthorityError::Other(
                 "empty port is not allowed; remove the trailing colon",
             ))
         }
-        Some(port) => {
-            Some(parse_port(port).ok_or_else(|| invalid("port must be a number from 0 to 65535"))?)
-        }
+        Some(port) => Some(parse_port(port).ok_or(AuthorityError::Other(
+            "port must be a number from 0 to 65535",
+        ))?),
         None => None,
     };
-    // Browsers leave the scheme's default port out of the Origin header.
-    let origin = match port {
-        Some(port) if port != default_port => format!("{scheme}://{host}:{port}"),
-        _ => format!("{scheme}://{host}"),
-    };
-    HeaderValue::from_str(&origin).map_err(|_| invalid("not a valid header value"))?;
-    Ok(origin)
+    Ok((host, port))
 }

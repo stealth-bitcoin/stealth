@@ -6,21 +6,23 @@ use std::time::Duration;
 
 use ini::Ini;
 use stealth_api::rpc::{self, RpcSettings};
-use stealth_api::{app_with_cors, AllowedOrigins};
+use stealth_api::{app_with_hosts, AllowedHosts, AllowedOrigins};
 use stealth_bitcoincore::BitcoinCoreRpc;
 use stealth_engine::gateway::BlockchainGateway;
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "\
-Usage: stealth-api [--allow-origin <origin>]...
+Usage: stealth-api [--allow-origin <origin>]... [--allow-host <host>]...
 
 Options:
   --allow-origin <origin>  Also allow this web origin (scheme://host[:port]); repeatable
+  --allow-host <host>      Also answer requests whose Host header is this host[:port]; repeatable
   -h, --help               Print this help
 
 Environment:
   STEALTH_API_BIND           Listen address (default 127.0.0.1:20899)
   STEALTH_API_ALLOW_ORIGINS  Extra web origins, comma-separated
+  STEALTH_API_ALLOW_HOSTS    Extra Host header values, comma-separated
   STEALTH_RPC_URL            bitcoind RPC endpoint (default: auto-detected)
   STEALTH_RPC_USER           RPC username (used only when both are set)
   STEALTH_RPC_PASS           RPC password (used only when both are set)
@@ -32,6 +34,8 @@ Without RPC credentials in the environment, the API reads ./bitcoin.conf and
 then looks for a cookie file under ~/.bitcoin.
 
 Loopback origins (localhost, 127.0.0.1, [::1]) are always allowed.
+Requests must name the API in their Host header: localhost, 127.0.0.1 or [::1]
+on the bound port, the bound address itself, or an added host; others get 403.
 ";
 
 fn main() -> ExitCode {
@@ -46,7 +50,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(origins) = read_allowed_origins()? else {
+    let Some((origins, hosts)) = read_allowed()? else {
         print!("{USAGE}");
         return Ok(());
     };
@@ -55,10 +59,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // constructed outside a Tokio runtime.
     let gateway: Arc<dyn BlockchainGateway + Send + Sync> = Arc::new(build_gateway()?);
     let bind_addr = read_bind_addr()?;
+    let hosts = hosts.bound_to(bind_addr).map_err(|error| {
+        format!("invalid --allow-host or STEALTH_API_ALLOW_HOSTS value: {error}")
+    })?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run_server(bind_addr, gateway.clone(), origins))?;
+    runtime.block_on(run_server(bind_addr, gateway.clone(), origins, hosts))?;
     // Keep one strong reference until after async serving ends so the blocking
     // client drops outside async context.
     drop(gateway);
@@ -69,16 +76,87 @@ async fn run_server(
     bind_addr: SocketAddr,
     gateway: Arc<dyn BlockchainGateway + Send + Sync>,
     origins: AllowedOrigins,
+    hosts: AllowedHosts,
 ) -> std::io::Result<()> {
     if !origins.extra().is_empty() {
         tracing::info!(extra = ?origins.extra(), "CORS allows loopback origins plus extra origins");
     }
-    let app = app_with_cors(Some(gateway), origins);
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    // Read back the address so a bind to port 0 checks Host against the real port.
+    let bind_addr = listener.local_addr()?;
+    match host_check_notice(bind_addr, hosts.extra()) {
+        Some(HostNotice::Warn(message)) => tracing::warn!(%bind_addr, "{message}"),
+        Some(HostNotice::Info(message)) => tracing::info!("{message}"),
+        None => {}
+    }
+    if let Some(message) = scoped_bind_warning(bind_addr) {
+        tracing::warn!("{message}");
+    }
+    for message in portless_host_warnings(bind_addr, &hosts) {
+        tracing::warn!("{message}");
+    }
+    let hosts = hosts.bound_to(bind_addr).map_err(std::io::Error::other)?;
+    let app = app_with_hosts(Some(gateway), origins, hosts);
 
     tracing::info!(%bind_addr, "stealth-api listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+enum HostNotice {
+    Warn(String),
+    Info(String),
+}
+
+fn host_check_notice(bind: SocketAddr, extra: &[String]) -> Option<HostNotice> {
+    let unspecified = bind.ip().to_canonical().is_unspecified();
+    if extra.is_empty() {
+        return unspecified.then(|| {
+            HostNotice::Warn(
+                "bound to every interface, but only loopback Host names are accepted; add --allow-host for the name clients use".to_owned(),
+            )
+        });
+    }
+    let accepted = if unspecified {
+        "loopback names"
+    } else {
+        "loopback names, the bound address"
+    };
+    Some(HostNotice::Info(format!(
+        "Host check accepts {accepted} and extra hosts {extra:?}"
+    )))
+}
+
+// A host added without a port only matches requests on port 80, which is right behind a proxy only.
+fn portless_host_warnings(bind: SocketAddr, hosts: &AllowedHosts) -> Vec<String> {
+    let port = bind.port();
+    if port == 80 {
+        return Vec::new();
+    }
+    let bound = AllowedHosts::for_bind(bind);
+    hosts
+        .added_without_port()
+        .iter()
+        .filter(|host| !bound.accepts(&format!("{host}:{port}")))
+        .map(|host| {
+            format!(
+                "--allow-host {host} has no port: clients reaching the API directly send {host}:{port}, so add that form too unless a proxy serves {host} on port 80 or 443"
+            )
+        })
+        .collect()
+}
+
+// Ipv6Addr has no zone, so the bound address is accepted in its unscoped form only.
+fn scoped_bind_warning(bind: SocketAddr) -> Option<String> {
+    match bind {
+        SocketAddr::V6(v6) if v6.scope_id() != 0 => Some(format!(
+            "bound to the scoped address {bind}: the Host check accepts it without its zone, as [{}]:{}, and a Host carrying a zone is refused",
+            v6.ip(),
+            v6.port()
+        )),
+        _ => None,
+    }
 }
 
 fn read_bind_addr() -> Result<SocketAddr, String> {
@@ -88,7 +166,7 @@ fn read_bind_addr() -> Result<SocketAddr, String> {
 }
 
 /// `None` when the user asked for `--help`.
-fn read_allowed_origins() -> Result<Option<AllowedOrigins>, String> {
+fn read_allowed() -> Result<Option<(AllowedOrigins, AllowedHosts)>, String> {
     let args = std::env::args_os()
         .skip(1)
         .map(|arg| {
@@ -99,26 +177,33 @@ fn read_allowed_origins() -> Result<Option<AllowedOrigins>, String> {
     if wants_help(&args) {
         return Ok(None);
     }
-    let env = std::env::var_os("STEALTH_API_ALLOW_ORIGINS")
-        .map(|raw| {
-            raw.into_string().map_err(|raw| {
-                format!(
-                    "STEALTH_API_ALLOW_ORIGINS is not valid UTF-8: {}",
-                    raw.to_string_lossy()
-                )
-            })
-        })
-        .transpose()?;
-    allowed_origins_from(args.into_iter(), env).map(Some)
+    let origins_env = read_env("STEALTH_API_ALLOW_ORIGINS")?;
+    let hosts_env = read_env("STEALTH_API_ALLOW_HOSTS")?;
+    allowed_from(args.into_iter(), origins_env, hosts_env).map(Some)
 }
 
-// A flag in the value position of --allow-origin is a missing value, not a request for help.
+fn read_env(name: &str) -> Result<Option<String>, String> {
+    std::env::var_os(name)
+        .map(|raw| {
+            raw.into_string()
+                .map_err(|raw| format!("{name} is not valid UTF-8: {}", raw.to_string_lossy()))
+        })
+        .transpose()
+}
+
+fn comma_separated(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+// A flag in the value position of --allow-origin or --allow-host is a missing value, not a request for help.
 fn wants_help(args: &[String]) -> bool {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => return true,
-            "--allow-origin" => {
+            "--allow-origin" | "--allow-host" => {
                 args.next();
             }
             _ => {}
@@ -127,37 +212,53 @@ fn wants_help(args: &[String]) -> bool {
     false
 }
 
-fn allowed_origins_from(
+fn allowed_from(
     mut args: impl Iterator<Item = String>,
-    env: Option<String>,
-) -> Result<AllowedOrigins, String> {
+    origins_env: Option<String>,
+    hosts_env: Option<String>,
+) -> Result<(AllowedOrigins, AllowedHosts), String> {
     let mut origins = AllowedOrigins::localhost();
-    if let Some(raw) = env {
-        let values = raw
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
+    if let Some(raw) = origins_env {
         origins = origins
-            .with_extra(values)
+            .with_extra(comma_separated(&raw))
             .map_err(|error| format!("invalid STEALTH_API_ALLOW_ORIGINS value: {error}"))?;
     }
+    let mut hosts = AllowedHosts::default();
+    if let Some(raw) = hosts_env {
+        hosts = hosts
+            .with_extra(comma_separated(&raw))
+            .map_err(|error| format!("invalid STEALTH_API_ALLOW_HOSTS value: {error}"))?;
+    }
 
-    let mut flagged = Vec::new();
+    let mut flagged_origins = Vec::new();
+    let mut flagged_hosts = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--allow-origin" {
             let value = args.next().filter(|value| !value.starts_with('-')).ok_or(
                 "--allow-origin needs a value, e.g. --allow-origin https://wallet.example.org",
             )?;
-            flagged.push(value);
+            flagged_origins.push(value);
         } else if let Some(value) = arg.strip_prefix("--allow-origin=") {
-            flagged.push(value.to_owned());
+            flagged_origins.push(value.to_owned());
+        } else if arg == "--allow-host" {
+            let value = args
+                .next()
+                .filter(|value| !value.starts_with('-'))
+                .ok_or("--allow-host needs a value, e.g. --allow-host stealth.lan:20899")?;
+            flagged_hosts.push(value);
+        } else if let Some(value) = arg.strip_prefix("--allow-host=") {
+            flagged_hosts.push(value.to_owned());
         } else {
             return Err(format!("unknown argument: {arg} (see --help)"));
         }
     }
-    origins
-        .with_extra(flagged)
-        .map_err(|error| format!("invalid --allow-origin value: {error}"))
+    let origins = origins
+        .with_extra(flagged_origins)
+        .map_err(|error| format!("invalid --allow-origin value: {error}"))?;
+    let hosts = hosts
+        .with_extra(flagged_hosts)
+        .map_err(|error| format!("invalid --allow-host value: {error}"))?;
+    Ok((origins, hosts))
 }
 
 fn build_gateway() -> Result<BitcoinCoreRpc, Box<dyn std::error::Error>> {
@@ -259,4 +360,124 @@ fn read_bitcoin_conf_credentials() -> Option<(String, String)> {
         .or_else(|| conf.section(Some("test")).and_then(try_section))
         .or_else(|| conf.section(Some("signet")).and_then(try_section))
         .or_else(|| conf.section(Some("main")).and_then(try_section))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn notice(bind: &str, extra: &[&str]) -> Option<HostNotice> {
+        let extra: Vec<String> = extra.iter().map(|host| (*host).to_owned()).collect();
+        host_check_notice(bind.parse().unwrap(), &extra)
+    }
+
+    #[test]
+    fn loopback_bind_without_extra_hosts_logs_nothing() {
+        assert_eq!(notice("127.0.0.1:20899", &[]), None);
+        assert_eq!(notice("[::1]:20899", &[]), None);
+    }
+
+    #[test]
+    fn specific_address_without_extra_hosts_logs_nothing() {
+        assert_eq!(notice("192.168.1.20:20899", &[]), None);
+    }
+
+    #[test]
+    fn every_interface_without_extra_hosts_warns() {
+        for bind in ["0.0.0.0:20899", "[::]:20899", "[::ffff:0.0.0.0]:20899"] {
+            let Some(HostNotice::Warn(message)) = notice(bind, &[]) else {
+                panic!("no warning for {bind}");
+            };
+            assert!(message.contains("only loopback"), "{message}");
+            assert!(message.contains("--allow-host"), "{message}");
+        }
+    }
+
+    #[test]
+    fn extra_hosts_are_listed_in_an_info_line() {
+        let Some(HostNotice::Info(message)) = notice("0.0.0.0:20899", &["stealth.lan"]) else {
+            panic!("no info line");
+        };
+        assert!(message.contains("loopback names"), "{message}");
+        assert!(!message.contains("bound address"), "{message}");
+        assert!(message.contains("stealth.lan"), "{message}");
+
+        let Some(HostNotice::Info(message)) = notice("192.168.1.20:20899", &["stealth.lan"]) else {
+            panic!("no info line");
+        };
+        assert!(message.contains("the bound address"), "{message}");
+        assert!(message.contains("stealth.lan"), "{message}");
+
+        let Some(HostNotice::Info(message)) = notice("[::ffff:0.0.0.0]:20899", &["stealth.lan"])
+        else {
+            panic!("no info line");
+        };
+        assert!(!message.contains("bound address"), "{message}");
+    }
+
+    fn portless_warnings(bind: &str, extra: &[&str]) -> Vec<String> {
+        let hosts = AllowedHosts::default().with_extra(extra).unwrap();
+        portless_host_warnings(bind.parse().unwrap(), &hosts)
+    }
+
+    #[test]
+    fn a_host_without_a_port_warns_when_the_api_is_not_on_port_80() {
+        let warnings = portless_warnings(
+            "0.0.0.0:20899",
+            &[
+                "stealth.lan",
+                "proxy.lan:80",
+                "other.lan:20899",
+                "[fd00::1]:8080",
+                "[fd00::2]",
+            ],
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("stealth.lan:20899"), "{}", warnings[0]);
+        assert!(warnings[0].contains("port 80 or 443"), "{}", warnings[0]);
+        assert!(warnings[1].contains("[fd00::2]:20899"), "{}", warnings[1]);
+    }
+
+    #[test]
+    fn bound_to_443_the_advised_form_is_one_startup_accepts() {
+        let warnings = portless_warnings("0.0.0.0:443", &["stealth.lan"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("stealth.lan:443"), "{}", warnings[0]);
+        assert!(AllowedHosts::default()
+            .with_extra(["stealth.lan:443"])
+            .and_then(|hosts| hosts.bound_to("0.0.0.0:443".parse().unwrap()))
+            .is_ok());
+    }
+
+    #[test]
+    fn a_host_without_a_port_is_fine_on_port_80() {
+        assert!(portless_warnings("0.0.0.0:80", &["stealth.lan"]).is_empty());
+    }
+
+    #[test]
+    fn hosts_the_bound_port_already_accepts_get_no_portless_warning() {
+        let warnings = portless_warnings(
+            "0.0.0.0:20899",
+            &["localhost", "127.0.0.1", "[::1]", "stealth.lan"],
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("stealth.lan:20899"), "{}", warnings[0]);
+
+        let warnings = portless_warnings("192.168.1.20:20899", &["192.168.1.20", "10.0.0.5"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("10.0.0.5:20899"), "{}", warnings[0]);
+    }
+
+    #[test]
+    fn a_scoped_link_local_bind_warns() {
+        let warning = scoped_bind_warning("[fe80::1%2]:20899".parse().unwrap())
+            .unwrap_or_else(|| panic!("no warning"));
+        assert!(warning.contains("[fe80::1%2]:20899"), "{warning}");
+        assert!(warning.contains("[fe80::1]:20899"), "{warning}");
+        assert!(warning.contains("without its zone"), "{warning}");
+        assert!(warning.contains("carrying a zone is refused"), "{warning}");
+        for bind in ["[fe80::1]:20899", "[::1]:20899", "127.0.0.1:20899"] {
+            assert_eq!(scoped_bind_warning(bind.parse().unwrap()), None, "{bind}");
+        }
+    }
 }

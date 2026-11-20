@@ -44,19 +44,70 @@ the page's own origin, so CORS does not apply. To allow another web origin, pass
 path; the API refuses to start on a malformed one. Hosts must be ASCII (use the
 punycode form of an internationalised name), IPv4 addresses must be four
 decimal numbers without leading zeros, and a default port such as `:443` is
-dropped to match what browsers send. `stealth-api --help` lists the flag and
+dropped to match what browsers send. `stealth-api --help` lists the flags and
 the environment variables; any other unknown argument stops startup.
 Added origins also get `Access-Control-Allow-Private-Network`, which some
 Chrome versions ask for before a public page may reach a loopback address.
 
-CORS only decides which web pages may read the API's responses. It does not
-stop DNS rebinding, where an attacker's domain resolves to `127.0.0.1` and the
-page becomes same-origin with the API; that needs a `Host` header check, which
-the API does not do yet.
-
 ```bash
 cargo run --bin stealth-api -- --allow-origin https://wallet.example.org
 ```
+
+### Host check
+
+CORS only decides which web pages may read the API's responses. It does not
+stop DNS rebinding, where an attacker's domain resolves to `127.0.0.1` and the
+page becomes same-origin with the API. So every request, preflights included,
+must name the API in its `Host` header; any other request gets
+`403 Host not allowed` before it reaches a route. Accepted are:
+
+- `localhost`, `127.0.0.1` and `[::1]` on the bound port (for example
+  `localhost:20899`), and the port may be left out when it is 80;
+- the bound address itself, such as `192.168.1.20:20899`, unless it is
+  `0.0.0.0` or `[::]` (an IPv4-mapped bind such as `[::ffff:192.168.1.20]` is
+  accepted in its IPv4 form, and `[::ffff:0.0.0.0]` counts as `0.0.0.0`);
+- each host added with `--allow-host` (repeatable) or `STEALTH_API_ALLOW_HOSTS`
+  (comma-separated).
+
+A request without a `Host` header, with a malformed one such as two ports or a
+port with leading zeros, or with a loopback name on another port, is refused. A request with more than one
+`Host` header gets `400 More than one Host header`, as RFC 9112 asks. When the
+request line carries a full URL (`GET http://localhost:20899/... HTTP/1.1`),
+its host is checked instead of the `Host` header, since the RFC says it takes
+precedence; an `https://` URL without a port means port 443.
+
+Added hosts are written `host` or `host:port`, one per `--allow-host`, where
+the host is a name of letters, digits, `-` and `.`, an IPv4 address or a
+bracketed IPv6 address, and the port has no leading zeros; anything else
+stops startup. They are matched exactly,
+ignoring case, except that `:80` and no port count as the same, since clients
+leave port 80 out. An explicit `:443` is refused at startup unless the API
+itself listens on 443, since a client behind an HTTPS proxy leaves that port
+out too: write `stealth.lan`, not `stealth.lan:443`. A host written without a
+port also matches an `https://` URL without a port; one written with `:80`
+does not. Write hosts the way clients send them: `stealth.lan:20899` when
+clients connect to that port directly, or `stealth.lan` alone behind a reverse
+proxy on port 80 or 443 that passes the original `Host` through. When the API
+itself is not on port 80, a host written without a port gets a startup
+warning, since clients reaching the API directly send the port too, unless the
+bound port already accepts that name, as it does for `localhost`.
+
+Binding to `0.0.0.0` or `[::]` does not open the API to other names: only the
+loopback names and the added hosts pass, and the API logs a warning when none
+are added. Bound to one address, that address passes too, so no warning is
+logged. For a scoped link-local bind such as `[fe80::1%2]:20899`, the bound
+address is accepted without its zone (`[fe80::1]:20899`), and a `Host` that
+carries a zone (`[fe80::1%252]:20899`) is refused; the API logs a warning
+saying so. To reach an API bound to every interface from another machine, add
+the name or address that machine uses:
+
+```bash
+STEALTH_API_BIND=0.0.0.0:20899 cargo run --bin stealth-api -- --allow-host 192.168.1.20:20899
+```
+
+The frontend needs nothing: the Vite proxy rewrites `Host` to its target,
+`localhost:20899`. A proxy that keeps the browser's `Host`, such as
+`localhost:5173`, needs that value added.
 
 If you see `Connection refused (os error 111)`, either:
 1. an old `stealth-api` process is still running, or
@@ -149,6 +200,7 @@ curl 'http://localhost:20899/api/wallet/scan' \
 |----------|-------------|
 | `STEALTH_API_BIND` | Listen address (default `127.0.0.1:20899`) |
 | `STEALTH_API_ALLOW_ORIGINS` | Extra web origins allowed by CORS, comma-separated (loopback origins are always allowed; same as repeating `--allow-origin`) |
+| `STEALTH_API_ALLOW_HOSTS` | Extra `Host` header values the API answers to, comma-separated (loopback names on the bound port are always accepted; same as repeating `--allow-host`) |
 | `STEALTH_RPC_URL` | bitcoind RPC endpoint (overrides auto-detection) |
 | `STEALTH_RPC_USER` | RPC username (otherwise read from `bitcoin.conf` when available) |
 | `STEALTH_RPC_PASS` | RPC password (otherwise read from `bitcoin.conf` when available) |

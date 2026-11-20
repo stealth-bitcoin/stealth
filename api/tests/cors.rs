@@ -397,3 +397,22 @@ fn wildcard_origins_are_refused_as_unsupported() {
         );
     }
 }
+
+#[test]
+fn origin_with_a_path_is_refused_in_origin_terms() {
+    for raw in [
+        "https://wallet.example.org/",
+        "https://wallet.example.org/app",
+    ] {
+        let error = stealth_api::AllowedOrigins::localhost()
+            .with_extra([raw])
+            .err()
+            .unwrap_or_else(|| panic!("{raw:?} was accepted"));
+        assert!(
+            error
+                .to_string()
+                .contains("an origin has no path, query or trailing slash"),
+            "error for {raw:?}: {error}"
+        );
+    }
+}
