@@ -33,6 +33,21 @@ txindex=1
 blockfilterindex=1
 ```
 
+Loading a large wallet history makes `bitcoind` grow its memory, and it does
+not give that memory back when Stealth unloads the scan wallet. On a node you
+use for scanning, Bitcoin Core's own
+[doc/reduce-memory.md](https://github.com/bitcoin/bitcoin/blob/master/doc/reduce-memory.md)
+advises starting `bitcoind` with `MALLOC_ARENA_MAX=1` on Linux, since glibc's
+`malloc` may use more than one arena, which "is known to cause excessive memory
+usage in some scenarios". A smaller `dbcache` (for example `dbcache=300`,
+once the node has finished syncing; the same document notes a lower value
+mostly slows the initial sync) shrinks the UTXO set cache, not the wallet's
+own use; it leaves the machine more memory for the wallet load:
+
+```bash
+MALLOC_ARENA_MAX=1 bitcoind -dbcache=300
+```
+
 ## 2. Get your wallet's public key
 
 Most wallets export an **extended public key** (xpub, or the SLIP-132 variants
@@ -80,6 +95,38 @@ is no wallet birth date to guess.
   stealth-cli scan --descriptor '<your xpub or descriptor>' \
     --rpc-url http://127.0.0.1:8332 --format text
   ```
+
+### Large histories
+
+After the rescan, Stealth counts the transactions in the scan wallet before
+it loads any of them. Above 5,000 it stops and says how many there are, since
+loading them can take long and put a heavy load on the node:
+
+- **CLI:** in a terminal (stdin and stderr both, not a background job, and
+  Ctrl-C not ignored) it asks whether to go on. Ctrl-C there counts as no:
+  the scan unloads its wallet, prints the count and the hint and ends by
+  SIGINT, so an enclosing shell loop stops. If the terminal closes while the
+  question waits (SIGHUP), the process ends with its wallet still loaded:
+  `_stealth_scan_<...>`, or `_stealth_cache_<hash>` with `--cache-wallet`.
+  Unload it by hand with `bitcoin-cli unloadwallet <name>` (see
+  `bitcoin-cli listwallets`). Elsewhere it stops with an error; scan again
+  with `--no-limits`, or with `--max-txs` set to at least the count, higher
+  if the history may grow.
+- **Frontend:** the scan screen shows the count with "Scan anyway" and
+  "Cancel".
+- **API:** the job fails with `limit_exceeded` set; send the scan again with
+  `no_limits` or `max_txs` (see [api/README.md](../api/README.md)).
+
+"Scan anyway" in the frontend, or sending the scan again through the API, runs
+the whole rescan again unless the scan uses a cache wallet (which is loaded
+again with only the catch-up rescan), so on a heavy history the rescan time
+is paid twice. The CLI question avoids that: it asks in the middle of the
+scan and goes on from where it stopped. UTXO mode counts
+the history of the pasted outputs' addresses the same way. The count comes
+from `getwalletinfo`; an RPC user restricted with `rpcwhitelist` needs it
+allowed, or the limit is not checked. With a cache wallet, a repeat scan loads
+the existing cache wallet into `bitcoind` before the count, so its history is
+already in the node's memory when the limit is checked.
 
 ## 4. Fast, specific checks: UTXO mode
 

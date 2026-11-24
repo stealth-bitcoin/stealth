@@ -6,7 +6,15 @@ use axum::{
 use serde::Serialize;
 use thiserror::Error;
 
-use stealth_engine::error::AnalysisError;
+use stealth_engine::error::{AnalysisError, HistoryOf};
+
+/// Whose history a stop at the limit counted, as the API names it.
+pub(crate) fn history_of_name(of: HistoryOf) -> &'static str {
+    match of {
+        HistoryOf::Wallet => "wallet",
+        HistoryOf::PastedAddresses => "pasted_addresses",
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -39,6 +47,9 @@ impl ApiError {
             | Self::Analysis(AnalysisError::DescriptorNormalization { .. }) => {
                 StatusCode::BAD_REQUEST
             }
+            Self::Analysis(AnalysisError::HistoryTooLarge { .. }) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             Self::Analysis(AnalysisError::EnvironmentUnavailable(_))
             | Self::Analysis(AnalysisError::TransactionNotFound(_))
             | Self::Analysis(AnalysisError::HistoryUnavailable(_))
@@ -53,6 +64,7 @@ impl ApiError {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::NotFound(_) => "not_found",
+            Self::Analysis(AnalysisError::HistoryTooLarge { .. }) => "history_too_large",
             Self::Analysis(_) => "scan_failed",
             Self::ScannerNotConfigured => "scanner_not_configured",
             Self::Internal(_) => "internal_error",
@@ -65,8 +77,22 @@ impl IntoResponse for ApiError {
         let status = self.status_code();
         let message = self.to_string();
         let code = self.error_code();
+        let (of, tx_count, limit) = match self {
+            Self::Analysis(AnalysisError::HistoryTooLarge {
+                of,
+                tx_count,
+                limit,
+            }) => (Some(history_of_name(of)), Some(tx_count), Some(limit)),
+            _ => (None, None, None),
+        };
         let body = Json(ErrorResponse {
-            error: ErrorDetails { code, message },
+            error: ErrorDetails {
+                code,
+                message,
+                of,
+                tx_count,
+                limit,
+            },
         });
         (status, body).into_response()
     }
@@ -81,6 +107,13 @@ struct ErrorResponse {
 struct ErrorDetails {
     code: &'static str,
     message: String,
+    /// Set for `history_too_large`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    of: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
 }
 
 #[cfg(test)]

@@ -94,4 +94,63 @@ describe('LoadingScreen', () => {
   it('tolerates a null text prop', () => {
     expect(() => render(<LoadingScreen text={null} kind="descriptor" />)).not.toThrow()
   })
+
+  describe('when the history is above the limit', () => {
+    const LIMIT = { of: 'wallet', tx_count: 12345, limit: 5000 }
+
+    it("names the scan's history for a descriptor or address scan, not a wallet", () => {
+      render(<LoadingScreen limitExceeded={LIMIT} />)
+      const text = screen.getByRole('alertdialog').textContent
+      expect(text).toMatch(/This scan has a large history/)
+      expect(text).toMatch(/This scan's history holds 12,345 transactions/)
+      expect(text).not.toMatch(/wallet/i)
+    })
+
+    it("names the pasted outputs' addresses for a UTXO scan", () => {
+      render(<LoadingScreen limitExceeded={{ ...LIMIT, of: 'pasted_addresses' }} />)
+      const text = screen.getByRole('alertdialog').textContent
+      expect(text).toMatch(/The pasted outputs' addresses have a large history/)
+      expect(text).toMatch(/Their history holds 12,345 transactions/)
+      expect(text).not.toMatch(/wallet/i)
+    })
+
+    it('shows the count, the limit and what loading them costs instead of the progress', () => {
+      render(<LoadingScreen state="failed" limitExceeded={LIMIT} />)
+      const text = screen.getByRole('alertdialog').textContent
+      expect(text).toMatch(/12,345 transactions/)
+      expect(text).toMatch(/limit of 5,000/)
+      expect(text).toMatch(/take long/i)
+      expect(text).toMatch(/load on your node/i)
+      expect(screen.queryByRole('progressbar')).toBeNull()
+      expect(screen.queryByText(/starting scan/i)).toBeNull()
+    })
+
+    it('stops the scanner rings while it waits for an answer', () => {
+      const rings = (container) => container.querySelectorAll('[class*="ring"]').length
+      const { container, unmount } = render(<LoadingScreen state="rescanning" />)
+      expect(rings(container)).toBe(3)
+      unmount()
+      const waiting = render(<LoadingScreen limitExceeded={LIMIT} />)
+      expect(rings(waiting.container)).toBe(0)
+    })
+
+    it('scans anyway or cancels', () => {
+      const onScanAnyway = vi.fn()
+      const onDismiss = vi.fn()
+      const onCancel = vi.fn()
+      render(
+        <LoadingScreen
+          limitExceeded={LIMIT}
+          onScanAnyway={onScanAnyway}
+          onDismiss={onDismiss}
+          onCancel={onCancel}
+        />,
+      )
+      fireEvent.click(screen.getByRole('button', { name: /scan anyway/i }))
+      expect(onScanAnyway).toHaveBeenCalledTimes(1)
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+      expect(onCancel).not.toHaveBeenCalled()
+    })
+  })
 })

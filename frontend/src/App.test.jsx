@@ -172,6 +172,59 @@ describe('App scan flow', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('sends a cancel clicked before the scan id arrived once it does', async () => {
+    let resolveStart
+    startScan.mockReturnValue(new Promise((resolve) => { resolveStart = resolve }))
+    cancelScan.mockResolvedValue()
+    render(<App />)
+    await submitScan()
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await act(async () => {})
+    expect(cancelScan).not.toHaveBeenCalled()
+
+    await act(async () => resolveStart('scan-1'))
+    expect(cancelScan).toHaveBeenCalledWith('scan-1')
+    expect(screen.getByPlaceholderText(/paste a descriptor/i)).toBeTruthy()
+    await tick(3000)
+    expect(getScan).not.toHaveBeenCalled()
+  })
+
+  it('sends a cancel clicked after the id arrived but before the screen re-rendered', async () => {
+    let resolveStart
+    startScan.mockReturnValue(new Promise((resolve) => { resolveStart = resolve }))
+    cancelScan.mockResolvedValue()
+    render(<App />)
+    await submitScan()
+    const cancel = screen.getByRole('button', { name: /^cancel$/i })
+
+    // The id lands outside act, so the click still runs the handler of the render before it.
+    resolveStart('scan-1')
+    // One microtask runs the code after startScan; React re-renders a microtask later.
+    await Promise.resolve()
+    // A plain DOM click, not wrapped in act, so no pending render is flushed first.
+    cancel.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await act(async () => {})
+    expect(cancelScan).toHaveBeenCalledWith('scan-1')
+  })
+
+  it('keeps following the scan when the early cancel cannot be sent', async () => {
+    let resolveStart
+    startScan.mockReturnValue(new Promise((resolve) => { resolveStart = resolve }))
+    cancelScan.mockRejectedValue(new Error('HTTP 500'))
+    render(<App />)
+    await submitScan()
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await act(async () => {})
+
+    await act(async () => resolveStart('scan-1'))
+    expect(screen.getByRole('button', { name: /^cancel$/i }).disabled).toBe(false)
+    queueJobs(job('done', { report: REPORT }))
+    await tick()
+    expect(getScan).toHaveBeenCalledWith('scan-1')
+    expect(screen.getByText(/no privacy issues found/i)).toBeTruthy()
+  })
+
   it('stops polling when unmounted', async () => {
     queueJobs(job('rescanning'))
     const { unmount } = render(<App />)
@@ -181,5 +234,123 @@ describe('App scan flow', () => {
     unmount()
     await tick(3000)
     expect(getScan).toHaveBeenCalledTimes(1)
+  })
+
+  describe('a history above the limit', () => {
+    const tooLarge = () =>
+      job('failed', {
+        error: "analysis failed: this scan's history holds 12345 transactions",
+        limit_exceeded: { tx_count: 12345, limit: 5000 },
+      })
+
+    it('asks before loading it instead of failing the scan', async () => {
+      queueJobs(tooLarge())
+      render(<App />)
+      await submitScan()
+      await tick()
+      expect(screen.getByRole('alertdialog').textContent).toMatch(/12,345 transactions/)
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.queryByPlaceholderText(/paste a descriptor/i)).toBeNull()
+      await tick(3000)
+      expect(getScan).toHaveBeenCalledTimes(1)
+    })
+
+    it('sends the scan again with the limit lifted when told to scan anyway', async () => {
+      queueJobs(tooLarge())
+      render(<App />)
+      await submitScan()
+      await tick()
+
+      startScan.mockResolvedValue('scan-2')
+      fireEvent.click(screen.getByRole('button', { name: /scan anyway/i }))
+      await act(async () => {})
+      expect(startScan).toHaveBeenLastCalledWith({ descriptor: DESC, no_limits: true })
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+
+      queueJobs(job('done', { report: REPORT }))
+      await tick()
+      expect(getScan).toHaveBeenLastCalledWith('scan-2')
+      expect(screen.getByText(/no privacy issues found/i)).toBeTruthy()
+    })
+
+    it('honours a cancel sent before the poll saw the stop', async () => {
+      queueJobs(job('rescanning'))
+      cancelScan.mockResolvedValue()
+      render(<App />)
+      await submitScan()
+      await tick()
+
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      await act(async () => {})
+      queueJobs(tooLarge())
+      await tick()
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(screen.getByPlaceholderText(/paste a descriptor/i)).toBeTruthy()
+      expect(screen.queryByRole('alert')).toBeNull()
+    })
+
+    it('forgets a cancel sent for an earlier scan', async () => {
+      queueJobs(job('rescanning'))
+      cancelScan.mockResolvedValue()
+      render(<App />)
+      await submitScan()
+      await tick()
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      await act(async () => {})
+      queueJobs(job('cancelled'))
+      await tick()
+      expect(screen.getByPlaceholderText(/paste a descriptor/i)).toBeTruthy()
+
+      startScan.mockResolvedValue('scan-2')
+      queueJobs(tooLarge())
+      await submitScan()
+      await tick()
+      expect(screen.getByRole('alertdialog').textContent).toMatch(/12,345 transactions/)
+    })
+
+    it('shows the confirm step when the cancel request failed', async () => {
+      queueJobs(job('rescanning'))
+      cancelScan.mockRejectedValue(new Error('HTTP 500'))
+      render(<App />)
+      await submitScan()
+      await tick()
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      await act(async () => {})
+
+      queueJobs(tooLarge())
+      await tick()
+      expect(screen.getByRole('alertdialog').textContent).toMatch(/12,345 transactions/)
+    })
+
+    it('lets the scan sent again from the confirm step be cancelled', async () => {
+      queueJobs(tooLarge())
+      cancelScan.mockResolvedValue()
+      render(<App />)
+      await submitScan()
+      await tick()
+
+      startScan.mockResolvedValue('scan-2')
+      fireEvent.click(screen.getByRole('button', { name: /scan anyway/i }))
+      await act(async () => {})
+      const cancel = screen.getByRole('button', { name: /^cancel$/i })
+      expect(cancel.disabled).toBe(false)
+      fireEvent.click(cancel)
+      await act(async () => {})
+      expect(cancelScan).toHaveBeenCalledWith('scan-2')
+    })
+
+    it('goes back to the input without sending anything when cancelled', async () => {
+      queueJobs(tooLarge())
+      render(<App />)
+      await submitScan()
+      await tick()
+
+      fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+      await act(async () => {})
+      expect(screen.getByPlaceholderText(/paste a descriptor/i)).toBeTruthy()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(startScan).toHaveBeenCalledTimes(1)
+      expect(cancelScan).not.toHaveBeenCalled()
+    })
   })
 })

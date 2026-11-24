@@ -27,8 +27,37 @@ pub enum AnalysisError {
         if detail.is_empty() { String::new() } else { format!(": {detail}") }
     )]
     RpcForbidden { method: String, detail: String },
+    /// The scan stopped before loading a history above its limit.
+    #[error(
+        "{of} holds {tx_count} transactions, more than the limit of {limit}; \
+         loading it can take long and put a heavy load on the node"
+    )]
+    HistoryTooLarge {
+        of: HistoryOf,
+        tx_count: u64,
+        limit: u64,
+    },
     #[error("analysis execution failed: {0}")]
     Execution(String),
+}
+
+/// Whose history a scan counted against its limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HistoryOf {
+    /// The scanned descriptors' (an xpub's, an address's) own history.
+    #[default]
+    Wallet,
+    /// The addresses of the outputs a UTXO scan was given.
+    PastedAddresses,
+}
+
+impl std::fmt::Display for HistoryOf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Wallet => "this scan's history",
+            Self::PastedAddresses => "the history of the pasted outputs' addresses",
+        })
+    }
 }
 
 const PRIVATE_KEY_PREFIXES: [&str; 10] = [

@@ -16,6 +16,7 @@ mod change;
 mod conflicted;
 mod dust;
 mod gateway;
+mod history_limit;
 mod linkage;
 mod origins;
 mod progress;

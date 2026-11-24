@@ -125,6 +125,8 @@ Accepts one mutually-exclusive source:
 | `descriptors` | `string[]` | Multiple descriptors |
 | `utxos` | `UtxoInput[]` | Raw UTXO set |
 | `cache_wallet` | `bool` | Optional, default `false`. Keep a watch-only wallet named after the descriptors on the node so repeat scans only pay Core's incremental catch-up. The viewing key stays in the node's wallet directory until removed by hand. |
+| `max_txs` | `number` | Optional, default `5000`. The most transactions the scan loads: of this scan's history, or for a `utxos` body of the history of the pasted outputs' addresses; see below. |
+| `no_limits` | `bool` | Optional, default `false`. Lifts `max_txs`. Cannot be combined with it. |
 
 **Descriptor scan flow:** creates a blank watch-only wallet, imports the
 descriptor(s) with a full blockchain rescan, builds a `TxGraph`, runs all
@@ -171,6 +173,55 @@ only sees the active chain and the mempool, so through this API the lists can
 be non-empty only for a scan with `cache_wallet`, whose wallet was watching
 when these transactions were in the mempool.
 
+**History limit:** after the rescan, the scan reads the scan wallet's
+transaction count (`getwalletinfo`) before it loads any of the history, since
+loading a large one makes `bitcoind` grow its memory and keep it. Above
+`max_txs` the scan stops, unloads the scan wallet (a cache wallet stays on
+disk, complete, for the next scan) and fails with the count and the limit. A
+UTXO scan counts the history of the pasted outputs' addresses, which it loads
+in one wallet, the same way, and its message names "the history of the
+pasted outputs' addresses" instead of "this scan's history". An RPC user the
+node refuses `getwalletinfo` (`rpcwhitelist`) gets no count, so its scans go
+on unchecked and the gateway warns once on stderr; allow `getwalletinfo` to
+have the limit checked. With `cache_wallet`, a repeat scan loads the existing
+cache wallet into `bitcoind` before the count, so its history is already in
+the node's memory when the limit is checked. To go on, send the same scan again with
+`no_limits: true`, or with `max_txs` set to at least the count, higher if the
+history may grow before the scan reaches it. Without `cache_wallet` the whole
+rescan runs again, so on a heavy history the scan pays the rescan time twice;
+with it, the cache wallet left on disk is loaded with only the catch-up
+rescan. The CLI avoids the second rescan by asking in the middle of the scan.
+
+`POST /api/wallet/scan` answers `422`. axum also answers `422`, as plain
+text, to a body whose field has the wrong type, so tell the two apart by
+`error.code == "history_too_large"`, not by the status alone:
+
+```json
+{
+  "error": {
+    "code": "history_too_large",
+    "message": "analysis failed: this scan's history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
+    "of": "wallet",
+    "tx_count": 12345,
+    "limit": 5000
+  }
+}
+```
+
+A job from `POST /api/wallet/scans` (same body) ends as `failed`, with
+`limit_exceeded` set (it is `null` on every other status). In both, `of` is
+`wallet` for a descriptor scan and `pasted_addresses` for a UTXO scan:
+
+```json
+{
+  "state": "failed",
+  "progress": null,
+  "report": null,
+  "error": "analysis failed: this scan's history holds 12345 transactions, more than the limit of 5000; loading it can take long and put a heavy load on the node",
+  "limit_exceeded": { "of": "wallet", "tx_count": 12345, "limit": 5000 }
+}
+```
+
 #### Example (real descriptor from Bitcoin Core)
 
 ```bash
@@ -192,6 +243,7 @@ curl 'http://localhost:20899/api/wallet/scan' \
 |--------|---------|
 | `200` | Scan completed — body is a `Report` |
 | `400` | Invalid input (bad descriptor shape, empty UTXOs, …) |
+| `422` | This scan's history, or for a `utxos` body the history of the pasted outputs' addresses, is above `max_txs`, when `error.code` is `history_too_large`; a plain-text `422` is a body field of the wrong type |
 | `502` | bitcoind RPC unavailable/auth failed/connection failed |
 
 ## Environment variables

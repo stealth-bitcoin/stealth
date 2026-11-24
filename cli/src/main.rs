@@ -1,9 +1,16 @@
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::{env, fs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::{env, fs, thread};
 
 use stealth_bitcoincore::{read_cookie_file, BitcoinCoreRpc, RpcAuth};
-use stealth_engine::engine::{AnalysisEngine, EngineSettings, ScanTarget, UtxoInput};
+use stealth_engine::engine::{
+    AnalysisEngine, AskToGoOn, EngineSettings, HistoryLimit, ScanTarget, UtxoInput,
+    DEFAULT_MAX_WALLET_TXS,
+};
+use stealth_engine::error::{AnalysisError, HistoryOf};
 use stealth_engine::types::{Finding, Summary};
 
 fn main() -> ExitCode {
@@ -42,8 +49,44 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     let gateway = opts.build_gateway()?;
     let target = opts.scan_target()?;
 
-    let engine = AnalysisEngine::new(&gateway, opts.engine_settings()?);
-    let report = engine.analyze(target).map_err(|e| e.to_string())?;
+    // Ctrl-C at the question answers no; an inherited SIG_IGN stays and means no question.
+    let interrupts = Arc::new(Interrupts::default());
+    let handler = Arc::clone(&interrupts);
+    let interruptible = install_interrupt_handler(sigint_ignored(), move || {
+        ctrlc::set_handler(move || {
+            if handler.interrupt() {
+                die_by_interrupt();
+            }
+        })
+        .is_ok()
+    });
+
+    let ask = should_ask(
+        io::stdin().is_terminal(),
+        io::stderr().is_terminal(),
+        interruptible,
+    )
+    .then(|| {
+        terminal_ask(
+            || io::stdin().lock(),
+            io::stderr,
+            Arc::clone(&interrupts),
+            in_the_foreground,
+            discard_typed_ahead,
+        )
+    });
+    let mut settings = opts.engine_settings()?;
+    settings.history_limit = opts.history_limit(ask);
+    let engine = AnalysisEngine::new(&gateway, settings);
+    let report = match engine.analyze(target) {
+        Ok(report) => report,
+        // The wallet is unloaded by now; dying by the signal stops an enclosing shell loop.
+        Err(error) if interrupts.answered_the_question() => {
+            eprintln!("error: {}", scan_error(error));
+            die_by_interrupt();
+        }
+        Err(error) => return Err(scan_error(error)),
+    };
 
     match opts.format.as_deref() {
         Some("text") | None => print_text_report(&report),
@@ -56,6 +99,221 @@ fn run_scan(args: &[String]) -> Result<bool, String> {
     }
 
     Ok(scan_succeeded(&report.summary))
+}
+
+/// The CLI reads its outputs from a file; "pasted" is the web and API's word.
+const UTXO_FILE_HISTORY: &str = "the history of the addresses of the outputs in the UTXO file";
+
+/// A stop at the history limit says how to scan anyway.
+fn scan_error(error: AnalysisError) -> String {
+    match error {
+        AnalysisError::HistoryTooLarge {
+            of,
+            tx_count,
+            limit,
+        } => {
+            let whose = match of {
+                HistoryOf::Wallet => "this scan's history",
+                HistoryOf::PastedAddresses => UTXO_FILE_HISTORY,
+            };
+            format!(
+                "{whose} holds {tx_count} transactions, more than the limit of {limit}; \
+                 loading it can take long and put a heavy load on the node; to scan it \
+                 anyway, pass --no-limits, or --max-txs with at least {tx_count}, higher if \
+                 the history may grow"
+            )
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Ends the process by SIGINT, as an unhandled Ctrl-C would, so a shell sees
+/// the signal (bash stops a loop only then); elsewhere it exits with 130.
+fn die_by_interrupt() -> ! {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{raise, signal, SigHandler, Signal};
+        // SAFETY: SIG_DFL installs no handler code, so nothing runs in signal context.
+        let _ = unsafe { signal(Signal::SIGINT, SigHandler::SigDfl) };
+        let _ = raise(Signal::SIGINT);
+    }
+    std::process::exit(130)
+}
+
+/// Installs the Ctrl-C handler unless SIGINT was ignored; says whether one is in place.
+fn install_interrupt_handler(sigint_ignored: bool, install: impl FnOnce() -> bool) -> bool {
+    !sigint_ignored && install()
+}
+
+/// The question is asked only where someone can both read it and answer it,
+/// with Ctrl-C there to answer no.
+fn should_ask(stdin_is_terminal: bool, stderr_is_terminal: bool, interruptible: bool) -> bool {
+    stdin_is_terminal && stderr_is_terminal && interruptible
+}
+
+/// Whether SIGINT was ignored when the process started.
+#[cfg(unix)]
+fn sigint_ignored() -> bool {
+    // nix only swaps a disposition; libc reads it without changing it.
+    let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+    // SAFETY: a null new action makes sigaction only write the current one.
+    let read = unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), current.as_mut_ptr()) };
+    // SAFETY: zeroed is a valid sigaction, filled in by the call when it succeeds.
+    read == 0 && unsafe { current.assume_init() }.sa_sigaction == libc::SIG_IGN
+}
+
+#[cfg(not(unix))]
+fn sigint_ignored() -> bool {
+    false
+}
+
+/// Whether this process is the terminal's foreground job; without a
+/// controlling terminal it is not.
+#[cfg(unix)]
+fn in_the_foreground() -> bool {
+    use nix::unistd::{getpgrp, tcgetpgrp};
+    tcgetpgrp(io::stdin()).is_ok_and(|foreground| foreground == getpgrp())
+}
+
+#[cfg(not(unix))]
+fn in_the_foreground() -> bool {
+    true
+}
+
+/// Drops what was typed on the terminal and not read yet.
+#[cfg(unix)]
+fn discard_typed_ahead() {
+    use nix::sys::termios::{tcflush, FlushArg};
+    let _ = tcflush(io::stdin(), FlushArg::TCIFLUSH);
+}
+
+#[cfg(not(unix))]
+fn discard_typed_ahead() {}
+
+/// Asks on `output` whether to load a history above the limit.
+fn show_question(of: HistoryOf, tx_count: u64, limit: u64, output: &mut impl Write) {
+    let whose = match of {
+        HistoryOf::Wallet => "This scan's history",
+        HistoryOf::PastedAddresses => {
+            "The history of the addresses of the outputs in the UTXO file"
+        }
+    };
+    let _ = write!(
+        output,
+        "{whose} holds {tx_count} transactions, more than the limit of {limit}. \
+         Loading it can take long and put a heavy load on the node. Go on? [y/N] "
+    );
+    let _ = output.flush();
+}
+
+/// Only a yes goes on.
+fn is_yes(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+enum Reply {
+    Answered { go_on: bool, line_ended: bool },
+    Interrupted,
+}
+
+/// Where the scan is, for Ctrl-C.
+#[derive(Debug, Default)]
+enum Moment {
+    #[default]
+    Scanning,
+    Asking(mpsc::Sender<Reply>),
+}
+
+/// Ctrl-C answers no while the question waits, else exits; the first of answer and interrupt wins.
+#[derive(Debug, Default)]
+struct Interrupts {
+    moment: Mutex<Moment>,
+    answered_no: AtomicBool,
+}
+
+impl Interrupts {
+    /// Whether the process should exit now.
+    fn interrupt(&self) -> bool {
+        let mut moment = self.moment();
+        match std::mem::take(&mut *moment) {
+            Moment::Asking(reply) => {
+                // Stored before the reply, so whoever reads the reply sees it.
+                self.answered_no.store(true, Ordering::Release);
+                let _ = reply.send(Reply::Interrupted);
+                false
+            }
+            Moment::Scanning => true,
+        }
+    }
+
+    /// Whether a Ctrl-C answered the question.
+    fn answered_the_question(&self) -> bool {
+        self.answered_no.load(Ordering::Acquire)
+    }
+
+    fn begin_asking(&self, reply: mpsc::Sender<Reply>) {
+        *self.moment() = Moment::Asking(reply);
+    }
+
+    /// Takes the question for the typed answer, unless an interrupt answered
+    /// first; says whether it did.
+    fn answer(&self) -> bool {
+        matches!(std::mem::take(&mut *self.moment()), Moment::Asking(_))
+    }
+
+    #[cfg(test)]
+    fn waiting_for_an_answer(&self) -> bool {
+        matches!(*self.moment(), Moment::Asking(_))
+    }
+
+    fn moment(&self) -> MutexGuard<'_, Moment> {
+        self.moment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// An asker that writes the question to `output()` and reads the answer from
+/// `input()`, or takes an interrupt as a no.
+fn terminal_ask<R: BufRead, W: Write>(
+    input: impl Fn() -> R + Send + Sync + 'static,
+    output: impl Fn() -> W + Send + Sync + 'static,
+    interrupts: Arc<Interrupts>,
+    in_the_foreground: impl Fn() -> bool + Send + Sync + 'static,
+    discard_typed_ahead: impl Fn() + Send + Sync + 'static,
+) -> AskToGoOn {
+    let input = Arc::new(input);
+    Arc::new(move |of, tx_count, limit| {
+        // Checked after the rescan: a background job reading the terminal gets SIGTTIN.
+        if !in_the_foreground() {
+            return false;
+        }
+        // Keys pressed during the long rescan must not answer a question not yet asked.
+        discard_typed_ahead();
+        let (reply, answer) = mpsc::channel();
+        interrupts.begin_asking(reply.clone());
+        show_question(of, tx_count, limit, &mut output());
+        let (input, reader) = (Arc::clone(&input), Arc::clone(&interrupts));
+        // Read apart so an interrupt can answer instead; a read left blocked ends with the process.
+        thread::spawn(move || {
+            let mut line = String::new();
+            let _ = input().read_line(&mut line);
+            let go_on = is_yes(&line);
+            if reader.answer() {
+                let line_ended = line.ends_with('\n');
+                let _ = reply.send(Reply::Answered { go_on, line_ended });
+            }
+        });
+        let (go_on, line_ended) = match answer.recv() {
+            Ok(Reply::Answered { go_on, line_ended }) => (go_on, line_ended),
+            _ => (false, false),
+        };
+        // A Ctrl-C or Ctrl-D ends no line, so the error would follow the question.
+        if !line_ended {
+            let _ = writeln!(output());
+        }
+        go_on
+    })
 }
 
 /// Nothing was analyzed and nothing was reported. Findings alongside zero
@@ -108,6 +366,8 @@ struct ScanOpts {
     rpc_cookie: Option<PathBuf>,
     format: Option<String>,
     cache_wallet: bool,
+    max_txs: Option<u64>,
+    no_limits: bool,
 }
 
 impl ScanOpts {
@@ -158,8 +418,21 @@ impl ScanOpts {
         Ok(EngineSettings {
             ownership_descriptors: self.ownership_descriptors()?,
             persist_scan_wallet: self.cache_wallet,
+            history_limit: self.history_limit(None),
             ..EngineSettings::default()
         })
+    }
+
+    /// In a terminal a history above the limit is asked about; elsewhere it stops the scan.
+    /// `ask` decides above the limit; without it the scan stops there.
+    fn history_limit(&self, ask: Option<AskToGoOn>) -> HistoryLimit {
+        if self.no_limits {
+            return HistoryLimit::unlimited();
+        }
+        HistoryLimit {
+            ask,
+            ..HistoryLimit::at_most(self.max_txs.unwrap_or(DEFAULT_MAX_WALLET_TXS))
+        }
     }
 
     fn ownership_descriptors(&self) -> Result<Vec<String>, String> {
@@ -201,11 +474,24 @@ fn parse_scan_args(args: &[String]) -> Result<ScanOpts, String> {
             "--cache-wallet" => {
                 opts.cache_wallet = true;
             }
+            "--max-txs" => {
+                let value = take_value(args, &mut i, "--max-txs")?;
+                let max_txs = value
+                    .parse()
+                    .map_err(|_| format!("--max-txs takes a whole number, not '{value}'"))?;
+                opts.max_txs = Some(max_txs);
+            }
+            "--no-limits" => {
+                opts.no_limits = true;
+            }
             other => return Err(format!("unknown flag '{other}'")),
         }
         i += 1;
     }
 
+    if opts.max_txs.is_some() && opts.no_limits {
+        return Err("--max-txs cannot be combined with --no-limits".to_owned());
+    }
     Ok(opts)
 }
 
@@ -523,36 +809,55 @@ fn finding_line(f: &Finding) -> String {
 }
 
 fn print_usage() {
-    eprintln!("stealth-cli – Bitcoin UTXO privacy vulnerability scanner\n");
-    eprintln!("USAGE:");
-    eprintln!("  stealth-cli scan [OPTIONS]\n");
-    eprintln!("SCAN INPUT (one required, mutually exclusive):");
-    eprintln!("  --descriptor <DESC>      Output descriptor OR bare extended public key");
-    eprintln!("  --descriptors <FILE>     JSON array of descriptors");
-    eprintln!("  --utxos <FILE>           JSON array of {{txid,vout,...}}");
-    eprintln!("                           May be combined with --descriptors, which then");
-    eprintln!("                           act as ownership context for the analysis\n");
-    eprintln!("DESCRIPTOR OPTIONS:");
-    eprintln!("  --cache-wallet           Keep a persistent watch-only wallet keyed to");
-    eprintln!("                           the descriptors so repeat scans skip the full");
-    eprintln!("                           rescan (default: off, wallet is discarded).");
-    eprintln!("                           Trade-off: this writes the viewing key (xpub)");
-    eprintln!("                           into Core's wallet DB in plaintext and leaves a");
-    eprintln!("                           durable _stealth_cache_<hash> wallet revealing");
-    eprintln!("                           the descriptors were scanned. Use only on a");
-    eprintln!("                           node you trust.\n");
-    eprintln!("RPC CONNECTION:");
-    eprintln!("  --rpc-url <URL>          bitcoind RPC endpoint");
-    eprintln!("  --rpc-user <USER>        RPC username");
-    eprintln!("  --rpc-cookie <PATH>      Path to .cookie file (recommended)\n");
-    eprintln!("  Env vars: STEALTH_RPC_URL, STEALTH_RPC_USER,");
-    eprintln!("            STEALTH_RPC_PASS, STEALTH_RPC_COOKIE\n");
-    eprintln!("OUTPUT:");
-    eprintln!("  --format <text|json>     Output format (default: text)\n");
-    eprintln!("EXIT CODES:");
-    eprintln!("  0  scan completed, no findings");
-    eprintln!("  1  scan completed, findings present");
-    eprintln!("  2  error");
+    eprint!("{}", usage());
+}
+
+fn usage() -> String {
+    [
+        "stealth-cli – Bitcoin UTXO privacy vulnerability scanner\n",
+        "USAGE:",
+        "  stealth-cli scan [OPTIONS]\n",
+        "SCAN INPUT (one required, mutually exclusive):",
+        "  --descriptor <DESC>      Output descriptor OR bare extended public key",
+        "  --descriptors <FILE>     JSON array of descriptors",
+        "  --utxos <FILE>           JSON array of {txid,vout,...}",
+        "                           May be combined with --descriptors, which then",
+        "                           act as ownership context for the analysis\n",
+        "DESCRIPTOR OPTIONS:",
+        "  --cache-wallet           Keep a persistent watch-only wallet keyed to",
+        "                           the descriptors so repeat scans skip the full",
+        "                           rescan (default: off, wallet is discarded).",
+        "                           Trade-off: this writes the viewing key (xpub)",
+        "                           into Core's wallet DB in plaintext and leaves a",
+        "                           durable _stealth_cache_<hash> wallet revealing",
+        "                           the descriptors were scanned. Use only on a",
+        "                           node you trust.\n",
+        "HISTORY LIMIT:",
+        "  --max-txs <N>            Stop before loading a history of more than N",
+        "                           transactions (default: 5000): this scan's history,",
+        "                           or in UTXO mode, the history of the addresses of",
+        "                           the outputs in the UTXO file. Loading a large",
+        "                           history can take long and put a heavy load on the",
+        "                           node. The scan asks whether to go on instead of",
+        "                           stopping, but only when run in the foreground",
+        "                           with stdin and stderr on a terminal and Ctrl-C",
+        "                           not ignored; Ctrl-C there counts as no.",
+        "  --no-limits              Lift the limit\n",
+        "RPC CONNECTION:",
+        "  --rpc-url <URL>          bitcoind RPC endpoint",
+        "  --rpc-user <USER>        RPC username",
+        "  --rpc-cookie <PATH>      Path to .cookie file (recommended)\n",
+        "  Env vars: STEALTH_RPC_URL, STEALTH_RPC_USER,",
+        "            STEALTH_RPC_PASS, STEALTH_RPC_COOKIE\n",
+        "OUTPUT:",
+        "  --format <text|json>     Output format (default: text)\n",
+        "EXIT CODES:",
+        "  0  scan completed, no findings",
+        "  1  scan completed, findings present",
+        "  2  error",
+    ]
+    .join("\n")
+        + "\n"
 }
 
 #[cfg(test)]
