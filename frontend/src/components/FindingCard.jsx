@@ -85,10 +85,13 @@ function DetailsPanel({ details }) {
   const addrFields = [
     'our_addresses', 'change_outputs', 'received_outputs',
     'dust_inputs', 'normal_inputs', 'tainted_inputs', 'clean_inputs', 'inputs',
+    'linking_input_addresses',
   ]
   for (const f of addrFields) {
     if (Array.isArray(details[f]) && details[f].length) {
-      parts.push(<AddrGroup key={f} label={f.replace(/_/g, ' ')} items={details[f]} />)
+      // Some fields list bare address strings rather than address objects.
+      const items = details[f].map((item) => (typeof item === 'string' ? { address: item } : item))
+      parts.push(<AddrGroup key={f} label={f.replace(/_/g, ' ')} items={items} />)
       skip.add(f)
     }
   }

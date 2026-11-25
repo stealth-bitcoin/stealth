@@ -696,6 +696,133 @@ fn a_utxo_scan_owned_only_by_addresses_is_partial() {
     );
 }
 
+/// The only Dust finding of `report`, which must be there.
+fn dust_finding(report: &stealth_engine::Report) -> &stealth_engine::Finding {
+    let dust: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.vulnerability_type == VulnerabilityType::Dust)
+        .collect();
+    assert_eq!(dust.len(), 1, "{:?}", report.findings);
+    dust[0]
+}
+
+fn details_of<'a>(finding: &'a stealth_engine::Finding, key: &str) -> &'a serde_json::Value {
+    &finding.details.as_ref().expect("details")[key]
+}
+
+#[test]
+fn a_payout_leaving_change_under_1000_sats_is_own_change_not_received_dust() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let a = alice.new_address().unwrap();
+    let change = change_address(&alice);
+    let coin = fund_coins_at(&node, &alice, vec![a.clone()], 100_000);
+    spend_raw(
+        &node,
+        &alice,
+        &coin,
+        &[
+            Output::new(bob.new_address().unwrap(), Amount::from_sat(89_400)),
+            Output::new(change.clone(), Amount::from_sat(600)),
+        ],
+        &da,
+    );
+
+    let gateway = gateway_for(&node);
+    let report = scan_wallet(&gateway, "alice");
+    let dust = dust_finding(&report);
+    assert_eq!(dust.severity, stealth_engine::Severity::Low, "{dust:?}");
+    assert_eq!(details_of(dust, "origin"), "own_change", "{dust:?}");
+    assert_eq!(
+        details_of(dust, "linking_input_addresses"),
+        &serde_json::json!([a.to_string()])
+    );
+    assert!(
+        dust.description
+            .contains("small change of your own spend in TX "),
+        "{}",
+        dust.description
+    );
+    assert_dust_advice(
+        &report,
+        VulnerabilityType::Dust,
+        "If it is a remainder, next time let a remainder this small go to the fee, or leave it \
+         in the payment instead of splitting it off as change; if it carries an inscription or \
+         runes, or is a CoinJoin output, keep it as its own coin.",
+    );
+
+    // A scan of the change address alone cannot tell whose coin it spent.
+    let report = AnalysisEngine::new(&gateway, EngineSettings::default())
+        .analyze(ScanTarget::Descriptor(format!("addr({change})")))
+        .unwrap();
+    let dust = dust_finding(&report);
+    // Received dust keeps its severity: the scan cannot tell Alice's spend from a sender's.
+    assert_eq!(dust.severity, stealth_engine::Severity::Medium, "{dust:?}");
+    assert_eq!(
+        details_of(dust, "origin"),
+        "possibly_own_change",
+        "{dust:?}"
+    );
+    assert!(
+        dust.description.contains(
+            &format!("at {a} are yours, this is small change of your own spend; it is already linked to that chain")
+        ),
+        "{}",
+        dust.description
+    );
+    assert_dust_advice(
+        &report,
+        VulnerabilityType::Dust,
+        "spending it with your other coins links your other addresses to this one",
+    );
+    let correction = dust.correction.as_deref().unwrap_or_default();
+    assert!(!correction.contains("change"), "{correction}");
+}
+
+#[test]
+fn a_600_sat_payment_from_another_wallet_is_received_dust() {
+    let node = node();
+    let da = node.client.new_address().unwrap();
+    mine(&node, 110, &da);
+    let alice = node.create_wallet("alice").unwrap();
+    let bob = node.create_wallet("bob").unwrap();
+    let coin = fund_coins(&node, &bob, 1, 100_000);
+    let to_alice = alice.new_address().unwrap();
+    spend_raw(
+        &node,
+        &bob,
+        &coin,
+        &[
+            Output::new(to_alice.clone(), Amount::from_sat(600)),
+            Output::new(change_address(&bob), Amount::from_sat(89_400)),
+        ],
+        &da,
+    );
+
+    let report = scan_wallet(&gateway_for(&node), "alice");
+    let dust = dust_finding(&report);
+    assert_eq!(dust.severity, stealth_engine::Severity::Medium, "{dust:?}");
+    assert_eq!(details_of(dust, "origin"), "received", "{dust:?}");
+    assert!(
+        dust.description.starts_with("Dust UTXO")
+            && dust
+                .description
+                .ends_with("(600 sats, dust-class, unspent)"),
+        "{}",
+        dust.description
+    );
+    assert!(details_of(dust, "linking_input_addresses").is_null());
+    assert_dust_advice(
+        &report,
+        VulnerabilityType::Dust,
+        "spending it with your other coins links your other addresses to this one",
+    );
+}
+
 // ─── 13. Dust Attack Detection ─────────────────────────────────────────────
 //
 // Dust-attack detection is folded into the Dust detector: when a dust

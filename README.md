@@ -103,7 +103,7 @@ Stealth currently runs **16 detectors** in `stealth-engine`.
 | --- | ------------------------ | ---------------- | ------------------------------------------------------ |
 | 1   | `ADDRESS_REUSE`          | HIGH             | Same receive address used across multiple transactions |
 | 2   | `CIOH`                   | HIGH - CRITICAL  | Multi-input ownership linkage                          |
-| 3   | `DUST`                   | LOW - CRITICAL   | Dust outputs received/spent (escalated to CRITICAL when the parent matches a dust-attack pattern) |
+| 3   | `DUST`                   | LOW - CRITICAL   | Dust outputs received/spent (escalated to CRITICAL when the parent matches a dust-attack pattern; LOW when the parent spends a non-dust coin the scan knows is yours, so the coin is your small change; dust moved on its own keeps the origin of the dust it came from; a CoinJoin-shaped parent's small output stays received dust) |
 | 4   | `DUST_SPENDING`          | MEDIUM - HIGH (MEDIUM only for possible ties in partial scans) | Dust merged with normal inputs |
 | 5   | `CHANGE_DETECTION`       | MEDIUM           | Identifiable change output patterns                    |
 | 6   | `CONSOLIDATION`          | MEDIUM           | Consolidation transactions linking clusters            |
