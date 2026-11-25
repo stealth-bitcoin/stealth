@@ -22,7 +22,8 @@ fn scan_descriptors_derives_addresses_for_unranged_addr_descriptor() {
     let gateway = gateway_for(&node);
     let desc = gateway
         .normalize_descriptor(&format!("addr({aa})"))
-        .expect("normalize addr descriptor");
+        .expect("normalize addr descriptor")
+        .remove(0);
     let resolved = ResolvedDescriptor {
         desc,
         internal: false,

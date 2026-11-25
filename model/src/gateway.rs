@@ -17,7 +17,9 @@ use crate::types::{serde_addr, serde_addr_opt, serde_addr_set};
 /// domain logic from the concrete RPC transport, making it possible to
 /// test with mocks.
 pub trait BlockchainGateway {
-    fn normalize_descriptor(&self, descriptor: &str) -> Result<String, AnalysisError>;
+    /// The canonical form of `descriptor`, or of each single-path
+    /// descriptor a multipath one (`/<0;1>/*`) expands to, in order.
+    fn normalize_descriptor(&self, descriptor: &str) -> Result<Vec<String>, AnalysisError>;
     fn derive_addresses(
         &self,
         descriptor: &ResolvedDescriptor,
@@ -87,7 +89,7 @@ impl<T> DescriptorNormalizer for T
 where
     T: BlockchainGateway + ?Sized,
 {
-    fn normalize(&self, descriptor: &str) -> Result<String, AnalysisError> {
+    fn normalize(&self, descriptor: &str) -> Result<Vec<String>, AnalysisError> {
         self.normalize_descriptor(descriptor)
     }
 }

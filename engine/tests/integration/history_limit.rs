@@ -190,7 +190,8 @@ fn a_utxo_scan_the_node_will_not_count_keeps_its_address_history() {
             &[stealth_engine::gateway::ResolvedDescriptor {
                 desc: gateway
                     .normalize_descriptor(&format!("addr({aa})"))
-                    .expect("normalize"),
+                    .expect("normalize")
+                    .remove(0),
                 internal: false,
                 active: false,
                 range_end: 0,

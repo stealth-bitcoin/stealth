@@ -18,6 +18,7 @@ mod dust;
 mod gateway;
 mod history_limit;
 mod linkage;
+mod multipath;
 mod origins;
 mod progress;
 mod scanning;

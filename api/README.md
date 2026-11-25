@@ -121,7 +121,7 @@ Accepts one mutually-exclusive source:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `descriptor` | `string` | Single output descriptor |
+| `descriptor` | `string` | Single output descriptor; a multipath one (`/<0;1>/*`) is scanned as all of its paths |
 | `descriptors` | `string[]` | Multiple descriptors |
 | `utxos` | `UtxoInput[]` | Raw UTXO set |
 | `cache_wallet` | `bool` | Optional, default `false`. Keep a watch-only wallet named after the descriptors on the node so repeat scans only pay Core's incremental catch-up. The viewing key stays in the node's wallet directory until removed by hand. |

@@ -129,7 +129,7 @@ Stealth currently runs **16 detectors** in `stealth-engine`.
 ## How to use the frontend
 
 1. Run and open the application
-2. Paste a wallet descriptor (`wpkh(...)`, `tr(...)`, etc.)
+2. Paste a wallet descriptor (`wpkh(...)`, `tr(...)`, etc.); a multipath one such as `wpkh(xpub.../<0;1>/*)` covers both its receive and change chains
 3. Click **Analyze**
 4. Review:
    - Findings and warnings

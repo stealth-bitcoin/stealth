@@ -485,8 +485,8 @@ mod tests {
         }
 
         impl BlockchainGateway for LargeHistory {
-            fn normalize_descriptor(&self, descriptor: &str) -> Result<String, AnalysisError> {
-                Ok(descriptor.to_owned())
+            fn normalize_descriptor(&self, descriptor: &str) -> Result<Vec<String>, AnalysisError> {
+                Ok(vec![descriptor.to_owned()])
             }
 
             fn derive_addresses(
